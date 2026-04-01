@@ -15,6 +15,7 @@ import asyncio
 import ipaddress
 import logging
 import os
+import re
 
 from fastapi import FastAPI, Request, HTTPException, Depends, Header
 from fastapi.responses import HTMLResponse
@@ -41,6 +42,30 @@ app = FastAPI(title="WARP Relay Panel", version="2.0.0")
 def require_api_key(x_api_key: str = Header(...)):
     if x_api_key != os.environ.get("API_KEY", ""):
         raise HTTPException(403, "Invalid API key")
+
+
+# ═══════════════════════════════════════
+# BOT DETECTION
+# ═══════════════════════════════════════
+
+# Паттерны User-Agent известных ботов/краулеров, которые
+# делают запросы для генерации превью ссылок (Telegram, WhatsApp,
+# Discord, Twitter/X, Slack, Facebook и т.д.)
+_BOT_PATTERNS = re.compile(
+    r"(TelegramBot|TwitterBot|Twitterbot|facebookexternalhit|"
+    r"Facebot|WhatsApp|Slackbot|slack-imgproxy|LinkedInBot|"
+    r"Discordbot|Googlebot|bingbot|YandexBot|Mail\.RU_Bot|"
+    r"PetalBot|Applebot|Bytespider|GPTBot|CCBot|"
+    r"bot|crawl|spider|preview|embed)",
+    re.IGNORECASE,
+)
+
+
+def _is_bot(user_agent: str) -> bool:
+    """Определяет, является ли запрос от бота/краулера."""
+    if not user_agent:
+        return True  # Нет UA — скорее всего не браузер
+    return bool(_BOT_PATTERNS.search(user_agent))
 
 
 # ═══════════════════════════════════════
@@ -121,6 +146,16 @@ TMPL_ERROR = """<!DOCTYPE html>
   <p class="hint">Обратитесь к администратору.</p>
 </div></body></html>"""
 
+# Минимальная страница-заглушка для ботов: отдаём OG-мета для красивого
+# превью, но без активации. Можно настроить текст/картинку.
+TMPL_BOT = """<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta property="og:title" content="WARP Relay — Активация">
+<meta property="og:description" content="Нажмите на ссылку для активации доступа к VPN">
+<meta property="og:type" content="website">
+<title>WARP Relay</title></head>
+<body></body></html>"""
+
 ERROR_MAP = {
     "invalid_token": ("Неверная ссылка", "Ссылка активации недействительна."),
     "blocked": ("Доступ заблокирован", "Ваш аккаунт заблокирован."),
@@ -147,6 +182,13 @@ def _error_html(key: str, status: int = 403) -> HTMLResponse:
 async def activate(token: str, request: Request):
     """Клиент переходит по этой ссылке из Telegram-бота."""
 
+    user_agent = request.headers.get("User-Agent", "")
+
+    # ── Блокируем ботов (Telegram preview, Twitter cards и т.д.) ──
+    if _is_bot(user_agent):
+        logger.info("Bot blocked: token=%s...%s ua=%s", token[:6], token[-4:], user_agent[:80])
+        return HTMLResponse(TMPL_BOT, status_code=200)
+
     # Определяем реальный IP
     client_ip = (
         request.headers.get("X-Real-IP")
@@ -167,7 +209,6 @@ async def activate(token: str, request: Request):
         logger.error("Invalid IP: %s", client_ip)
         return _error_html("invalid_ip", 400)
 
-    user_agent = request.headers.get("User-Agent", "")
     logger.info("Activate: token=%s...%s ip=%s", token[:6], token[-4:], client_ip)
 
     # Активация в БД
