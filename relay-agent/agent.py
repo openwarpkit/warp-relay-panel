@@ -120,14 +120,13 @@ async def whitelist_remove(data: IPRequest):
 
 @app.post("/whitelist/sync")
 async def whitelist_sync(data: SyncRequest):
-    """Полная синхронизация: пересоздать ipset с нуля."""
+    """Полная синхронизация: очистить ipset и добавить все IP заново."""
     # Валидация всех IP
     valid_ips = [ip for ip in data.ips if _valid_ip(ip)]
     invalid = [ip for ip in data.ips if not _valid_ip(ip)]
 
-    # Пересоздаём ipset
-    _run(f"ipset destroy {IPSET_NAME} 2>/dev/null")
-    _run(f"ipset create {IPSET_NAME} hash:ip", check=True)
+    _run(f"ipset create {IPSET_NAME} hash:ip 2>/dev/null")
+    _run(f"ipset flush {IPSET_NAME}", check=True)
 
     for ip in valid_ips:
         _run(f"ipset add {IPSET_NAME} {ip}")
