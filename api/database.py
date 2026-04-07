@@ -63,11 +63,11 @@ def count_clients_on_ip(ip: str, exclude_client_id: int | None = None) -> int:
     Сколько ДРУГИХ незаблокированных клиентов сидят на этом IP.
     Используется для защиты от удаления общего IP.
     """
-    ip_hash = hash_ip(ip)
+    ip_h = hash_ip(ip)
     query = (
         _db().table("clients")
         .select("id", count="exact")
-        .eq("current_ip_hash", ip_hash)
+        .eq("current_ip_hash", ip_h)
         .eq("is_blocked", False)
     )
     if exclude_client_id is not None:
@@ -83,6 +83,11 @@ def activate_client(token: str, new_ip: str, user_agent: str = "") -> dict:
         return {"error": "invalid_token"}
     if client["is_blocked"]:
         return {"error": "blocked"}
+
+    # Проверка IP-бана
+    ban = get_ip_ban(new_ip)
+    if ban:
+        return {"error": "ip_banned", "reason": ban["reason"]}
 
     max_act = int(os.environ.get("MAX_ACTIVATIONS_PER_DAY", "10"))
     today = date.today().isoformat()
@@ -102,7 +107,6 @@ def activate_client(token: str, new_ip: str, user_agent: str = "") -> dict:
         return {"status": "already_active", "client_id": client["id"], "new_ip": new_ip}
 
     # Проверяем: есть ли ещё кто-то на old_ip?
-    # Если да — не передаём old_ip на удаление с relay
     old_ip_shared = False
     if old_ip:
         others = count_clients_on_ip(old_ip, exclude_client_id=client["id"])
@@ -225,6 +229,106 @@ def _decrypt_client(row: dict) -> dict:
         "_reset_date": row.get("activations_reset_date"),
         "_raw_current_ip_enc": row.get("current_ip_enc"),
     }
+
+
+# ═══════════════════════════════════════
+# IP BLACKLIST
+# ═══════════════════════════════════════
+
+def add_ip_ban(ip: str, reason: str = "") -> dict:
+    """Добавить IP в чёрный список."""
+    ip_h = hash_ip(ip)
+
+    # Проверяем дубликат
+    existing = (
+        _db().table("ip_blacklist")
+        .select("id")
+        .eq("ip_hash", ip_h)
+        .execute()
+    )
+    if existing.data:
+        return {"id": existing.data[0]["id"], "already_exists": True}
+
+    result = _db().table("ip_blacklist").insert({
+        "ip_hash": ip_h,
+        "ip_enc": encrypt_ip(ip),
+        "reason": reason,
+    }).execute()
+
+    row = result.data[0]
+    return {"id": row["id"], "ip": ip, "reason": reason, "already_exists": False}
+
+
+def remove_ip_ban(ban_id: int) -> bool:
+    """Удалить IP из чёрного списка по ID записи."""
+    result = _db().table("ip_blacklist").delete().eq("id", ban_id).execute()
+    return len(result.data) > 0
+
+
+def remove_ip_ban_by_ip(ip: str) -> bool:
+    """Удалить IP из чёрного списка по самому IP."""
+    ip_h = hash_ip(ip)
+    result = _db().table("ip_blacklist").delete().eq("ip_hash", ip_h).execute()
+    return len(result.data) > 0
+
+
+def is_ip_banned(ip: str) -> bool:
+    """Быстрая проверка: забанен ли IP."""
+    ip_h = hash_ip(ip)
+    result = (
+        _db().table("ip_blacklist")
+        .select("id", count="exact")
+        .eq("ip_hash", ip_h)
+        .execute()
+    )
+    return (result.count or 0) > 0
+
+
+def get_ip_ban(ip: str) -> Optional[dict]:
+    """Получить запись бана по IP (или None)."""
+    ip_h = hash_ip(ip)
+    result = (
+        _db().table("ip_blacklist")
+        .select("*")
+        .eq("ip_hash", ip_h)
+        .execute()
+    )
+    if not result.data:
+        return None
+    row = result.data[0]
+    try:
+        decrypted_ip = decrypt_ip(row["ip_enc"])
+    except Exception:
+        decrypted_ip = "decrypt_error"
+    return {
+        "id": row["id"],
+        "ip": decrypted_ip,
+        "reason": row["reason"],
+        "created_at": row["created_at"],
+    }
+
+
+def list_ip_bans() -> list[dict]:
+    """Список всех забаненных IP."""
+    result = (
+        _db().table("ip_blacklist")
+        .select("*")
+        .order("created_at", desc=True)
+        .execute()
+    )
+    bans = []
+    for row in result.data:
+        try:
+            ip = decrypt_ip(row["ip_enc"])
+        except Exception:
+            ip = "decrypt_error"
+        bans.append({
+            "id": row["id"],
+            "ip": ip,
+            "reason": row["reason"],
+            "created_at": row["created_at"],
+        })
+    return bans
 
 
 # ═══════════════════════════════════════

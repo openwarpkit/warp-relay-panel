@@ -1,7 +1,9 @@
-# WARP Relay Panel v1.0.1
+# WARP Relay Panel v1.2.1
 
-Панель управления whitelist для WARP Relay серверов.
+Панель управления whitelist для WARP Relay серверов.  
 Бесплатный хостинг на **Vercel + Supabase**.
+
+---
 
 ## Архитектура
 
@@ -16,61 +18,52 @@ Telegram Bot  ──HTTP──▶  Vercel (FastAPI)  ──HTTP──▶  Relay 
 
 | Компонент | Где | Стоимость |
 |-----------|-----|-----------|
-| API-панель | Vercel serverless | Бесплатно (если соблюдать лимиты) |
+| API-панель | Vercel serverless | Бесплатно |
 | База данных | Supabase PostgreSQL | Бесплатно (500 MB) |
-| Relay Agent | На каждом relay-сервере | Платно |
-| Telegram Bot | Сервер | Платно |
+| Relay Agent | На каждом relay-сервере | VPS |
+| Telegram Bot | Сервер | VPS |
+
+---
 
 ## Быстрый старт
 
-### 1. Supabase
+### 1. Панель (Vercel + Supabase) — 5 минут
 
+**Supabase:**
 1. Создать проект на [supabase.com](https://supabase.com)
-2. Открыть **SQL Editor** → вставить содержимое `supabase_schema.sql` → Run
-3. Скопировать **Project URL** и **service_role key** (Settings → API)
+2. **SQL Editor** → вставить `supabase_schema.sql` → Run
+3. Скопировать **Project URL** и **service_role key**
 
-### 2. Vercel
+**Vercel — деплой одной кнопкой:**
 
-```bash
-# Клонировать / загрузить проект
-cd warp-relay-panel
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/openwarpkit/warp-relay-panel&repository-name=warp-relay-panel)
 
-# Установить Vercel CLI
-npm i -g vercel
+После деплоя → **Settings → Environment Variables** → задать:
 
-# Задеплоить
-vercel
+| Переменная | Значение |
+|------------|----------|
+| `SUPABASE_URL` | `https://xxx.supabase.co` |
+| `SUPABASE_KEY` | `eyJ...service-role-key...` |
+| `ENCRYPTION_KEY` | Сгенерировать: `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+| `API_KEY` | Любой секретный ключ для бота |
+| `AGENT_SECRET` | Общий секрет для relay-агентов |
+| `MAX_ACTIVATIONS_PER_DAY` | `10` (0 = без лимита) |
 
-# Задать переменные окружения (Vercel Dashboard → Settings → Environment Variables):
-# SUPABASE_URL=https://xxx.supabase.co
-# SUPABASE_KEY=eyJ...service-role-key...
-# ENCRYPTION_KEY=<python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())">
-# API_KEY=your-secret-api-key
-# AGENT_SECRET=your-agent-secret
-# MAX_ACTIVATIONS_PER_DAY=10
+→ **Redeploy** чтобы подхватить переменные.
 
-# Передеплоить с переменными
-vercel --prod
-```
-
-### 3. Каждый Relay-сервер
+### 2. Relay-сервер — 1 команда
 
 ```bash
-# Скопировать папку relay-agent на сервер
-scp -r relay-agent root@RELAY_IP:/tmp/
+ssh root@RELAY_IP
 
-# Запустить установку
-ssh root@RELAY_IP "bash /tmp/relay-agent/setup_relay.sh"
-
-# Скрипт спросит:
-#   Agent secret → тот же что в AGENT_SECRET на Vercel
-#   Agent port   → 7580 (по умолчанию)
-
-# Проверить
-ssh root@RELAY_IP 'curl -s http://localhost:7580/health | python3 -m json.tool'
+git clone https://github.com/openwarpkit/warp-relay-panel.git /opt/warp-relay-panel
+bash /opt/warp-relay-panel/relay-agent/setup_relay.sh
 ```
 
-### 4. Добавить relay в панель
+Скрипт спросит `Agent secret` (тот же что `AGENT_SECRET` на Vercel) и порт (по умолчанию 7580).  
+Автоматически настроит: timezone МСК, iptables, ipset, systemd, автовосстановление при перезагрузке.
+
+### 3. Добавить relay в панель
 
 ```bash
 PANEL="https://your-project.vercel.app"
@@ -79,25 +72,117 @@ KEY="your-api-key"
 curl -X POST ${PANEL}/api/relays \
   -H "X-API-Key: ${KEY}" \
   -H "Content-Type: application/json" \
-  -d '{
-    "name": "DE-Frankfurt",
-    "host": "1.2.3.4",
-    "agent_port": 7580,
-    "agent_secret": "your-agent-secret"
-  }'
+  -d '{"name": "FI-Helsinki", "host": "1.2.3.4", "agent_port": 7580}'
 ```
 
-### 5. Создать клиента
+### 4. Создать клиента
 
 ```bash
 curl -X POST ${PANEL}/api/clients \
   -H "X-API-Key: ${KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"label": "Иван", "note": "подписчик канала"}'
+  -d '{"label": "Иван", "note": "подписчик"}'
 
 # Ответ: {"id": 1, "token": "a1b2c3d4e5f67890", ...}
-# Ссылка активации: https://your-project.vercel.app/activate/a1b2c3d4e5f67890
+# Ссылка: https://your-project.vercel.app/activate/a1b2c3d4e5f67890
 ```
+
+### 5. Синхронизация
+
+```bash
+curl -X POST ${PANEL}/api/relays/sync-all -H "X-API-Key: ${KEY}"
+```
+
+---
+
+## Обновление relay-серверов
+
+Обновление работает через API (fire-and-forget): панель отправляет команду, агент подтверждает получение и обновляется в фоне.
+
+```bash
+# Обновить все relay:
+curl -X POST ${PANEL}/api/relays/update-all -H "X-API-Key: ${KEY}"
+
+# Обновить один:
+curl -X POST ${PANEL}/api/relays/{id}/update -H "X-API-Key: ${KEY}"
+```
+
+Ответ сразу сообщает какие relay приняли команду, а какие недоступны:
+```json
+{
+  "FI-Helsinki": {"accepted": true, "message": "Update started in background"},
+  "DE-Frankfurt": {"error": "[DE-Frankfurt] timeout: POST /update"}
+}
+```
+
+Проверить результат обновления — через `/health` каждого relay:
+```bash
+curl -X GET ${PANEL}/api/relays/{id}/health -H "X-API-Key: ${KEY}"
+# → "last_update": {"ok": true, "new_version": "1.2.1", "finished_at": "..."}
+```
+
+### Автовосстановление при перезагрузке
+
+При каждом запуске агент (через `ExecStartPre`) проверяет и восстанавливает ipset и iptables правила из сохранённых конфигов.
+
+<details>
+<summary><b>Ручная установка relay (без git)</b></summary>
+
+```bash
+scp -r relay-agent root@RELAY_IP:/tmp/
+ssh root@RELAY_IP "bash /tmp/relay-agent/setup_relay.sh"
+```
+
+В этом режиме обновление через API не работает — только вручную через scp.
+
+</details>
+
+<details>
+<summary><b>Ручной деплой Vercel (без кнопки)</b></summary>
+
+```bash
+cd warp-relay-panel
+npm i -g vercel
+vercel
+# Задать переменные в Dashboard → Settings → Environment Variables
+vercel --prod
+```
+
+</details>
+
+---
+
+## Безопасность
+
+### ENCRYPTION_KEY — критически важно
+
+`ENCRYPTION_KEY` используется для шифрования IP-адресов клиентов в базе данных (Fernet AES-128-CBC).
+
+> **⚠️ Если сменить `ENCRYPTION_KEY` — все ранее зашифрованные IP станут нечитаемыми.** Клиенты будут отображаться с ошибкой `decrypt_error`, активации продолжат работать (будут записываться новые IP с новым ключом), но история будет потеряна.
+
+**Правила:**
+- Сгенерировать один раз: `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
+- Сохранить в надёжном месте (password manager)
+- Никогда не менять после начала работы с клиентами
+- Не коммитить в git
+
+### Relay-агент
+
+Агент слушает на порту 7580 по HTTP. Защита:
+
+```bash
+# Если есть фиксированный IP панели:
+ufw allow from PANEL_IP to any port 7580
+ufw deny 7580
+```
+
+Если фиксированного IP нет (Vercel serverless) — защита через `AGENT_SECRET`.
+
+### Шифрование в базе
+
+Все IP-адреса хранятся зашифрованными (Fernet). Для поиска используется SHA-256 хэш. IP-бан лист тоже зашифрован. Даже при утечке базы — IP не раскрываются.
+
+---
 
 ## API
 
@@ -108,11 +193,14 @@ curl -X POST ${PANEL}/api/clients \
 | Метод | Путь | Описание |
 |-------|------|----------|
 | `POST` | `/api/clients` | Создать `{"label":"...", "note":"..."}` |
-| `GET` | `/api/clients` | Список всех |
+| `GET` | `/api/clients` | Список всех (`?include_blocked=false`) |
 | `GET` | `/api/clients/{id}` | Детали клиента |
 | `GET` | `/api/clients/{id}/logs` | История активаций |
+| `GET` | `/api/clients/{id}/traffic` | Трафик клиента со всех relay |
 | `PATCH` | `/api/clients/{id}/block` | Блокировать `{"blocked": true}` |
 | `DELETE` | `/api/clients/{id}` | Удалить (+ убрать IP с relay) |
+
+> **Общий IP:** при блокировке/удалении клиента IP удаляется с relay только если никто другой на этом IP не сидит.
 
 ### Relay-серверы
 
@@ -122,55 +210,62 @@ curl -X POST ${PANEL}/api/clients \
 | `GET` | `/api/relays` | Список |
 | `DELETE` | `/api/relays/{id}` | Удалить |
 | `PATCH` | `/api/relays/{id}/toggle` | Вкл/выкл `{"active": false}` |
-| `GET` | `/api/relays/{id}/health` | Здоровье relay (через agent) |
-| `GET` | `/api/relays/{id}/stats` | Статистика (клиенты, трафик) |
+| `GET` | `/api/relays/{id}/health` | Здоровье + `last_update` |
+| `GET` | `/api/relays/{id}/stats` | Статистика (клиенты, трафик, порты) |
+| `GET` | `/api/relays/{id}/traffic` | Потребление трафика по IP |
 | `POST` | `/api/relays/{id}/sync` | Синхронизировать whitelist |
+| `POST` | `/api/relays/{id}/update` | Обновить агент (fire-and-forget) |
 | `POST` | `/api/relays/sync-all` | Синхронизировать все relay |
+| `POST` | `/api/relays/update-all` | Обновить все relay |
 | `GET` | `/api/relays/health-all` | Проверить все relay |
 
-### Активация
+### IP-блэклист (хард-бан)
 
 | Метод | Путь | Описание |
 |-------|------|----------|
-| `GET` | `/activate/{token}` | Публичная ссылка (HTML-страница) |
+| `POST` | `/api/blacklist` | Забанить `{"ip":"1.2.3.4", "reason":"..."}` |
+| `GET` | `/api/blacklist` | Список всех банов |
+| `GET` | `/api/blacklist/check/{ip}` | Проверить IP |
+| `DELETE` | `/api/blacklist/{id}` | Разбанить по ID |
+| `DELETE` | `/api/blacklist/by-ip` | Разбанить `{"ip":"1.2.3.4"}` |
 
-### Прочее
+> **IP-бан** блокирует активацию для ЛЮБОГО клиента с этим IP. Клиенты не блокируются — могут активироваться с другого IP.
+
+### Трафик / Статистика / Активация
 
 | Метод | Путь | Описание |
 |-------|------|----------|
+| `GET` | `/api/traffic` | Трафик со всех relay (по IP) |
 | `GET` | `/api/stats` | Общая статистика |
+| `GET` | `/activate/{token}` | Активация по ссылке (публичный) |
 | `GET` | `/health` | Healthcheck |
+
+---
 
 ## Relay Agent API
 
-Работает на каждом relay-сервере. Все эндпоинты (кроме `/health`) требуют `X-Agent-Key`.
+Порт 7580. Все эндпоинты (кроме `/health`) требуют `X-Agent-Key`.
 
 | Метод | Путь | Описание |
 |-------|------|----------|
-| `POST` | `/whitelist/update` | `{"new_ip":"...", "old_ip":"..."}` |
+| `POST` | `/whitelist/update` | `{"new_ip":"...", "old_ip":"...", "client_id": 1}` |
 | `POST` | `/whitelist/remove` | `{"ip":"..."}` |
-| `POST` | `/whitelist/sync` | `{"ips":["..."]}` — полная синхронизация |
+| `POST` | `/whitelist/sync` | `{"clients":[{"ip":"...", "client_id": 1}]}` |
 | `GET` | `/whitelist/list` | Текущий ipset |
-| `GET` | `/health` | Система, conntrack, ipset (без авторизации) |
-| `GET` | `/stats` | Клиенты, порты, сессии |
+| `GET` | `/traffic` | Трафик по IP за месяц (сброс по МСК) |
+| `GET` | `/traffic/{ip}` | Конкретный IP + `clients_on_ip` |
+| `POST` | `/traffic/reset` | Принудительный сброс |
+| `GET` | `/health` | Система + `last_update` (без авторизации) |
+| `GET` | `/stats` | Клиенты, порты, сессии, трафик |
+| `GET` | `/refcount` | Маппинг IP → client_ids |
+| `POST` | `/update` | Самообновление (fire-and-forget) |
 
-## Безопасность relay-агента
+---
 
-Агент слушает на порту 7580 по HTTP. Рекомендуемая защита:
+## Интеграция с Telegram-ботом
 
-```bash
-# Ограничить доступ к порту агента только с определённых IP (если возможно)
-# Либо использовать firewall:
-ufw allow from PANEL_IP to any port 7580
-ufw deny 7580
-```
-
-Если фиксированного IP у панели нет (Vercel serverless) —
-защита только через `AGENT_SECRET` в заголовке.
-
-## Интеграция в Telegram-бота
-
-Пример для aiogram 3:
+<details>
+<summary><b>Пример для aiogram 3</b></summary>
 
 ```python
 import aiohttp
@@ -198,24 +293,63 @@ async def get_client_info(client_id: int) -> dict:
             headers=HEADERS,
         ) as resp:
             return await resp.json()
+
+async def ban_ip(ip: str, reason: str = "") -> dict:
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"{PANEL_URL}/api/blacklist",
+            headers=HEADERS,
+            json={"ip": ip, "reason": reason},
+        ) as resp:
+            return await resp.json()
 ```
+
+</details>
+
+---
 
 ## Структура проекта
 
 ```
 warp-relay-panel/
-├── api/                     # Vercel serverless
-│   ├── index.py             # FastAPI (роуты, активация)
-│   ├── database.py          # Supabase операции
-│   ├── relay_client.py      # HTTP-клиент для relay-агентов
-│   └── crypto.py            # Шифрование IP (Fernet)
-├── relay-agent/             # Ставится на каждый relay
-│   ├── agent.py             # FastAPI агент (ipset, stats)
-│   ├── setup_relay.sh       # Установка всего
+├── api/                        # Vercel serverless
+│   ├── index.py                # FastAPI (роуты, активация, блэклист)
+│   ├── database.py             # Supabase операции
+│   ├── relay_client.py         # HTTP-клиент для relay-агентов
+│   └── crypto.py               # Шифрование IP (Fernet)
+├── relay-agent/                # Ставится на каждый relay
+│   ├── agent.py                # FastAPI агент
+│   ├── setup_relay.sh          # Полная установка
+│   ├── update.sh               # Ручное обновление (fallback)
+│   ├── ensure_rules.sh         # Восстановление iptables/ipset
 │   ├── requirements.txt
 │   └── .env.example
-├── supabase_schema.sql      # SQL для создания таблиц
-├── vercel.json              # Конфигурация Vercel
-├── requirements.txt         # Python зависимости (Vercel)
-└── .env.example             # Переменные окружения
+├── supabase_schema.sql         # SQL для создания таблиц
+├── vercel.json                 # Конфигурация Vercel
+├── requirements.txt            # Python зависимости (Vercel)
+└── .env.example                # Переменные окружения
 ```
+
+---
+
+## Changelog
+
+### v1.2.1
+- Обновление relay через API (fire-and-forget, без таймаутов Vercel)
+- Статус последнего обновления в `/health` → `last_update`
+- Timezone МСК на всех relay (трафик сбрасывается по московскому времени)
+- Документация `ENCRYPTION_KEY`
+
+### v1.2.0
+- IP-блэклист (хард-бан по IP)
+- Защита общих IP (refcount на панели и агенте)
+- Мониторинг трафика по IP (conntrack accounting)
+- Фильтрация ботов (Telegram preview и др.)
+- Автовосстановление iptables/ipset при перезагрузке
+- Самообновление relay через API
+
+### v1.0.1
+- Исправлен `ipset destroy` → `ipset flush`
+
+### v1.0.0
+- Первый релиз
