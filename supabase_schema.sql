@@ -1,5 +1,5 @@
 -- ═══════════════════════════════════════
--- WARP Relay Panel — Supabase Schema
+-- WARP Relay Panel v1.2.0 — Supabase Schema
 -- Запустить в Supabase Dashboard → SQL Editor
 -- ═══════════════════════════════════════
 
@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS relays (
     name TEXT NOT NULL,
     host TEXT NOT NULL,            -- IP или домен relay
     agent_port INT NOT NULL DEFAULT 7580,
-    agent_secret TEXT NOT NULL DEFAULT '',  -- индивидуальный секрет (или общий)
+    agent_secret TEXT NOT NULL DEFAULT '',
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     is_synced BOOLEAN NOT NULL DEFAULT TRUE,
     last_health JSONB,            -- последний /health ответ
@@ -48,15 +48,27 @@ CREATE TABLE IF NOT EXISTS activation_log (
 CREATE INDEX IF NOT EXISTS idx_activation_log_client ON activation_log(client_id);
 CREATE INDEX IF NOT EXISTS idx_activation_log_date ON activation_log(created_at);
 
+-- IP-блэклист (хард-бан по IP)
+CREATE TABLE IF NOT EXISTS ip_blacklist (
+    id BIGSERIAL PRIMARY KEY,
+    ip_hash TEXT UNIQUE NOT NULL,  -- SHA-256 хэш для быстрого поиска
+    ip_enc TEXT NOT NULL,          -- Fernet-зашифрованный IP (для отображения)
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_ip_blacklist_hash ON ip_blacklist(ip_hash);
+
 -- ═══════════════════════════════════════
--- RLS (Row Level Security) — отключаем,
--- т.к. доступ только через service_role key
+-- RLS (Row Level Security)
+-- Доступ только через service_role key
 -- ═══════════════════════════════════════
 ALTER TABLE clients ENABLE ROW LEVEL SECURITY;
 ALTER TABLE relays ENABLE ROW LEVEL SECURITY;
 ALTER TABLE activation_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ip_blacklist ENABLE ROW LEVEL SECURITY;
 
--- Политика: service_role имеет полный доступ
 CREATE POLICY "Service role full access" ON clients FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Service role full access" ON relays FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Service role full access" ON activation_log FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Service role full access" ON ip_blacklist FOR ALL USING (true) WITH CHECK (true);
