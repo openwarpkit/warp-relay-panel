@@ -246,6 +246,10 @@ async def activate(token: str, request: Request):
         return _error_html(result["error"])
 
     if result["status"] == "already_active":
+        # Re-push IP на relay (идемпотентно).
+        # Покрывает кейс: IP был удалён с relay после бана/разбана,
+        # но в базе по-прежнему числится как текущий.
+        await relay_client.add_ip(client_ip, client_id=result["client_id"])
         return HTMLResponse(TMPL_SAME.format(style=_BASE_STYLE, ip=client_ip))
 
     old_ip = result.get("old_ip")
@@ -442,24 +446,16 @@ async def api_sync_all():
 async def api_health_all():
     return await relay_client.health_check_all()
 
-
-# ═══════════════════════════════════════
-# API: UPDATE RELAY-СЕРВЕРОВ
-# ═══════════════════════════════════════
-
 @app.post("/api/relays/{relay_id}/update", dependencies=[Depends(require_api_key)])
 async def api_update_relay(relay_id: int):
-    """Обновить один relay (git pull + restart)."""
     relays = list_relays()
     relay = next((r for r in relays if r["id"] == relay_id), None)
     if not relay:
         raise HTTPException(404, "Relay not found")
     return await relay_client.update_relay(relay)
 
-
 @app.post("/api/relays/update-all", dependencies=[Depends(require_api_key)])
 async def api_update_all_relays():
-    """Обновить все активные relay (git pull + restart)."""
     return await relay_client.update_all_relays()
 
 
