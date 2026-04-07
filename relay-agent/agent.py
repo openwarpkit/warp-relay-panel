@@ -40,7 +40,8 @@ TRAFFIC_INTERVAL = int(os.environ.get("TRAFFIC_INTERVAL", "30"))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("agent")
 
-app = FastAPI(title="WARP Relay Agent", version="1.1.0")
+version = "1.2.0"
+app = FastAPI(title="WARP Relay Agent", version=version)
 
 
 # ═══════════════════════════════════════
@@ -632,7 +633,7 @@ async def health():
 
     return {
         "status": "ok",
-        "version": "1.1.0",
+        "version": version,
         "uptime_seconds": int(time.time() - _START_TIME),
         "ip_forward": fwd == "1",
         "ipset_count": ipset_count,
