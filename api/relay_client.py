@@ -1,6 +1,5 @@
 """
 HTTP-клиент для relay-агентов.
-Все команды отправляются как HTTP-запросы.
 """
 
 import asyncio
@@ -12,6 +11,7 @@ from . import database as db
 logger = logging.getLogger("relay_client")
 
 AGENT_TIMEOUT = 10.0
+UPDATE_TIMEOUT = 60.0  # обновление может занять время (git pull, pip)
 
 
 def _validate_ipv4(ip: str) -> str:
@@ -33,10 +33,11 @@ def _agent_headers(relay: dict) -> dict:
 
 
 async def _agent_request(relay: dict, method: str, path: str,
-                         json_data: dict = None) -> tuple[bool, dict]:
+                         json_data: dict = None,
+                         timeout: float = AGENT_TIMEOUT) -> tuple[bool, dict]:
     url = f"{_agent_url(relay)}{path}"
     try:
-        async with httpx.AsyncClient(timeout=AGENT_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.request(
                 method, url,
                 headers=_agent_headers(relay),
@@ -64,11 +65,6 @@ async def _agent_request(relay: dict, method: str, path: str,
 
 async def add_ip(new_ip: str, old_ip: str | None = None,
                  client_id: int | None = None) -> dict:
-    """
-    Добавить/обновить IP на ВСЕХ активных relay.
-    old_ip=None если панель решила не удалять (shared IP).
-    client_id передаётся агенту для refcount.
-    """
     try:
         new_ip = _validate_ipv4(new_ip)
         if old_ip:
@@ -98,10 +94,8 @@ async def add_ip(new_ip: str, old_ip: str | None = None,
 
 
 async def remove_ip(ip: str) -> dict:
-    """Удалить IP со ВСЕХ активных relay."""
     if not ip:
         return {}
-
     try:
         ip = _validate_ipv4(ip)
     except ValueError:
@@ -120,10 +114,6 @@ async def remove_ip(ip: str) -> dict:
 
 
 async def full_sync(relay_id: int | None = None) -> dict:
-    """
-    Полная синхронизация: whitelist + refcount-маппинг.
-    Отправляет список {ip, client_id} для каждого активного клиента.
-    """
     clients = db.list_clients(include_blocked=False)
     client_entries = []
     for c in clients:
@@ -152,9 +142,7 @@ async def full_sync(relay_id: int | None = None) -> dict:
         )
         db.mark_relay_synced(relay["id"], ok)
         results[relay["name"]] = {
-            "ok": ok,
-            "ips_synced": len(client_entries) if ok else 0,
-            **data,
+            "ok": ok, "ips_synced": len(client_entries) if ok else 0, **data,
         }
 
     await asyncio.gather(*[_sync(r) for r in relays], return_exceptions=True)
@@ -178,14 +166,12 @@ async def get_relay_stats(relay: dict) -> dict:
 
 
 async def get_relay_traffic(relay: dict, client_ip: str | None = None) -> dict:
-    """Получить данные о трафике с relay-агента (по IP)."""
     path = f"/traffic/{client_ip}" if client_ip else "/traffic"
     ok, data = await _agent_request(relay, "GET", path)
     return {"ok": ok, "relay": relay["name"], **data}
 
 
 async def get_traffic_all_relays(client_ip: str | None = None) -> dict:
-    """Собрать трафик со ВСЕХ активных relay."""
     relays = db.get_active_relays()
     results = {}
 
@@ -206,4 +192,32 @@ async def health_check_all() -> dict:
         results[relay["name"]] = result
 
     await asyncio.gather(*[_check(r) for r in relays], return_exceptions=True)
+    return results
+
+
+# ═══════════════════════════════════════
+# UPDATE
+# ═══════════════════════════════════════
+
+async def update_relay(relay: dict) -> dict:
+    """Отправить команду самообновления на один relay."""
+    ok, data = await _agent_request(
+        relay, "POST", "/update", timeout=UPDATE_TIMEOUT,
+    )
+    return {"ok": ok, "relay": relay["name"], **data}
+
+
+async def update_all_relays() -> dict:
+    """Обновить все активные relay."""
+    relays = db.get_active_relays()
+    if not relays:
+        return {"error": "no_active_relays"}
+
+    results = {}
+
+    async def _update(relay):
+        result = await update_relay(relay)
+        results[relay["name"]] = result
+
+    await asyncio.gather(*[_update(r) for r in relays], return_exceptions=True)
     return results

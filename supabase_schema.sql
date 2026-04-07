@@ -1,5 +1,4 @@
 -- ═══════════════════════════════════════
--- WARP Relay Panel v1.2.0 — Supabase Schema
 -- Запустить в Supabase Dashboard → SQL Editor
 -- ═══════════════════════════════════════
 

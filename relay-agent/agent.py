@@ -2,13 +2,7 @@
 """
 — ipset whitelist с refcount-защитой общих IP
 — трафик по IP (для админского анализа)
-
-Refcount: агент знает сколько client_id сидят на каждом IP.
-  Даже если панель ошибётся — агент не удалит IP пока хоть
-  один клиент на нём остаётся.
-
-Трафик: conntrack byte counters по IP, хранится в traffic.json,
-  автосброс 1-го числа месяца.
+— самообновление через /update
 """
 
 import asyncio
@@ -33,6 +27,7 @@ AGENT_SECRET = os.environ.get("AGENT_SECRET", "change-me")
 AGENT_PORT = int(os.environ.get("AGENT_PORT", "7580"))
 IPSET_NAME = os.environ.get("IPSET_NAME", "warp_whitelist")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/opt/warp-relay-agent"))
+REPO_DIR = Path(os.environ.get("REPO_DIR", "/opt/warp-relay-panel"))
 TRAFFIC_FILE = DATA_DIR / "traffic.json"
 REFCOUNT_FILE = DATA_DIR / "refcount.json"
 TRAFFIC_INTERVAL = int(os.environ.get("TRAFFIC_INTERVAL", "30"))
@@ -40,8 +35,8 @@ TRAFFIC_INTERVAL = int(os.environ.get("TRAFFIC_INTERVAL", "30"))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("agent")
 
-version = "1.2.0"
-app = FastAPI(title="WARP Relay Agent", version=version)
+AGENT_VERSION = "1.2.0"
+app = FastAPI(title="WARP Relay Agent", version=AGENT_VERSION)
 
 
 # ═══════════════════════════════════════
@@ -80,9 +75,9 @@ def _valid_ip(ip: str) -> bool:
     return bool(_IP_RE.match(ip))
 
 
-def _run(cmd: str, check: bool = False) -> tuple[int, str, str]:
+def _run(cmd: str, check: bool = False, timeout: int = 10) -> tuple[int, str, str]:
     result = subprocess.run(
-        cmd, shell=True, capture_output=True, text=True, timeout=10,
+        cmd, shell=True, capture_output=True, text=True, timeout=timeout,
     )
     if check and result.returncode != 0:
         raise RuntimeError(f"Command failed: {cmd}\n{result.stderr}")
@@ -104,15 +99,6 @@ def _format_bytes(b: int) -> str:
 class RefCountMap:
     """
     IP → set(client_ids). Страховка от удаления общего IP.
-
-    Если два клиента (id=1, id=2) имеют один IP 1.2.3.4:
-      refcount["1.2.3.4"] = {1, 2}
-
-    При удалении клиента 2: refcount["1.2.3.4"] = {1}
-    IP остаётся в ipset, потому что refcount > 0.
-
-    При удалении клиента 1: refcount["1.2.3.4"] = {}
-    Теперь IP удаляется из ipset.
     """
 
     def __init__(self):
@@ -133,54 +119,38 @@ class RefCountMap:
     def _save(self):
         try:
             DATA_DIR.mkdir(parents=True, exist_ok=True)
-            # set → list для JSON
             data = {ip: sorted(cids) for ip, cids in self._map.items() if cids}
             REFCOUNT_FILE.write_text(json.dumps(data, indent=2))
         except Exception as e:
             logger.error("Could not save refcount: %s", e)
 
     def add(self, ip: str, client_id: int, old_ip: str | None = None) -> bool:
-        """
-        Клиент перешёл на новый IP.
-        Returns: True если old_ip можно безопасно удалить из ipset.
-        """
-        # Убираем клиента со старого IP
+        """Returns: True если old_ip можно безопасно удалить из ipset."""
         can_remove_old = False
         if old_ip and old_ip in self._map:
             self._map[old_ip].discard(client_id)
             if not self._map[old_ip]:
                 del self._map[old_ip]
                 can_remove_old = True
-
-        # Добавляем на новый
         self._map[ip].add(client_id)
         self._save()
         return can_remove_old
 
     def remove_client(self, ip: str, client_id: int | None = None) -> bool:
-        """
-        Удалить клиента с IP.
-        Если client_id=None — считаем что удаляем "по IP" без привязки.
-        Returns: True если IP можно безопасно удалить из ipset.
-        """
+        """Returns: True если IP можно безопасно удалить из ipset."""
         if ip not in self._map:
-            return True  # IP не в маппинге — безопасно удалять
-
+            return True
         if client_id is not None:
             self._map[ip].discard(client_id)
         else:
-            # Без client_id — удаляем весь IP
             self._map[ip].clear()
-
         can_remove = not self._map[ip]
         if can_remove:
             del self._map[ip]
-
         self._save()
         return can_remove
 
     def set_all(self, entries: list[tuple[str, int]]):
-        """Полная замена при sync."""
         self._map.clear()
         for ip, cid in entries:
             self._map[ip].add(cid)
@@ -201,11 +171,6 @@ refcount = RefCountMap()
 # ═══════════════════════════════════════
 
 class TrafficMonitor:
-    """
-    Трафик по IP для админского анализа.
-    conntrack byte counters, дельта каждые N секунд.
-    """
-
     def __init__(self):
         self.interval = TRAFFIC_INTERVAL
         self._last_conns: dict[tuple, tuple[int, int]] = {}
@@ -216,8 +181,6 @@ class TrafficMonitor:
         code, _, _ = _run("sysctl -w net.netfilter.nf_conntrack_acct=1 2>/dev/null")
         if code == 0:
             logger.info("conntrack accounting enabled")
-        else:
-            logger.warning("Could not enable conntrack accounting")
 
     def _load(self) -> dict:
         try:
@@ -259,43 +222,34 @@ class TrafficMonitor:
         code, stdout, _ = _run("conntrack -L -o extended -p udp 2>/dev/null")
         if code != 0 or not stdout:
             return {}, {}
-
         conns = {}
         conn_ips = {}
-
         for line in stdout.split("\n"):
             m = _CT_RE.search(line)
             if not m:
                 continue
-
             src1 = m.group(1)
             dst1 = m.group(2)
             sport1 = m.group(3)
             dport1 = m.group(4)
             bytes_orig = int(m.group(5))
             bytes_reply = int(m.group(10))
-
             if src1.startswith("162.159.") or src1.startswith("172."):
                 continue
             if dport1 == "22" or sport1 == "22":
                 continue
-
             key = (src1, dst1, sport1, dport1)
             conns[key] = (bytes_orig, bytes_reply)
             conn_ips[key] = src1
-
         return conns, conn_ips
 
     def collect(self):
         self._check_month_reset()
-
         current_conns, conn_ips = self._snapshot()
         now = datetime.now(timezone.utc).isoformat()
         changed = False
-
         for key, (orig_bytes, reply_bytes) in current_conns.items():
             ip = conn_ips[key]
-
             if key in self._last_conns:
                 prev_orig, prev_reply = self._last_conns[key]
                 delta_tx = max(0, orig_bytes - prev_orig)
@@ -303,16 +257,13 @@ class TrafficMonitor:
             else:
                 delta_tx = 0
                 delta_rx = 0
-
             if delta_tx > 0 or delta_rx > 0:
                 entry = self.traffic["ips"].setdefault(ip, {"tx": 0, "rx": 0})
                 entry["tx"] += delta_tx
                 entry["rx"] += delta_rx
                 entry["updated"] = now
                 changed = True
-
         self._last_conns = current_conns
-
         if changed:
             self._save()
 
@@ -324,25 +275,19 @@ class TrafficMonitor:
             "ips": {},
         }
         total_tx = total_rx = 0
-
         for ip, stats in self.traffic.get("ips", {}).items():
             tx = stats.get("tx", 0)
             rx = stats.get("rx", 0)
             total_tx += tx
             total_rx += rx
-            # Добавляем refcount — сколько клиентов на этом IP
             rc = refcount.count(ip)
             result["ips"][ip] = {
-                "tx_bytes": tx,
-                "rx_bytes": rx,
-                "total_bytes": tx + rx,
-                "tx_human": _format_bytes(tx),
-                "rx_human": _format_bytes(rx),
+                "tx_bytes": tx, "rx_bytes": rx, "total_bytes": tx + rx,
+                "tx_human": _format_bytes(tx), "rx_human": _format_bytes(rx),
                 "total_human": _format_bytes(tx + rx),
                 "clients_on_ip": rc,
                 "updated": stats.get("updated"),
             }
-
         result["total_tx_bytes"] = total_tx
         result["total_rx_bytes"] = total_rx
         result["total_bytes"] = total_tx + total_rx
@@ -360,13 +305,9 @@ class TrafficMonitor:
         rx = stats.get("rx", 0)
         rc = refcount.count(ip)
         return {
-            "ip": ip,
-            "month": self.traffic["month"],
-            "tx_bytes": tx,
-            "rx_bytes": rx,
-            "total_bytes": tx + rx,
-            "tx_human": _format_bytes(tx),
-            "rx_human": _format_bytes(rx),
+            "ip": ip, "month": self.traffic["month"],
+            "tx_bytes": tx, "rx_bytes": rx, "total_bytes": tx + rx,
+            "tx_human": _format_bytes(tx), "rx_human": _format_bytes(rx),
             "total_human": _format_bytes(tx + rx),
             "clients_on_ip": rc,
             "client_ids": sorted(refcount._map.get(ip, set())),
@@ -393,7 +334,6 @@ async def _traffic_collector_loop():
         traffic_monitor.collect()
     except Exception as e:
         logger.error("Traffic collector init error: %s", e)
-
     while True:
         await asyncio.sleep(traffic_monitor.interval)
         try:
@@ -433,31 +373,21 @@ class SyncRequest(BaseModel):
 
 @app.post("/whitelist/update")
 async def whitelist_update(data: IPUpdateRequest):
-    """
-    Добавить/обновить IP в whitelist.
-    Двойная защита: панель уже проверила shared IP,
-    агент дополнительно проверяет через refcount.
-    """
     if not _valid_ip(data.new_ip):
         raise HTTPException(400, f"Invalid new_ip: {data.new_ip}")
     if data.old_ip and not _valid_ip(data.old_ip):
         raise HTTPException(400, f"Invalid old_ip: {data.old_ip}")
 
     removed = None
-
     if data.client_id is not None:
-        # Обновляем refcount и проверяем можно ли удалять old_ip
         can_remove = refcount.add(data.new_ip, data.client_id, data.old_ip)
-
         if data.old_ip and can_remove:
             _run(f"ipset del {IPSET_NAME} {data.old_ip} 2>/dev/null")
             _run(f"conntrack -D -p udp -s {data.old_ip} 2>/dev/null")
             removed = data.old_ip
         elif data.old_ip and not can_remove:
-            rc = refcount.count(data.old_ip)
-            logger.info("Keeping %s in ipset (refcount=%d)", data.old_ip, rc)
+            logger.info("Keeping %s in ipset (refcount=%d)", data.old_ip, refcount.count(data.old_ip))
     else:
-        # Без client_id — старое поведение (удаляем old_ip если передан)
         if data.old_ip:
             _run(f"ipset del {IPSET_NAME} {data.old_ip} 2>/dev/null")
             _run(f"conntrack -D -p udp -s {data.old_ip} 2>/dev/null")
@@ -466,21 +396,16 @@ async def whitelist_update(data: IPUpdateRequest):
     _run(f"ipset add {IPSET_NAME} {data.new_ip} 2>/dev/null")
 
     return {
-        "added": data.new_ip,
-        "removed": removed,
-        "client_id": data.client_id,
-        "refcount": refcount.count(data.new_ip),
+        "added": data.new_ip, "removed": removed,
+        "client_id": data.client_id, "refcount": refcount.count(data.new_ip),
     }
 
 
 @app.post("/whitelist/remove")
 async def whitelist_remove(data: IPRequest):
-    """Удалить IP. Проверяет refcount — не удаляет если кто-то ещё использует."""
     if not _valid_ip(data.ip):
         raise HTTPException(400, f"Invalid ip: {data.ip}")
-
     can_remove = refcount.remove_client(data.ip)
-
     if can_remove:
         _run(f"ipset del {IPSET_NAME} {data.ip} 2>/dev/null")
         _run(f"conntrack -D -p udp -s {data.ip} 2>/dev/null")
@@ -493,14 +418,12 @@ async def whitelist_remove(data: IPRequest):
 
 @app.post("/whitelist/sync")
 async def whitelist_sync(data: SyncRequest):
-    """Полная синхронизация: ipset + refcount."""
     valid_entries = [e for e in data.clients if _valid_ip(e.ip)]
     invalid = [e.ip for e in data.clients if not _valid_ip(e.ip)]
 
     _run(f"ipset create {IPSET_NAME} hash:ip 2>/dev/null")
     _run(f"ipset flush {IPSET_NAME}", check=True)
 
-    # Собираем уникальные IP и обновляем refcount
     unique_ips = set()
     rc_entries = []
     for entry in valid_entries:
@@ -511,14 +434,9 @@ async def whitelist_sync(data: SyncRequest):
         _run(f"ipset add {IPSET_NAME} {ip}")
 
     refcount.set_all(rc_entries)
-
     _run("ipset save > /etc/ipset.rules 2>/dev/null")
 
-    return {
-        "synced": len(unique_ips),
-        "clients": len(valid_entries),
-        "invalid": invalid,
-    }
+    return {"synced": len(unique_ips), "clients": len(valid_entries), "invalid": invalid}
 
 
 @app.get("/whitelist/list")
@@ -526,7 +444,6 @@ async def whitelist_list():
     code, stdout, _ = _run(f"ipset list {IPSET_NAME} 2>/dev/null")
     if code != 0:
         return {"ips": [], "error": "ipset not found"}
-
     ips = []
     in_members = False
     for line in stdout.split("\n"):
@@ -535,30 +452,25 @@ async def whitelist_list():
             continue
         if in_members and line.strip():
             ips.append(line.strip())
-
     return {"ips": ips, "count": len(ips)}
 
 
 # ═══════════════════════════════════════
-# TRAFFIC ENDPOINTS (по IP)
+# TRAFFIC ENDPOINTS
 # ═══════════════════════════════════════
 
 @app.get("/traffic")
 async def traffic_all():
-    """Потребление трафика по всем IP за текущий месяц."""
     return traffic_monitor.get_all()
-
 
 @app.get("/traffic/{ip}")
 async def traffic_by_ip(ip: str):
-    """Потребление трафика конкретного IP."""
     if not _valid_ip(ip):
         raise HTTPException(400, f"Invalid IP: {ip}")
     result = traffic_monitor.get_ip(ip)
     if not result:
         return {
-            "ip": ip,
-            "month": traffic_monitor.traffic["month"],
+            "ip": ip, "month": traffic_monitor.traffic["month"],
             "tx_bytes": 0, "rx_bytes": 0, "total_bytes": 0,
             "tx_human": "0 B", "rx_human": "0 B", "total_human": "0 B",
             "clients_on_ip": refcount.count(ip),
@@ -567,22 +479,117 @@ async def traffic_by_ip(ip: str):
         }
     return result
 
-
 @app.post("/traffic/reset")
 async def traffic_reset():
-    """Принудительный сброс данных трафика."""
     traffic_monitor.reset()
     return {"ok": True, "month": traffic_monitor.traffic["month"]}
 
 
 # ═══════════════════════════════════════
-# REFCOUNT (для отладки)
+# REFCOUNT (отладка)
 # ═══════════════════════════════════════
 
 @app.get("/refcount")
 async def refcount_list():
-    """Текущий refcount-маппинг (IP → client_ids)."""
     return refcount.get_all()
+
+
+# ═══════════════════════════════════════
+# SELF-UPDATE
+# ═══════════════════════════════════════
+
+@app.post("/update")
+async def self_update():
+    """
+    Самообновление агента:
+    1. git pull в REPO_DIR
+    2. Копирование файлов в INSTALL_DIR
+    3. Обновление pip-зависимостей (если изменились)
+    4. Отложенный перезапуск через systemd (2 сек)
+    """
+    repo = str(REPO_DIR)
+    install = str(DATA_DIR)
+    agent_src = f"{repo}/relay-agent"
+    steps = []
+
+    # ── 1. Git pull ──
+    if not (REPO_DIR / ".git").exists():
+        return {"ok": False, "error": f"Git repo not found at {repo}",
+                "hint": "Install via: git clone <repo> /opt/warp-relay-panel"}
+
+    code, stdout, stderr = _run(f"cd {repo} && git pull --ff-only 2>&1", timeout=30)
+    if code != 0:
+        # Попытка без --ff-only
+        code, stdout, stderr = _run(f"cd {repo} && git pull 2>&1", timeout=30)
+
+    if code != 0:
+        return {"ok": False, "error": "git pull failed", "details": stdout or stderr}
+
+    already_up_to_date = "Already up to date" in stdout or "Already up-to-date" in stdout
+    steps.append({"git_pull": "no changes" if already_up_to_date else "updated"})
+
+    # Читаем новую версию из agent.py
+    new_version = AGENT_VERSION
+    try:
+        content = Path(f"{agent_src}/agent.py").read_text()
+        for line in content.split("\n"):
+            if "AGENT_VERSION" in line and "=" in line:
+                new_version = line.split("=")[1].strip().strip('"').strip("'")
+                break
+    except Exception:
+        pass
+
+    # ── 2. Копирование файлов ──
+    files_copied = []
+    for fname in ["agent.py", "ensure_rules.sh"]:
+        src = Path(f"{agent_src}/{fname}")
+        dst = Path(f"{install}/{fname}")
+        if src.exists():
+            try:
+                _run(f"cp {src} {dst}")
+                if fname.endswith(".sh"):
+                    _run(f"chmod +x {dst}")
+                files_copied.append(fname)
+            except Exception as e:
+                steps.append({"copy_error": f"{fname}: {e}"})
+
+    steps.append({"files_copied": files_copied})
+
+    # ── 3. Pip deps ──
+    req_src = Path(f"{agent_src}/requirements.txt")
+    req_dst = Path(f"{install}/requirements.txt")
+    deps_updated = False
+    if req_src.exists():
+        try:
+            src_content = req_src.read_text()
+            dst_content = req_dst.read_text() if req_dst.exists() else ""
+            if src_content != dst_content:
+                _run(f"cp {req_src} {req_dst}")
+                _run(f"{install}/venv/bin/pip install -q -r {req_dst}", timeout=60)
+                deps_updated = True
+        except Exception as e:
+            steps.append({"deps_error": str(e)})
+
+    steps.append({"deps_updated": deps_updated})
+
+    # ── 4. Перезапуск (отложенный) ──
+    # Запускаем в фоне через 2 секунды — чтобы HTTP-ответ успел уйти
+    subprocess.Popen(
+        ["bash", "-c", "sleep 2 && systemctl restart warp-relay-agent"],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    steps.append({"restart": "scheduled in 2s"})
+
+    logger.info("Self-update complete: %s → %s", AGENT_VERSION, new_version)
+
+    return {
+        "ok": True,
+        "old_version": AGENT_VERSION,
+        "new_version": new_version,
+        "steps": steps,
+    }
 
 
 # ═══════════════════════════════════════
@@ -599,23 +606,19 @@ async def health():
         fwd = Path("/proc/sys/net/ipv4/ip_forward").read_text().strip()
     except Exception:
         pass
-
     code, stdout, _ = _run(f"ipset list {IPSET_NAME} 2>/dev/null | grep -c '^[0-9]'")
     ipset_count = int(stdout) if code == 0 and stdout.isdigit() else 0
-
     ct_cur = ct_max = "0"
     try:
         ct_cur = Path("/proc/sys/net/netfilter/nf_conntrack_count").read_text().strip()
         ct_max = Path("/proc/sys/net/netfilter/nf_conntrack_max").read_text().strip()
     except Exception:
         pass
-
     load = "0"
     try:
         load = Path("/proc/loadavg").read_text().strip().split()[0]
     except Exception:
         pass
-
     mem_total = mem_used = 0
     try:
         with open("/proc/meminfo") as f:
@@ -628,21 +631,16 @@ async def health():
             mem_used = mem_total - mem_available
     except Exception:
         pass
-
     t = traffic_monitor.get_all()
-
     return {
         "status": "ok",
-        "version": version,
+        "version": AGENT_VERSION,
         "uptime_seconds": int(time.time() - _START_TIME),
         "ip_forward": fwd == "1",
         "ipset_count": ipset_count,
         "conntrack": f"{ct_cur}/{ct_max}",
         "load": float(load),
-        "memory_mb": {
-            "used": round(mem_used / 1024),
-            "total": round(mem_total / 1024),
-        },
+        "memory_mb": {"used": round(mem_used / 1024), "total": round(mem_total / 1024)},
         "traffic_month": t["month"],
         "traffic_total": t["total"],
         "traffic_ips": t["ip_count"],
@@ -656,12 +654,10 @@ async def stats():
         "grep -v '^162\\.159\\.' | sort -u"
     )
     unique_clients = [ip for ip in stdout.split("\n") if ip.strip()] if code == 0 else []
-
     _, ct_data, _ = _run("conntrack -L -p udp 2>/dev/null | grep -v 'dport=22'")
     ct_lines = ct_data.split("\n") if ct_data else []
     assured = sum(1 for l in ct_lines if "ASSURED" in l)
     unreplied = sum(1 for l in ct_lines if "UNREPLIED" in l)
-
     _, ports_raw, _ = _run(
         "conntrack -L -p udp 2>/dev/null | grep -oP 'dport=\\K[0-9]+' | "
         "sort | uniq -c | sort -rn | head -10"
@@ -673,7 +669,6 @@ async def stats():
             parts = line.split()
             if len(parts) == 2:
                 top_ports[parts[1]] = int(parts[0])
-
     _, iface, _ = _run("ip route | awk '/default/ {print $5; exit}'")
     speed = {}
     if iface:
@@ -683,7 +678,6 @@ async def stats():
             speed = {"interface": iface, "rx_bytes_total": rx1, "tx_bytes_total": tx1}
         except Exception:
             pass
-
     return {
         "unique_clients": len(unique_clients),
         "client_ips": unique_clients,
@@ -699,8 +693,8 @@ async def stats():
 # ═══════════════════════════════════════
 
 if __name__ == "__main__":
-    print(f"WARP Relay Agent v1.1.0 starting on :{AGENT_PORT}")
+    print(f"WARP Relay Agent v{AGENT_VERSION} starting on :{AGENT_PORT}")
     print(f"ipset: {IPSET_NAME}")
     print(f"Traffic: every {TRAFFIC_INTERVAL}s → {TRAFFIC_FILE}")
-    print(f"Refcount: {REFCOUNT_FILE}")
+    print(f"Repo: {REPO_DIR}")
     uvicorn.run(app, host="0.0.0.0", port=AGENT_PORT, log_level="info")

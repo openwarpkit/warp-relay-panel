@@ -7,6 +7,7 @@
   POST/GET/DELETE  /api/relays
   POST/GET/DELETE  /api/blacklist
   POST             /api/relays/sync-all
+  POST             /api/relays/update-all
   GET              /api/traffic
   GET              /api/stats
 """
@@ -239,7 +240,6 @@ async def activate(token: str, request: Request):
     result = activate_client(token, client_ip, user_agent)
 
     if "error" in result:
-        # Отдельная страница для IP-бана
         if result["error"] == "ip_banned":
             logger.warning("IP banned: %s reason=%s", client_ip, result.get("reason", ""))
             return _ip_banned_html(result.get("reason", ""))
@@ -252,7 +252,6 @@ async def activate(token: str, request: Request):
     new_ip = result["new_ip"]
     cid = result["client_id"]
 
-    # Если old_ip используется другими клиентами — НЕ удаляем с relay
     if result.get("old_ip_shared"):
         logger.info("Client #%d: %s → %s (old IP shared, keeping)", cid, old_ip, new_ip)
         old_ip = None
@@ -273,7 +272,6 @@ async def activate(token: str, request: Request):
 async def api_create_client(data: ClientCreate):
     return create_client_record(label=data.label, note=data.note)
 
-
 @app.get("/api/clients", dependencies=[Depends(require_api_key)])
 async def api_list_clients(include_blocked: bool = True):
     clients = list_clients(include_blocked=include_blocked)
@@ -282,7 +280,6 @@ async def api_list_clients(include_blocked: bool = True):
         c.pop("_reset_date", None)
         c.pop("_raw_current_ip_enc", None)
     return clients
-
 
 @app.get("/api/clients/{client_id}", dependencies=[Depends(require_api_key)])
 async def api_get_client(client_id: int):
@@ -293,7 +290,6 @@ async def api_get_client(client_id: int):
         client.pop(key, None)
     return client
 
-
 @app.get("/api/clients/{client_id}/logs", dependencies=[Depends(require_api_key)])
 async def api_client_logs(client_id: int, limit: int = 50):
     client = get_client_by_id(client_id)
@@ -302,34 +298,24 @@ async def api_client_logs(client_id: int, limit: int = 50):
     logs = get_activation_logs(client_id, limit)
     return {"client_id": client_id, "label": client["label"], "logs": logs}
 
-
 @app.get("/api/clients/{client_id}/traffic", dependencies=[Depends(require_api_key)])
 async def api_client_traffic(client_id: int):
-    """Трафик клиента по его текущему IP со всех relay."""
     client = get_client_by_id(client_id)
     if not client:
         raise HTTPException(404, "Client not found")
     if not client["current_ip"]:
         return {"client_id": client_id, "label": client["label"],
                 "ip": None, "relays": {}, "note": "No active IP"}
-
     results = await relay_client.get_traffic_all_relays(client["current_ip"])
-    return {
-        "client_id": client_id,
-        "label": client["label"],
-        "ip": client["current_ip"],
-        "relays": results,
-    }
-
+    return {"client_id": client_id, "label": client["label"],
+            "ip": client["current_ip"], "relays": results}
 
 @app.patch("/api/clients/{client_id}/block", dependencies=[Depends(require_api_key)])
 async def api_block_client(client_id: int, data: ClientBlock):
     client = get_client_by_id(client_id)
     if not client:
         raise HTTPException(404, "Client not found")
-
     block_client(client_id, data.blocked)
-
     if data.blocked and client["current_ip"]:
         others = count_clients_on_ip(client["current_ip"], exclude_client_id=client_id)
         if others == 0:
@@ -337,16 +323,13 @@ async def api_block_client(client_id: int, data: ClientBlock):
         else:
             logger.info("Block client #%d: IP %s shared by %d others, keeping",
                         client_id, client["current_ip"], others)
-
     return {"id": client_id, "is_blocked": data.blocked}
-
 
 @app.delete("/api/clients/{client_id}", dependencies=[Depends(require_api_key)])
 async def api_delete_client(client_id: int):
     client = delete_client(client_id)
     if not client:
         raise HTTPException(404, "Client not found")
-
     if client["current_ip"]:
         others = count_clients_on_ip(client["current_ip"])
         if others == 0:
@@ -354,7 +337,6 @@ async def api_delete_client(client_id: int):
         else:
             logger.info("Delete client #%d: IP %s shared by %d others, keeping",
                         client_id, client["current_ip"], others)
-
     return {"deleted": True, "id": client_id}
 
 
@@ -364,51 +346,33 @@ async def api_delete_client(client_id: int):
 
 @app.post("/api/blacklist", dependencies=[Depends(require_api_key)])
 async def api_add_ip_ban(data: IPBanCreate):
-    """
-    Забанить IP. Также:
-    - удаляет IP с relay (если в whitelist)
-    - НЕ блокирует самих клиентов (они смогут активироваться с другого IP)
-    """
     result = add_ip_ban(data.ip, data.reason)
-
     if not result.get("already_exists"):
-        # Удаляем забаненный IP с relay
         await relay_client.remove_ip(data.ip)
         logger.info("IP banned: %s reason=%s", data.ip, data.reason)
-    else:
-        logger.info("IP already banned: %s", data.ip)
-
     return result
-
 
 @app.get("/api/blacklist", dependencies=[Depends(require_api_key)])
 async def api_list_ip_bans():
-    """Список всех забаненных IP."""
     return list_ip_bans()
-
 
 @app.delete("/api/blacklist/{ban_id}", dependencies=[Depends(require_api_key)])
 async def api_remove_ip_ban(ban_id: int):
-    """Разбанить IP по ID записи."""
     ok = remove_ip_ban(ban_id)
     if not ok:
         raise HTTPException(404, "Ban not found")
     return {"deleted": True, "id": ban_id}
 
-
 @app.delete("/api/blacklist/by-ip", dependencies=[Depends(require_api_key)])
 async def api_remove_ip_ban_by_ip(data: IPBanRemove):
-    """Разбанить IP по самому IP-адресу."""
     ok = remove_ip_ban_by_ip(data.ip)
     if not ok:
         raise HTTPException(404, "IP not in blacklist")
     logger.info("IP unbanned: %s", data.ip)
     return {"deleted": True, "ip": data.ip}
 
-
 @app.get("/api/blacklist/check/{ip}", dependencies=[Depends(require_api_key)])
 async def api_check_ip_ban(ip: str):
-    """Проверить забанен ли IP."""
     ban = get_ip_ban(ip)
     if ban:
         return {"banned": True, **ban}
@@ -426,11 +390,9 @@ async def api_add_relay(data: RelayCreate):
         agent_port=data.agent_port, agent_secret=data.agent_secret,
     )
 
-
 @app.get("/api/relays", dependencies=[Depends(require_api_key)])
 async def api_list_relays():
     return list_relays()
-
 
 @app.delete("/api/relays/{relay_id}", dependencies=[Depends(require_api_key)])
 async def api_delete_relay(relay_id: int):
@@ -439,12 +401,10 @@ async def api_delete_relay(relay_id: int):
         raise HTTPException(404, "Relay not found")
     return {"deleted": True, "id": relay_id}
 
-
 @app.patch("/api/relays/{relay_id}/toggle", dependencies=[Depends(require_api_key)])
 async def api_toggle_relay(relay_id: int, data: RelayToggle):
     toggle_relay(relay_id, data.active)
     return {"id": relay_id, "is_active": data.active}
-
 
 @app.get("/api/relays/{relay_id}/health", dependencies=[Depends(require_api_key)])
 async def api_relay_health(relay_id: int):
@@ -454,7 +414,6 @@ async def api_relay_health(relay_id: int):
         raise HTTPException(404, "Relay not found")
     return await relay_client.check_relay(relay)
 
-
 @app.get("/api/relays/{relay_id}/stats", dependencies=[Depends(require_api_key)])
 async def api_relay_stats(relay_id: int):
     relays = list_relays()
@@ -462,7 +421,6 @@ async def api_relay_stats(relay_id: int):
     if not relay:
         raise HTTPException(404, "Relay not found")
     return await relay_client.get_relay_stats(relay)
-
 
 @app.get("/api/relays/{relay_id}/traffic", dependencies=[Depends(require_api_key)])
 async def api_relay_traffic(relay_id: int):
@@ -472,20 +430,37 @@ async def api_relay_traffic(relay_id: int):
         raise HTTPException(404, "Relay not found")
     return await relay_client.get_relay_traffic(relay)
 
-
 @app.post("/api/relays/{relay_id}/sync", dependencies=[Depends(require_api_key)])
 async def api_sync_relay(relay_id: int):
     return await relay_client.full_sync(relay_id=relay_id)
-
 
 @app.post("/api/relays/sync-all", dependencies=[Depends(require_api_key)])
 async def api_sync_all():
     return await relay_client.full_sync()
 
-
 @app.get("/api/relays/health-all", dependencies=[Depends(require_api_key)])
 async def api_health_all():
     return await relay_client.health_check_all()
+
+
+# ═══════════════════════════════════════
+# API: UPDATE RELAY-СЕРВЕРОВ
+# ═══════════════════════════════════════
+
+@app.post("/api/relays/{relay_id}/update", dependencies=[Depends(require_api_key)])
+async def api_update_relay(relay_id: int):
+    """Обновить один relay (git pull + restart)."""
+    relays = list_relays()
+    relay = next((r for r in relays if r["id"] == relay_id), None)
+    if not relay:
+        raise HTTPException(404, "Relay not found")
+    return await relay_client.update_relay(relay)
+
+
+@app.post("/api/relays/update-all", dependencies=[Depends(require_api_key)])
+async def api_update_all_relays():
+    """Обновить все активные relay (git pull + restart)."""
+    return await relay_client.update_all_relays()
 
 
 # ═══════════════════════════════════════
@@ -494,7 +469,6 @@ async def api_health_all():
 
 @app.get("/api/traffic", dependencies=[Depends(require_api_key)])
 async def api_traffic_all():
-    """Трафик со всех relay (по IP, для админского анализа)."""
     return await relay_client.get_traffic_all_relays()
 
 

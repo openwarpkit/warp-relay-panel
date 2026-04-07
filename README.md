@@ -101,32 +101,11 @@ curl -X POST ${PANEL}/api/relays/sync-all -H "X-API-Key: ${KEY}"
 
 ## Обновление relay-серверов
 
-### Один сервер
+### Все сразу (через API)
+curl -X POST ${PANEL}/api/relays/update-all -H "X-API-Key: ${KEY}"
 
-```bash
-ssh root@RELAY_IP "bash /opt/warp-relay-panel/relay-agent/update.sh"
-```
-
-### Все серверы сразу
-
-```bash
-# С локальной машины (нужен SSH-доступ ко всем relay):
-PANEL="https://your-project.vercel.app"
-KEY="your-api-key"
-
-# Получаем список relay → обновляем каждый
-curl -s ${PANEL}/api/relays -H "X-API-Key: ${KEY}" | \
-  python3 -c "
-import json, sys, subprocess
-relays = json.load(sys.stdin)
-for r in relays:
-    host = r['host']
-    print(f'Updating {r[\"name\"]} ({host})...')
-    subprocess.run(['ssh', f'root@{host}', 'bash /opt/warp-relay-panel/relay-agent/update.sh'])
-"
-```
-
-Скрипт `update.sh` делает: `git pull` → копирует `agent.py` → перезапускает сервис.
+### Один relay
+curl -X POST ${PANEL}/api/relays/{id}/update -H "X-API-Key: ${KEY}"
 
 ### Автовосстановление при перезагрузке
 
