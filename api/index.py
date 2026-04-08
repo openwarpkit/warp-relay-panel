@@ -129,7 +129,7 @@ TMPL_SUCCESS = """<!DOCTYPE html>
   <h2>Доступ активирован</h2>
   <p>Ваш IP:</p>
   <div class="ip">{ip}</div>
-  <p class="hint">Теперь подключайтесь к VPN.<br>При смене сети — активируйте повторно.</p>
+  <p class="hint">Теперь подключайтесь к WARP.<br>При смене сети — активируйте повторно.</p>
 </div></body></html>"""
 
 TMPL_SAME = """<!DOCTYPE html>
@@ -172,7 +172,7 @@ TMPL_IP_BANNED = """<!DOCTYPE html>
 TMPL_BOT = """<!DOCTYPE html>
 <html lang="ru"><head><meta charset="utf-8">
 <meta property="og:title" content="WARP Relay — Активация">
-<meta property="og:description" content="Нажмите на ссылку для активации доступа к VPN">
+<meta property="og:description" content="Нажмите на ссылку для активации доступа к WARP">
 <meta property="og:type" content="website">
 <title>WARP Relay</title></head>
 <body></body></html>"""
