@@ -623,16 +623,6 @@ async def api_stats():
     }
 
 
-@app.post("/api/admin/backfill-hashes", dependencies=[Depends(require_api_key)])
-async def api_backfill_hashes():
-    """Одноразовый backfill после миграции v1.3."""
-    from .database import backfill_previous_ip_hashes, backfill_activation_log_hashes
-    return {
-        "previous_ip": backfill_previous_ip_hashes(),
-        "activation_log": backfill_activation_log_hashes(),
-    }
-
-
 # ═══════════════════════════════════════
 # HEALTH
 # ═══════════════════════════════════════
