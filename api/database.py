@@ -445,6 +445,32 @@ def get_ip_ban_by_id(ban_id: int) -> Optional[dict]:
     }
 
 
+def list_ip_bans() -> list[dict]:
+    """Список ВСЕХ забаненных IP с пагинацией (для внутренних нужд: full_sync, stats)."""
+    def _build(offset: int, limit: int):
+        return (
+            _db().table("ip_blacklist")
+            .select("*")
+            .order("created_at", desc=True)
+            .range(offset, offset + limit - 1)
+        )
+
+    rows = _fetch_all_paginated(_build)
+    bans = []
+    for row in rows:
+        try:
+            ip = decrypt_ip(row["ip_enc"])
+        except Exception:
+            ip = "decrypt_error"
+        bans.append({
+            "id": row["id"],
+            "ip": ip,
+            "reason": row["reason"],
+            "created_at": row["created_at"],
+        })
+    return bans
+
+
 def list_ip_bans_paginated(
     page: int = 0,
     per_page: int = 20,

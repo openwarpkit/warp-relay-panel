@@ -477,7 +477,13 @@ async def api_add_ip_ban(data: IPBanCreate):
     return result
 
 @app.get("/api/blacklist", dependencies=[Depends(require_api_key)])
-async def api_list_ip_bans(page: int = 0, per_page: int = 20, search: str | None = None):
+async def api_list_ip_bans(page: int | None = None, per_page: int = 20, search: str | None = None):
+    """
+    Если page не указан — возвращает плоский список (обратная совместимость).
+    Если page указан — возвращает {items, total, page, per_page, total_pages}.
+    """
+    if page is None:
+        return list_ip_bans()
     from .database import list_ip_bans_paginated
     return list_ip_bans_paginated(page=page, per_page=per_page, search=search)
 
