@@ -299,6 +299,28 @@ async def api_list_clients(include_blocked: bool = True):
         c.pop("_raw_current_ip_enc", None)
     return clients
 
+
+@app.get("/api/clients/search", dependencies=[Depends(require_api_key)])
+async def api_search_clients(ip: str, include_log_history: bool = True):
+    if not ip.strip():
+        raise HTTPException(400, "ip required")
+
+    from .database import search_clients_by_ip
+    clients = search_clients_by_ip(ip.strip(), include_log_history=include_log_history)
+
+    for c in clients:
+        if c["current_ip"] == ip:
+            c["match_source"] = "current"
+        elif c["previous_ip"] == ip:
+            c["match_source"] = "previous"
+        else:
+            c["match_source"] = "history"
+        for k in ("_activations_today", "_reset_date", "_raw_current_ip_enc", "_raw_current_ip_hash"):
+            c.pop(k, None)
+
+    return clients
+
+
 @app.get("/api/clients/{client_id}", dependencies=[Depends(require_api_key)])
 async def api_get_client(client_id: int):
     client = get_client_by_id(client_id)
@@ -328,13 +350,26 @@ async def api_client_traffic(client_id: int):
     return {"client_id": client_id, "label": client["label"],
             "ip": client["current_ip"], "relays": results}
 
+@app.get("/api/clients/{client_id}/full", dependencies=[Depends(require_api_key)])
+async def api_get_client_full(client_id: int):
+    """Клиент + флаг забанен ли его current_ip + previous_ip."""
+    client = get_client_by_id(client_id)
+    if not client:
+        raise HTTPException(404, "Client not found")
+
+    for key in ("_activations_today", "_reset_date", "_raw_current_ip_enc", "_raw_current_ip_hash"):
+        client.pop(key, None)
+
+    client["current_ip_banned"] = bool(client["current_ip"]) and is_ip_banned(client["current_ip"])
+    client["previous_ip_banned"] = bool(client["previous_ip"]) and is_ip_banned(client["previous_ip"])
+
+    return client
 
 @app.post("/api/clients/{client_id}/activate", dependencies=[Depends(require_api_key)])
 async def api_activate_client_manual(client_id: int, data: ClientManualActivate):
     """Ручная активация клиента по IP (вызывается ботом)."""
     ip = data.ip.strip()
 
-    # Валидация IP
     try:
         addr = ipaddress.ip_address(ip)
         if isinstance(addr, ipaddress.IPv6Address):
@@ -347,7 +382,6 @@ async def api_activate_client_manual(client_id: int, data: ClientManualActivate)
         return {"error": "invalid_ip",
                 "detail": API_ERROR_MESSAGES["invalid_ip"]}
 
-    # Активация в БД
     result = activate_client_by_id(client_id, ip)
 
     if "error" in result:
@@ -357,17 +391,11 @@ async def api_activate_client_manual(client_id: int, data: ClientManualActivate)
             detail += f": {result['reason']}"
         return {"error": error_key, "detail": detail}
 
-    # Если IP уже тот же — re-push на relay
     if result["status"] == "already_active":
         await relay_client.add_ip(ip, client_id=result["client_id"])
         logger.info("Manual activate (same IP): client #%d ip=%s", client_id, ip)
-        return {
-            "status": "already_active",
-            "client_id": client_id,
-            "ip": ip,
-        }
+        return {"status": "already_active", "client_id": client_id, "ip": ip}
 
-    # Новый IP — синхронизация с relay
     old_ip = result.get("old_ip")
     new_ip = result["new_ip"]
 
@@ -389,7 +417,6 @@ async def api_activate_client_manual(client_id: int, data: ClientManualActivate)
         "old_ip": result.get("old_ip"),
         "relay_sync": relay_results,
     }
-
 
 @app.patch("/api/clients/{client_id}/block", dependencies=[Depends(require_api_key)])
 async def api_block_client(client_id: int, data: ClientBlock):
@@ -421,49 +448,6 @@ async def api_delete_client(client_id: int):
     return {"deleted": True, "id": client_id}
 
 
-@app.get("/api/clients/search", dependencies=[Depends(require_api_key)])
-async def api_search_clients(ip: str, include_log_history: bool = True):
-    """
-    Поиск клиентов по IP. Один SQL по индексу вместо list_clients() целиком.
-    Возвращает: [{id, label, current_ip, previous_ip, is_blocked, match_source, ...}]
-    """
-    if not ip.strip():
-        raise HTTPException(400, "ip required")
-
-    from .database import search_clients_by_ip
-    clients = search_clients_by_ip(ip.strip(), include_log_history=include_log_history)
-
-    # Помечаем источник совпадения
-    for c in clients:
-        if c["current_ip"] == ip:
-            c["match_source"] = "current"
-        elif c["previous_ip"] == ip:
-            c["match_source"] = "previous"
-        else:
-            c["match_source"] = "history"
-        # Чистим внутренние поля
-        for k in ("_activations_today", "_reset_date", "_raw_current_ip_enc", "_raw_current_ip_hash"):
-            c.pop(k, None)
-
-    return clients
-
-
-@app.get("/api/clients/{client_id}/full", dependencies=[Depends(require_api_key)])
-async def api_get_client_full(client_id: int):
-    """Клиент + флаг забанен ли его current_ip + previous_ip."""
-    client = get_client_by_id(client_id)
-    if not client:
-        raise HTTPException(404, "Client not found")
-
-    for key in ("_activations_today", "_reset_date", "_raw_current_ip_enc", "_raw_current_ip_hash"):
-        client.pop(key, None)
-
-    client["current_ip_banned"] = bool(client["current_ip"]) and is_ip_banned(client["current_ip"])
-    client["previous_ip_banned"] = bool(client["previous_ip"]) and is_ip_banned(client["previous_ip"])
-
-    return client
-
-
 # ═══════════════════════════════════════
 # API: IP BLACKLIST
 # ═══════════════════════════════════════
@@ -478,21 +462,11 @@ async def api_add_ip_ban(data: IPBanCreate):
 
 @app.get("/api/blacklist", dependencies=[Depends(require_api_key)])
 async def api_list_ip_bans(page: int | None = None, per_page: int = 20, search: str | None = None):
-    """
-    Если page не указан — возвращает плоский список (обратная совместимость).
-    Если page указан — возвращает {items, total, page, per_page, total_pages}.
-    """
     if page is None:
         return list_ip_bans()
     from .database import list_ip_bans_paginated
     return list_ip_bans_paginated(page=page, per_page=per_page, search=search)
 
-@app.delete("/api/blacklist/{ban_id}", dependencies=[Depends(require_api_key)])
-async def api_remove_ip_ban(ban_id: int):
-    ok = remove_ip_ban(ban_id)
-    if not ok:
-        raise HTTPException(404, "Ban not found")
-    return {"deleted": True, "id": ban_id}
 
 @app.delete("/api/blacklist/by-ip", dependencies=[Depends(require_api_key)])
 async def api_remove_ip_ban_by_ip(data: IPBanRemove):
@@ -517,6 +491,13 @@ async def api_get_ip_ban(ban_id: int):
     if not ban:
         raise HTTPException(404, "Ban not found")
     return ban
+
+@app.delete("/api/blacklist/{ban_id}", dependencies=[Depends(require_api_key)])
+async def api_remove_ip_ban(ban_id: int):
+    ok = remove_ip_ban(ban_id)
+    if not ok:
+        raise HTTPException(404, "Ban not found")
+    return {"deleted": True, "id": ban_id}
 
 
 # ═══════════════════════════════════════
