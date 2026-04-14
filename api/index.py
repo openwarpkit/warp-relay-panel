@@ -423,7 +423,10 @@ async def api_block_client(client_id: int, data: ClientBlock):
     client = get_client_by_id(client_id)
     if not client:
         raise HTTPException(404, "Client not found")
-    block_client(client_id, data.blocked)
+
+    updated = block_client(client_id, data.blocked)
+
+    # Удаление IP с relay — как было, но используем уже обновлённый client
     if data.blocked and client["current_ip"]:
         others = count_clients_on_ip(client["current_ip"], exclude_client_id=client_id)
         if others == 0:
@@ -431,7 +434,15 @@ async def api_block_client(client_id: int, data: ClientBlock):
         else:
             logger.info("Block client #%d: IP %s shared by %d others, keeping",
                         client_id, client["current_ip"], others)
-    return {"id": client_id, "is_blocked": data.blocked}
+
+    # Чистим внутренние поля
+    if updated:
+        for k in ("_activations_today", "_reset_date", "_raw_current_ip_enc", "_raw_current_ip_hash"):
+            updated.pop(k, None)
+        # Добавляем флаги бан-чека (как в /full)
+        updated["current_ip_banned"] = bool(updated["current_ip"]) and is_ip_banned(updated["current_ip"])
+        updated["previous_ip_banned"] = bool(updated["previous_ip"]) and is_ip_banned(updated["previous_ip"])
+    return updated
 
 @app.delete("/api/clients/{client_id}", dependencies=[Depends(require_api_key)])
 async def api_delete_client(client_id: int):
@@ -512,8 +523,9 @@ async def api_add_relay(data: RelayCreate):
     )
 
 @app.get("/api/relays", dependencies=[Depends(require_api_key)])
-async def api_list_relays():
-    return list_relays()
+async def api_list_relays(fields: str = "full"):
+    """fields=basic — без last_health (легче payload)."""
+    return list_relays(fields=fields)
 
 @app.delete("/api/relays/{relay_id}", dependencies=[Depends(require_api_key)])
 async def api_delete_relay(relay_id: int):
@@ -524,8 +536,10 @@ async def api_delete_relay(relay_id: int):
 
 @app.patch("/api/relays/{relay_id}/toggle", dependencies=[Depends(require_api_key)])
 async def api_toggle_relay(relay_id: int, data: RelayToggle):
-    toggle_relay(relay_id, data.active)
-    return {"id": relay_id, "is_active": data.active}
+    relay = toggle_relay(relay_id, data.active)
+    if not relay:
+        raise HTTPException(404, "Relay not found")
+    return relay
 
 @app.get("/api/relays/{relay_id}/health", dependencies=[Depends(require_api_key)])
 async def api_relay_health(relay_id: int):
@@ -591,17 +605,59 @@ async def api_traffic_all():
 
 @app.get("/api/stats", dependencies=[Depends(require_api_key)])
 async def api_stats():
-    clients = list_clients()
-    relays = list_relays()
-    bans = list_ip_bans()
+    """Лёгкая статистика через count, без выгрузки записей."""
+    from .database import _db
+    
+    total_clients = _db().table("clients").select("id", count="exact").execute().count or 0
+    blocked_clients = _db().table("clients").select("id", count="exact").eq("is_blocked", True).execute().count or 0
+    active_clients = (
+        _db().table("clients").select("id", count="exact")
+        .eq("is_blocked", False)
+        .not_.is_("current_ip_enc", "null")
+        .execute().count or 0
+    )
+    bans_count = _db().table("ip_blacklist").select("id", count="exact").execute().count or 0
+    relays = list_relays(fields="basic")
+    
     return {
-        "total_clients": len(clients),
-        "active_clients": len([c for c in clients if c["current_ip"] and not c["is_blocked"]]),
-        "blocked_clients": len([c for c in clients if c["is_blocked"]]),
+        "total_clients": total_clients,
+        "active_clients": active_clients,
+        "blocked_clients": blocked_clients,
         "total_relays": len(relays),
-        "active_relays": len([r for r in relays if r["is_active"]]),
-        "ip_bans": len(bans),
+        "active_relays": sum(1 for r in relays if r["is_active"]),
+        "ip_bans": bans_count,
     }
+
+
+@app.get("/api/dashboard", dependencies=[Depends(require_api_key)])
+async def api_dashboard():
+    """Один батч для главного экрана: relays(basic) + stats."""
+    relays = list_relays(fields="basic")
+    
+    # Считаем stats прямо здесь, чтобы избежать второго round-trip к Supabase для list_clients()
+    # Используем count="exact" вместо выгрузки всех записей
+    from .database import _db
+    
+    total_clients_q = _db().table("clients").select("id", count="exact").execute()
+    blocked_clients_q = _db().table("clients").select("id", count="exact").eq("is_blocked", True).execute()
+    active_clients_q = (
+        _db().table("clients").select("id", count="exact")
+        .eq("is_blocked", False)
+        .not_.is_("current_ip_enc", "null")
+        .execute()
+    )
+    bans_q = _db().table("ip_blacklist").select("id", count="exact").execute()
+    
+    stats = {
+        "total_clients": total_clients_q.count or 0,
+        "active_clients": active_clients_q.count or 0,
+        "blocked_clients": blocked_clients_q.count or 0,
+        "total_relays": len(relays),
+        "active_relays": sum(1 for r in relays if r["is_active"]),
+        "ip_bans": bans_q.count or 0,
+    }
+    
+    return {"relays": relays, "stats": stats}
 
 
 # ═══════════════════════════════════════

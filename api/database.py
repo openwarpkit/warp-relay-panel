@@ -221,8 +221,10 @@ def activate_client_by_id(client_id: int, new_ip: str) -> dict:
     }
 
 
-def block_client(client_id: int, blocked: bool = True):
+def block_client(client_id: int, blocked: bool = True) -> Optional[dict]:
+    """Возвращает обновлённый клиент (decrypted)."""
     _db().table("clients").update({"is_blocked": blocked}).eq("id", client_id).execute()
+    return get_client_by_id(client_id)
 
 
 def delete_client(client_id: int) -> Optional[dict]:
@@ -531,8 +533,16 @@ def add_relay(name: str, host: str, agent_port: int = 7580,
     return result.data[0]
 
 
-def list_relays() -> list[dict]:
-    result = _db().table("relays").select("*").order("id").execute()
+def list_relays(fields: str = "full") -> list[dict]:
+    """
+    fields='full' — все колонки (по умолчанию)
+    fields='basic' — только id, name, host, agent_port, is_active, is_synced
+    """
+    if fields == "basic":
+        cols = "id,name,host,agent_port,is_active,is_synced,last_health_at"
+    else:
+        cols = "*"
+    result = _db().table("relays").select(cols).order("id").execute()
     return result.data
 
 
@@ -551,8 +561,11 @@ def delete_relay(relay_id: int) -> bool:
     return len(result.data) > 0
 
 
-def toggle_relay(relay_id: int, active: bool):
+def toggle_relay(relay_id: int, active: bool) -> Optional[dict]:
+    """Возвращает обновлённый relay."""
     _db().table("relays").update({"is_active": active}).eq("id", relay_id).execute()
+    result = _db().table("relays").select("*").eq("id", relay_id).execute()
+    return result.data[0] if result.data else None
 
 
 def mark_relay_synced(relay_id: int, synced: bool):
