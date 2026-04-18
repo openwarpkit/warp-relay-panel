@@ -23,6 +23,8 @@ from fastapi import FastAPI, Request, HTTPException, Depends, Header
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
+from .utils import check_warp
+
 from .database import (
     create_client_record, get_client_by_token, get_client_by_id,
     list_clients, activate_client, activate_client_by_id,
@@ -39,6 +41,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelna
 logger = logging.getLogger("panel")
 
 API_VERSION = "1.2.2"
+FAQ_URL = os.environ.get("FAQ_URL", None)
 app = FastAPI(title="WARP Relay Panel", version=API_VERSION)
 
 
@@ -189,6 +192,7 @@ ERROR_MAP = {
     "ipv6_detected": ("IPv6 не поддерживается",
                       "Relay работает только с IPv4.<br>Отключите IPv6 или используйте мобильную сеть."),
     "invalid_ip": ("Ошибка определения IP", "Не удалось определить ваш IPv4 адрес."),
+    "vpn_ip": ("Вы исполользуете ВПН", "Отключите ВПН и обновите текущую страницу" + (" , или воспользуйтесь <a href='" + FAQ_URL + "'>FAQ<a>" if FAQ_URL is not None else "")),
 }
 
 # Человекочитаемые ошибки для API-ответов (бот)
@@ -253,6 +257,8 @@ async def activate(token: str, request: Request):
 
     logger.info("Activate: token=%s...%s ip=%s", token[:6], token[-4:], client_ip)
 
+    if check_warp(client_ip):
+        return _error_html("vpn_ip", 403)
     result = activate_client(token, client_ip, user_agent)
 
     if "error" in result:
