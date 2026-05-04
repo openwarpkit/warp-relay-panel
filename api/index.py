@@ -60,7 +60,7 @@ _BOT_PATTERNS = re.compile(
     r"Facebot|WhatsApp|Slackbot|slack-imgproxy|LinkedInBot|"
     r"Discordbot|Googlebot|bingbot|YandexBot|Mail\.RU_Bot|"
     r"PetalBot|Applebot|Bytespider|GPTBot|CCBot|"
-    r"bot|crawl|spider|preview|embed)",
+    r"bot|crawl|spider|preview|embed|curl|node|Wget)",
     re.IGNORECASE,
 )
 
