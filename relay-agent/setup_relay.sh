@@ -34,7 +34,7 @@ echo ""
 echo -e "${Y}[1/7] Установка пакетов...${N}"
 export DEBIAN_FRONTEND=noninteractive
 apt update -qq
-apt install -y -qq iptables ipset curl conntrack netfilter-persistent ipset-persistent python3 python3-pip python3-venv git
+apt install -y -qq iptables ipset curl conntrack netfilter-persistent ipset-persistent python3 python3-pip python3-venv git jq iproute2
 
 # ═══════════════════════════════════════
 # 2. СИСТЕМА
@@ -120,6 +120,32 @@ ipset save > /etc/ipset.rules 2>/dev/null || true
 
 echo -e "${G}  ${#PORTS[@]} портов настроено${N}"
 
+# Recipe для self-heal без интерактивного re-setup
+mkdir -p ${INSTALL_DIR}
+IFACE=$(ip route | awk '/default/ {print $5; exit}')
+PORTS_JSON=$(printf ',%s' "${PORTS[@]}"); PORTS_JSON="[${PORTS_JSON:1}]"
+cat > ${INSTALL_DIR}/rules_recipe.json << EOF
+{
+  "src_ip": "${SRC_IP}",
+  "dst_ip": "${DST_IP}",
+  "ports": ${PORTS_JSON},
+  "ipset_name": "warp_whitelist",
+  "tag": "${TAG}",
+  "iface": "${IFACE}"
+}
+EOF
+echo -e "${G}  rules_recipe.json сохранён${N}"
+
+# tc HTB qdisc + CONNMARK restore (для rate-limit'ов)
+if [ -n "$IFACE" ]; then
+    tc qdisc del dev "$IFACE" root 2>/dev/null || true
+    tc qdisc add dev "$IFACE" root handle 1: htb default 999 2>/dev/null || true
+    tc class add dev "$IFACE" parent 1: classid 1:999 htb rate 1000mbit 2>/dev/null || true
+    iptables -t mangle -C POSTROUTING -j CONNMARK --restore-mark 2>/dev/null || \
+        iptables -t mangle -A POSTROUTING -j CONNMARK --restore-mark 2>/dev/null
+    echo -e "${G}  tc HTB qdisc + CONNMARK restore настроены${N}"
+fi
+
 cat > /etc/systemd/system/ipset-restore.service << 'EOF'
 [Unit]
 Description=Restore ipset rules
@@ -182,6 +208,19 @@ cat > ${INSTALL_DIR}/.env << EOF
 AGENT_SECRET=${AGENT_SECRET}
 AGENT_PORT=${AGENT_PORT}
 IPSET_NAME=warp_whitelist
+
+# Watchdog/metrics intervals
+RULES_WATCHDOG_INTERVAL=30
+METRICS_SAMPLE_INTERVAL=1
+TRAFFIC_INTERVAL=30
+
+# Заполнить вручную ПОСЛЕ регистрации relay в панели
+# (POST /api/relays → получите id и положите его в RELAY_ID).
+# Без этих 3-х переменных startup-resync с панели не выполняется,
+# но всё остальное работает.
+PANEL_URL=
+PANEL_API_KEY=
+RELAY_ID=
 EOF
 
 echo -e "${G}  venv и .env созданы${N}"

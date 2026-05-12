@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """
+WARP Relay Agent v1.3.0
+
 — ipset whitelist с refcount-защитой общих IP
 — трафик по IP (conntrack accounting)
 — точный онлайн (ipset ∩ conntrack ASSURED)
 — самообновление через /update (fire-and-forget)
 — фоновая синхронизация whitelist через /whitelist/sync (fire-and-forget)
+— self-heal watchdog: периодически восстанавливает потерянные iptables/ipset
+— rate-limit per IP (CONNMARK + HTB), симметричный
+— расширенный /health: CPU%, RAM, диск, сеть, agent-process, last_self_heal
 """
 
 import asyncio
@@ -19,6 +24,8 @@ from collections import defaultdict
 from datetime import datetime, date, timezone, timedelta
 from pathlib import Path
 
+import psutil
+import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
@@ -35,14 +42,30 @@ TRAFFIC_FILE = DATA_DIR / "traffic.json"
 REFCOUNT_FILE = DATA_DIR / "refcount.json"
 UPDATE_STATUS_FILE = DATA_DIR / "update_status.json"
 SYNC_STATUS_FILE = DATA_DIR / "sync_status.json"
+SELF_HEAL_FILE = DATA_DIR / "self_heal_status.json"
+RATE_LIMITS_FILE = DATA_DIR / "rate_limits.json"
+RULES_RECIPE_FILE = DATA_DIR / "rules_recipe.json"
+ENSURE_RULES_SCRIPT = DATA_DIR / "ensure_rules.sh"
+
 TRAFFIC_INTERVAL = int(os.environ.get("TRAFFIC_INTERVAL", "30"))
+RULES_WATCHDOG_INTERVAL = int(os.environ.get("RULES_WATCHDOG_INTERVAL", "30"))
+METRICS_SAMPLE_INTERVAL = int(os.environ.get("METRICS_SAMPLE_INTERVAL", "1"))
+IPSET_PERSIST_DEBOUNCE = float(os.environ.get("IPSET_PERSIST_DEBOUNCE", "3.0"))
+
+PANEL_URL = os.environ.get("PANEL_URL", "").rstrip("/")
+PANEL_API_KEY = os.environ.get("PANEL_API_KEY", "")
+RELAY_ID = os.environ.get("RELAY_ID", "")
+
+# Диапазон fwmark'ов для rate-limit'ов: 10..998 (999 = default class)
+RATE_LIMIT_MARK_MIN = 10
+RATE_LIMIT_MARK_MAX = 998
 
 MSK = timezone(timedelta(hours=3))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("agent")
 
-AGENT_VERSION = "1.2.2"
+AGENT_VERSION = "1.3.0"
 app = FastAPI(title="WARP Relay Agent", version=AGENT_VERSION)
 
 
@@ -119,6 +142,11 @@ def _format_bytes(b: int) -> str:
 
 def _now_msk() -> datetime:
     return datetime.now(MSK)
+
+
+def _default_iface() -> str | None:
+    code, out, _ = _run("ip route | awk '/default/ {print $5; exit}'")
+    return out if code == 0 and out else None
 
 
 def _get_ipset_members() -> set[str]:
@@ -204,7 +232,6 @@ class RefCountMap:
         return can_remove_old
 
     def remove_client(self, ip: str, client_id: int | None = None) -> bool:
-        # Если IP нет в map или set пустой (осиротевший) — можно удалять из ipset
         if ip not in self._map or not self._map[ip]:
             self._map.pop(ip, None)
             self._save()
@@ -233,6 +260,48 @@ class RefCountMap:
 
 
 refcount = RefCountMap()
+
+
+# ═══════════════════════════════════════
+# IPSET PERSIST (debounced)
+# ═══════════════════════════════════════
+
+_persist_event: asyncio.Event | None = None  # инициализируется в startup
+
+
+def _save_ipset_now():
+    """Синхронный дамп ipset → /etc/ipset.rules."""
+    code, _, err = _run("ipset save > /etc/ipset.rules 2>&1")
+    if code != 0:
+        logger.warning("ipset save failed: %s", err)
+
+
+async def _ipset_persist_loop():
+    """Дебаунсер: при срабатывании _persist_event ждёт N секунд (если новые
+    события — таймер сбрасывается) и затем дампит ipset."""
+    global _persist_event
+    while True:
+        await _persist_event.wait()
+        # Drain накопившихся уведомлений в окне debounce
+        try:
+            while True:
+                await asyncio.wait_for(
+                    _persist_event.wait(), timeout=IPSET_PERSIST_DEBOUNCE
+                )
+                _persist_event.clear()
+        except asyncio.TimeoutError:
+            pass
+        _persist_event.clear()
+        try:
+            await asyncio.to_thread(_save_ipset_now)
+            logger.info("ipset persisted to /etc/ipset.rules")
+        except Exception as e:
+            logger.error("ipset persist error: %s", e)
+
+
+def _trigger_persist():
+    if _persist_event is not None:
+        _persist_event.set()
 
 
 # ═══════════════════════════════════════
@@ -393,6 +462,463 @@ traffic_monitor = TrafficMonitor()
 
 
 # ═══════════════════════════════════════
+# RATE LIMIT MANAGER
+# ═══════════════════════════════════════
+
+class RateLimitManager:
+    """
+    Симметричный rate-limit per IP через CONNMARK + HTB.
+
+    На каждый IP:
+      - mark M ∈ [10..998] (уникальный)
+      - iptables -t mangle -A PREROUTING -m conntrack --ctorigsrc IP -j CONNMARK --set-mark M
+      - tc class add dev IFACE parent 1: classid 1:M htb rate Nmbit ceil Nmbit
+      - tc filter add dev IFACE protocol ip parent 1:0 prio 1 handle M fw flowid 1:M
+
+    POSTROUTING --restore-mark уже стоит (см. ensure_rules.sh) — он восстанавливает
+    mark из conntrack на исходящий пакет. tc на egress матчит mark и ставит в class.
+    Симметрия: одна conntrack-запись несёт оба направления, mark тоже.
+    """
+
+    def __init__(self):
+        self._map: dict[str, dict] = {}  # ip → {mbps, mark, expires_at, client_id, applied_at}
+        self._used_marks: set[int] = set()
+        self._load()
+
+    # ── persist ──
+
+    def _load(self):
+        try:
+            data = json.loads(RATE_LIMITS_FILE.read_text())
+            for ip, info in data.items():
+                self._map[ip] = info
+                self._used_marks.add(int(info["mark"]))
+            logger.info("Rate limits loaded: %d IPs", len(self._map))
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            logger.warning("Could not load rate_limits: %s", e)
+
+    def _save(self):
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            RATE_LIMITS_FILE.write_text(json.dumps(self._map, indent=2, ensure_ascii=False))
+        except Exception as e:
+            logger.error("Could not save rate_limits: %s", e)
+
+    # ── mark allocation ──
+
+    def _allocate_mark(self) -> int:
+        for m in range(RATE_LIMIT_MARK_MIN, RATE_LIMIT_MARK_MAX + 1):
+            if m not in self._used_marks:
+                self._used_marks.add(m)
+                return m
+        raise RuntimeError("No free fwmark in pool 10..998")
+
+    def _release_mark(self, mark: int):
+        self._used_marks.discard(int(mark))
+
+    # ── tc / iptables ──
+
+    def _apply_tc(self, ip: str, mbps: float, mark: int) -> tuple[bool, str]:
+        iface = _default_iface()
+        if not iface:
+            return False, "no default interface"
+
+        # iptables CONNMARK для нового conntrack
+        rc1, _, _ = _run(
+            f"iptables -t mangle -C PREROUTING -m conntrack --ctorigsrc {ip} "
+            f"-j CONNMARK --set-mark {mark} 2>/dev/null"
+        )
+        if rc1 != 0:
+            rc, _, err = _run(
+                f"iptables -t mangle -A PREROUTING -m conntrack --ctorigsrc {ip} "
+                f"-j CONNMARK --set-mark {mark}"
+            )
+            if rc != 0:
+                return False, f"iptables add failed: {err}"
+
+        # tc class
+        rc, _, err = _run(
+            f"tc class add dev {iface} parent 1: classid 1:{mark} "
+            f"htb rate {mbps}mbit ceil {mbps}mbit burst 16k 2>&1"
+        )
+        if rc != 0 and "exists" not in err.lower() and "file exists" not in err.lower():
+            return False, f"tc class failed: {err}"
+
+        # tc filter
+        rc, _, err = _run(
+            f"tc filter add dev {iface} protocol ip parent 1:0 prio 1 "
+            f"handle {mark} fw flowid 1:{mark} 2>&1"
+        )
+        if rc != 0 and "exists" not in err.lower() and "file exists" not in err.lower():
+            return False, f"tc filter failed: {err}"
+
+        # Пометить уже существующие conntrack-флоу с этим src
+        _run(f"conntrack -U -s {ip} -p udp --mark {mark} 2>/dev/null")
+
+        return True, ""
+
+    def _remove_tc(self, ip: str, mark: int):
+        iface = _default_iface()
+        if not iface:
+            return
+
+        _run(
+            f"iptables -t mangle -D PREROUTING -m conntrack --ctorigsrc {ip} "
+            f"-j CONNMARK --set-mark {mark} 2>/dev/null"
+        )
+        _run(
+            f"tc filter del dev {iface} protocol ip parent 1:0 prio 1 "
+            f"handle {mark} fw 2>/dev/null"
+        )
+        _run(f"tc class del dev {iface} classid 1:{mark} 2>/dev/null")
+        # Сбросить mark на текущих conntrack-флоу
+        _run(f"conntrack -U -s {ip} -p udp --mark 0 2>/dev/null")
+
+    # ── public API ──
+
+    def set_limit(self, ip: str, mbps: float,
+                  expires_at: str | None = None,
+                  client_id: int | None = None) -> dict:
+        # Если уже есть — переиспользуем mark, обновляем mbps
+        existing = self._map.get(ip)
+        if existing:
+            old_mark = int(existing["mark"])
+            # удалить старый класс/фильтр и добавить с новой скоростью
+            self._remove_tc(ip, old_mark)
+            mark = old_mark
+        else:
+            mark = self._allocate_mark()
+
+        ok, err = self._apply_tc(ip, mbps, mark)
+        if not ok:
+            if not existing:
+                self._release_mark(mark)
+            return {"ok": False, "error": err, "ip": ip}
+
+        self._map[ip] = {
+            "mbps": float(mbps),
+            "mark": mark,
+            "expires_at": expires_at,
+            "client_id": client_id,
+            "applied_at": _now_msk().isoformat(),
+        }
+        self._save()
+        logger.info("Rate-limit applied: %s = %s Mbps (mark=%d, expires=%s)",
+                    ip, mbps, mark, expires_at)
+        return {"ok": True, **self._map[ip], "ip": ip}
+
+    def remove_limit(self, ip: str) -> dict:
+        info = self._map.pop(ip, None)
+        if not info:
+            return {"ok": False, "error": "not_found", "ip": ip}
+        self._remove_tc(ip, int(info["mark"]))
+        self._release_mark(int(info["mark"]))
+        self._save()
+        logger.info("Rate-limit removed: %s (mark=%d)", ip, info["mark"])
+        return {"ok": True, "ip": ip, "removed": info}
+
+    def get(self, ip: str) -> dict | None:
+        info = self._map.get(ip)
+        if not info:
+            return None
+        return {**info, "ip": ip}
+
+    def all(self) -> list[dict]:
+        return [{**info, "ip": ip} for ip, info in self._map.items()]
+
+    def restore_all(self) -> dict:
+        """Переприменить все rate-limit'ы (после старта или watchdog)."""
+        applied = []
+        failed = []
+        for ip, info in list(self._map.items()):
+            ok, err = self._apply_tc(ip, info["mbps"], int(info["mark"]))
+            if ok:
+                applied.append(ip)
+            else:
+                failed.append({"ip": ip, "error": err})
+        return {"applied": applied, "failed": failed}
+
+    def verify(self) -> list[str]:
+        """Вернуть список IP, для которых tc-класс отсутствует — нужно пересоздать."""
+        iface = _default_iface()
+        if not iface:
+            return []
+        code, out, _ = _run(f"tc class show dev {iface} 2>/dev/null")
+        if code != 0:
+            return list(self._map.keys())
+        existing_marks = set()
+        for line in out.split("\n"):
+            m = re.search(r"class htb 1:(\d+)", line)
+            if m:
+                existing_marks.add(int(m.group(1)))
+        return [ip for ip, info in self._map.items()
+                if int(info["mark"]) not in existing_marks]
+
+
+rate_limits = RateLimitManager()
+
+
+# ═══════════════════════════════════════
+# METRICS SAMPLER (CPU/network)
+# ═══════════════════════════════════════
+
+class MetricsSampler:
+    """Фоновый сэмплер: CPU% не блокирует /health, network speed считается дельтами."""
+
+    def __init__(self):
+        self.interval = METRICS_SAMPLE_INTERVAL
+        self._cpu_total: float = 0.0
+        self._cpu_per_core: list[float] = []
+        self._net_rx_bps: int = 0
+        self._net_tx_bps: int = 0
+        self._proc = psutil.Process(os.getpid())
+        self._proc_cpu: float = 0.0
+        self._last_net: tuple[int, int, float] | None = None  # (rx, tx, ts)
+
+    def snapshot(self) -> dict:
+        try:
+            mem = self._proc.memory_info()
+            mem_mb = round(mem.rss / 1024 / 1024, 1)
+        except Exception:
+            mem_mb = 0
+        try:
+            num_threads = self._proc.num_threads()
+        except Exception:
+            num_threads = 0
+        try:
+            num_fds = self._proc.num_fds() if hasattr(self._proc, "num_fds") else 0
+        except Exception:
+            num_fds = 0
+        return {
+            "cpu_percent_total": self._cpu_total,
+            "cpu_percent_per_core": self._cpu_per_core,
+            "cpu_count": psutil.cpu_count() or 0,
+            "network_speed": {
+                "rx_bps": self._net_rx_bps,
+                "tx_bps": self._net_tx_bps,
+                "rx_human": _format_bytes(self._net_rx_bps) + "/s",
+                "tx_human": _format_bytes(self._net_tx_bps) + "/s",
+            },
+            "agent_process": {
+                "cpu_percent": self._proc_cpu,
+                "memory_mb": mem_mb,
+                "num_threads": num_threads,
+                "num_fds": num_fds,
+            },
+        }
+
+    def disk_snapshot(self) -> dict:
+        try:
+            d = psutil.disk_usage(str(DATA_DIR if DATA_DIR.exists() else "/"))
+            return {
+                "total_gb": round(d.total / 1024**3, 2),
+                "used_gb": round(d.used / 1024**3, 2),
+                "free_gb": round(d.free / 1024**3, 2),
+                "percent": d.percent,
+            }
+        except Exception:
+            return {"total_gb": 0, "used_gb": 0, "free_gb": 0, "percent": 0}
+
+    async def loop(self):
+        # Прогрев psutil.cpu_percent (первый вызов всегда 0)
+        psutil.cpu_percent(interval=None)
+        psutil.cpu_percent(interval=None, percpu=True)
+        try:
+            self._proc.cpu_percent(interval=None)
+        except Exception:
+            pass
+
+        iface = _default_iface()
+        while True:
+            await asyncio.sleep(self.interval)
+            try:
+                self._cpu_total = psutil.cpu_percent(interval=None)
+                self._cpu_per_core = psutil.cpu_percent(interval=None, percpu=True)
+                try:
+                    self._proc_cpu = self._proc.cpu_percent(interval=None)
+                except Exception:
+                    self._proc_cpu = 0.0
+
+                if iface:
+                    try:
+                        rx = int(Path(f"/sys/class/net/{iface}/statistics/rx_bytes").read_text())
+                        tx = int(Path(f"/sys/class/net/{iface}/statistics/tx_bytes").read_text())
+                        ts = time.time()
+                        if self._last_net is not None:
+                            prx, ptx, pts = self._last_net
+                            dt = max(0.001, ts - pts)
+                            self._net_rx_bps = int(max(0, rx - prx) / dt)
+                            self._net_tx_bps = int(max(0, tx - ptx) / dt)
+                        self._last_net = (rx, tx, ts)
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning("Metrics sampler error: %s", e)
+
+
+metrics_sampler = MetricsSampler()
+
+
+# ═══════════════════════════════════════
+# SELF-HEAL WATCHDOG
+# ═══════════════════════════════════════
+
+def _load_self_heal_status() -> dict | None:
+    try:
+        return json.loads(SELF_HEAL_FILE.read_text())
+    except Exception:
+        return None
+
+
+def _save_self_heal_status(status: dict):
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        SELF_HEAL_FILE.write_text(json.dumps(status, indent=2))
+    except Exception as e:
+        logger.error("Could not save self_heal_status: %s", e)
+
+
+def _check_rules() -> dict:
+    """Возвращает dict: {ipset_ok, nat_ok, forward_ok, ip_forward_ok, htb_ok}"""
+    ipset_ok = _run(f"ipset list {IPSET_NAME} 2>/dev/null")[0] == 0
+
+    nat_code, nat_out, _ = _run("iptables -t nat -S 2>/dev/null")
+    nat_ok = nat_code == 0 and "WR_RULE" in nat_out
+
+    fwd_code, fwd_out, _ = _run("iptables -S FORWARD 2>/dev/null")
+    forward_ok = (fwd_code == 0
+                  and "WR_WHITELIST_OUT" in fwd_out
+                  and "WR_WHITELIST_IN" in fwd_out)
+
+    fwd_val = "0"
+    try:
+        fwd_val = Path("/proc/sys/net/ipv4/ip_forward").read_text().strip()
+    except Exception:
+        pass
+    ip_forward_ok = (fwd_val == "1")
+
+    iface = _default_iface()
+    htb_ok = True
+    if iface:
+        code, out, _ = _run(f"tc qdisc show dev {iface} 2>/dev/null")
+        htb_ok = (code == 0 and "qdisc htb 1:" in out)
+
+    return {
+        "ipset": ipset_ok,
+        "nat": nat_ok,
+        "forward": forward_ok,
+        "ip_forward": ip_forward_ok,
+        "htb": htb_ok,
+    }
+
+
+def _heal(checks: dict) -> list[str]:
+    """Выполнить восстановление того, что сломано. Возвращает список действий."""
+    actions = []
+
+    if not checks["ipset"] or not checks["nat"] or not checks["forward"] or not checks["htb"]:
+        if ENSURE_RULES_SCRIPT.exists():
+            actions.append("ran ensure_rules.sh")
+            _run(f"bash {ENSURE_RULES_SCRIPT} 2>&1", timeout=60)
+        else:
+            logger.error("ensure_rules.sh not found at %s", ENSURE_RULES_SCRIPT)
+
+    if not checks["ip_forward"]:
+        _run("sysctl -w net.ipv4.ip_forward=1 2>/dev/null")
+        actions.append("enabled ip_forward")
+
+    # Если ipset был восстановлен — пересобрать его из refcount как single-source
+    after = _check_rules()
+    if after["ipset"]:
+        in_set = _get_ipset_members()
+        expected = set(refcount._map.keys())
+        missing = expected - in_set
+        if missing:
+            for ip in missing:
+                _run(f"ipset add {IPSET_NAME} {ip} 2>/dev/null")
+            actions.append(f"re-added {len(missing)} IPs to ipset from refcount")
+            _save_ipset_now()
+
+    # Проверка целостности rate-limit'ов
+    broken_rl = rate_limits.verify()
+    if broken_rl:
+        result = rate_limits.restore_all()
+        actions.append(f"restored {len(result['applied'])} rate-limits")
+
+    return actions
+
+
+async def _rules_watchdog_loop():
+    logger.info("Rules watchdog started (interval=%ds)", RULES_WATCHDOG_INTERVAL)
+    while True:
+        await asyncio.sleep(RULES_WATCHDOG_INTERVAL)
+        try:
+            checks = await asyncio.to_thread(_check_rules)
+            broken = [k for k, v in checks.items() if not v]
+            if broken:
+                logger.warning("Self-heal: broken=%s", broken)
+                actions = await asyncio.to_thread(_heal, checks)
+                _save_self_heal_status({
+                    "timestamp": _now_msk().isoformat(),
+                    "broken": broken,
+                    "actions": actions,
+                })
+                logger.info("Self-heal actions: %s", actions)
+        except Exception as e:
+            logger.error("Watchdog error: %s", e)
+
+
+# ═══════════════════════════════════════
+# STARTUP RESYNC FROM PANEL
+# ═══════════════════════════════════════
+
+async def _startup_resync():
+    """Опционально: дёргает панель за актуальным whitelist + rate_limits."""
+    if not (PANEL_URL and PANEL_API_KEY and RELAY_ID):
+        logger.info("Startup-resync пропущен (PANEL_URL/PANEL_API_KEY/RELAY_ID не заданы)")
+        return
+    url = f"{PANEL_URL}/api/relays/{RELAY_ID}/whitelist-payload"
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as cli:
+            r = await cli.get(url, headers={"X-API-Key": PANEL_API_KEY})
+            if r.status_code != 200:
+                logger.warning("Startup-resync: panel returned %d", r.status_code)
+                return
+            data = r.json()
+    except Exception as e:
+        logger.warning("Startup-resync failed: %s", e)
+        return
+
+    clients = data.get("clients") or []
+    rls = data.get("rate_limits") or []
+    valid_entries = [(c["ip"], c["client_id"]) for c in clients if _valid_ip(c.get("ip", ""))]
+
+    # Пересобрать ipset из payload
+    _run(f"ipset create {IPSET_NAME} hash:ip maxelem 1000000 2>/dev/null")
+    _run(f"ipset flush {IPSET_NAME}")
+    unique_ips = set(ip for ip, _ in valid_entries)
+    for ip in unique_ips:
+        _run(f"ipset add {IPSET_NAME} {ip}")
+    refcount.set_all(valid_entries)
+    _save_ipset_now()
+
+    # Применить rate_limits
+    for rl in rls:
+        ip = rl.get("ip")
+        if ip and _valid_ip(ip):
+            rate_limits.set_limit(
+                ip=ip,
+                mbps=float(rl["mbps"]),
+                expires_at=rl.get("expires_at"),
+                client_id=rl.get("client_id"),
+            )
+
+    logger.info("Startup-resync done: %d clients, %d rate_limits", len(unique_ips), len(rls))
+
+
+# ═══════════════════════════════════════
 # BACKGROUND TASK
 # ═══════════════════════════════════════
 
@@ -412,7 +938,23 @@ async def _traffic_collector_loop():
 
 @app.on_event("startup")
 async def on_startup():
+    global _persist_event
+    _persist_event = asyncio.Event()
+    asyncio.create_task(_ipset_persist_loop())
     asyncio.create_task(_traffic_collector_loop())
+    asyncio.create_task(metrics_sampler.loop())
+    asyncio.create_task(_rules_watchdog_loop())
+    # Restore rate-limits сразу (без ожидания первого тика watchdog'а)
+    try:
+        result = await asyncio.to_thread(rate_limits.restore_all)
+        if result["applied"]:
+            logger.info("Rate-limits restored: %d", len(result["applied"]))
+        if result["failed"]:
+            logger.warning("Rate-limits failed: %s", result["failed"])
+    except Exception as e:
+        logger.error("Rate-limits restore error: %s", e)
+    # Опциональный resync с панели — fire-and-forget
+    asyncio.create_task(_startup_resync())
 
 
 # ═══════════════════════════════════════
@@ -468,6 +1010,12 @@ class SyncClientEntry(BaseModel):
 class SyncRequest(BaseModel):
     clients: list[SyncClientEntry]
 
+class RateLimitRequest(BaseModel):
+    ip: str
+    mbps: float
+    expires_at: str | None = None       # ISO 8601 либо null = бессрочно
+    client_id: int | None = None
+
 
 # ═══════════════════════════════════════
 # WHITELIST ENDPOINTS
@@ -494,6 +1042,7 @@ async def whitelist_update(data: IPUpdateRequest):
             _run(f"conntrack -D -p udp -s {data.old_ip} 2>/dev/null")
             removed = data.old_ip
     _run(f"ipset add {IPSET_NAME} {data.new_ip} 2>/dev/null")
+    _trigger_persist()
     return {
         "added": data.new_ip, "removed": removed,
         "client_id": data.client_id, "refcount": refcount.count(data.new_ip),
@@ -508,6 +1057,7 @@ async def whitelist_remove(data: IPRequest):
     if can_remove:
         _run(f"ipset del {IPSET_NAME} {data.ip} 2>/dev/null")
         _run(f"conntrack -D -p udp -s {data.ip} 2>/dev/null")
+        _trigger_persist()
         return {"removed": data.ip}
     else:
         rc = refcount.count(data.ip)
@@ -545,7 +1095,7 @@ def _do_sync_sync(entries: list[dict]):
             _run(f"ipset add {IPSET_NAME} {ip}")
 
         refcount.set_all(rc_entries)
-        _run("ipset save > /etc/ipset.rules 2>/dev/null")
+        _save_ipset_now()
 
         _save_sync_status({
             "ok": True,
@@ -601,6 +1151,50 @@ async def whitelist_list():
         if in_members and line.strip():
             ips.append(line.strip())
     return {"ips": ips, "count": len(ips)}
+
+
+# ═══════════════════════════════════════
+# RATE-LIMIT ENDPOINTS
+# ═══════════════════════════════════════
+
+@app.post("/rate-limit")
+async def rate_limit_set(data: RateLimitRequest):
+    if not _valid_ip(data.ip):
+        raise HTTPException(400, f"Invalid ip: {data.ip}")
+    if data.mbps <= 0:
+        raise HTTPException(400, "mbps must be > 0")
+    result = rate_limits.set_limit(
+        ip=data.ip, mbps=data.mbps,
+        expires_at=data.expires_at, client_id=data.client_id,
+    )
+    if not result.get("ok"):
+        raise HTTPException(500, result.get("error", "apply_failed"))
+    return result
+
+
+@app.delete("/rate-limit/{ip}")
+async def rate_limit_remove(ip: str):
+    if not _valid_ip(ip):
+        raise HTTPException(400, f"Invalid ip: {ip}")
+    result = rate_limits.remove_limit(ip)
+    if not result.get("ok"):
+        raise HTTPException(404, "not_found")
+    return result
+
+
+@app.get("/rate-limit/{ip}")
+async def rate_limit_get(ip: str):
+    if not _valid_ip(ip):
+        raise HTTPException(400, f"Invalid ip: {ip}")
+    info = rate_limits.get(ip)
+    if not info:
+        return {"ip": ip, "limited": False}
+    return {"limited": True, **info}
+
+
+@app.get("/rate-limits")
+async def rate_limits_list():
+    return {"items": rate_limits.all(), "count": len(rate_limits._map)}
 
 
 # ═══════════════════════════════════════
@@ -795,7 +1389,7 @@ async def health():
         load_val = Path("/proc/loadavg").read_text().strip().split()[0]
     except Exception:
         pass
-    mem_total = mem_used = 0
+    mem_total = mem_available = 0
     try:
         with open("/proc/meminfo") as f:
             meminfo = {}
@@ -804,14 +1398,16 @@ async def health():
                 meminfo[parts[0].rstrip(":")] = int(parts[1])
             mem_total = meminfo.get("MemTotal", 0)
             mem_available = meminfo.get("MemAvailable", 0)
-            mem_used = mem_total - mem_available
     except Exception:
         pass
+    mem_used = mem_total - mem_available
 
     t = traffic_monitor.get_all()
     online = _get_online_clients()
     update_status = _load_update_status()
     sync_status = _load_sync_status()
+    self_heal = _load_self_heal_status()
+    metrics = metrics_sampler.snapshot()
 
     return {
         "status": "ok",
@@ -823,11 +1419,19 @@ async def health():
         "conntrack": f"{ct_cur}/{ct_max}",
         "load": float(load_val),
         "memory_mb": {"used": round(mem_used / 1024), "total": round(mem_total / 1024)},
+        "cpu_percent_total": metrics["cpu_percent_total"],
+        "cpu_percent_per_core": metrics["cpu_percent_per_core"],
+        "cpu_count": metrics["cpu_count"],
+        "agent_process": metrics["agent_process"],
+        "network_speed": metrics["network_speed"],
+        "disk": metrics_sampler.disk_snapshot(),
+        "rate_limits_count": len(rate_limits._map),
         "traffic_month": t["month"],
         "traffic_total": t["total"],
         "traffic_ips": t["ip_count"],
         "last_update": update_status,
         "last_sync": sync_status,
+        "last_self_heal": self_heal,
     }
 
 
@@ -879,5 +1483,6 @@ if __name__ == "__main__":
     print(f"WARP Relay Agent v{AGENT_VERSION} starting on :{AGENT_PORT}")
     print(f"ipset: {IPSET_NAME}")
     print(f"Traffic: every {TRAFFIC_INTERVAL}s → {TRAFFIC_FILE}")
+    print(f"Watchdog: every {RULES_WATCHDOG_INTERVAL}s")
     print(f"Repo: {REPO_DIR}")
     uvicorn.run(app, host="0.0.0.0", port=AGENT_PORT, log_level="info")

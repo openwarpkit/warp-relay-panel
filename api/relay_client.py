@@ -267,3 +267,59 @@ async def update_all_relays() -> dict:
 
     await asyncio.gather(*[_update(r) for r in relays], return_exceptions=True)
     return results
+
+
+# ═══════════════════════════════════════
+# RATE LIMITS
+# ═══════════════════════════════════════
+
+async def set_rate_limit(ip: str, mbps: float,
+                         expires_at: str | None = None,
+                         client_id: int | None = None) -> dict:
+    """Применить rate-limit на ВСЕХ активных relay'ях."""
+    try:
+        ip = _validate_ipv4(ip)
+    except ValueError as e:
+        return {"error": str(e)}
+
+    relays = db.get_active_relays()
+    if not relays:
+        return {"error": "no_active_relays"}
+
+    results = {}
+    payload = {"ip": ip, "mbps": float(mbps)}
+    if expires_at:
+        payload["expires_at"] = expires_at
+    if client_id is not None:
+        payload["client_id"] = client_id
+
+    async def _process(relay):
+        ok, data = await _agent_request(relay, "POST", "/rate-limit", payload)
+        results[relay["name"]] = {"ok": ok, **data}
+
+    await asyncio.gather(*[_process(r) for r in relays], return_exceptions=True)
+    return results
+
+
+async def remove_rate_limit(ip: str) -> dict:
+    """Снять rate-limit на всех relay'ях."""
+    try:
+        ip = _validate_ipv4(ip)
+    except ValueError as e:
+        return {"error": str(e)}
+
+    relays = db.get_active_relays()
+    results = {}
+
+    async def _process(relay):
+        ok, data = await _agent_request(relay, "DELETE", f"/rate-limit/{ip}")
+        results[relay["name"]] = {"ok": ok, **data}
+
+    await asyncio.gather(*[_process(r) for r in relays], return_exceptions=True)
+    return results
+
+
+async def list_rate_limits_on_relay(relay: dict) -> dict:
+    """Получить текущий список rate-limit'ов с конкретного relay'я."""
+    ok, data = await _agent_request(relay, "GET", "/rate-limits")
+    return {"ok": ok, **data}
