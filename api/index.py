@@ -24,11 +24,11 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from .database import (
-    create_client_record, get_client_by_id,
+    create_client_record, get_client_by_token, get_client_by_id,
     list_clients, activate_client, activate_client_by_id,
     block_client, delete_client, get_client_full,
-    get_activation_logs, delete_activation_logs,
-    add_relay, list_relays, delete_relay, toggle_relay,
+    get_activation_logs, delete_activation_logs, get_all_active_ips,
+    add_relay, list_relays, get_active_relays, delete_relay, toggle_relay,
     add_ip_ban, remove_ip_ban, remove_ip_ban_by_ip, list_ip_bans,
     get_ip_ban,
     add_rate_limit, remove_rate_limit_by_ip, get_rate_limit,

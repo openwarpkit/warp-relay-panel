@@ -619,10 +619,13 @@ _RELAYS_CACHE_TTL = float(os.environ.get("RELAYS_CACHE_TTL", "15"))
 
 
 def add_relay(name: str, host: str, agent_port: int = 7580,
-              agent_secret: str = "") -> dict:
+              agent_secret: str = "", agent_type: str = "full") -> dict:
+    if agent_type not in ("full", "min"):
+        raise ValueError(f"agent_type must be 'full' or 'min', got: {agent_type}")
     data = {
         "name": name, "host": host,
         "agent_port": agent_port, "agent_secret": agent_secret,
+        "agent_type": agent_type,
     }
     result = _db().table("relays").insert(data).execute()
     cache.invalidate("relays:")
@@ -645,14 +648,21 @@ def list_relays(fields: str = "full") -> list[dict]:
     return result.data
 
 
-def get_active_relays() -> list[dict]:
-    cached_value = cache.get("relays:active")
+def get_active_relays(agent_type: str | None = None) -> list[dict]:
+    """
+    agent_type=None  → все активные (для health-check, traffic, update_all)
+    agent_type='full' → только full (для whitelist/rate-limit fan-out)
+    agent_type='min'  → только min (если когда-то нужно)
+    """
+    key = f"relays:active:{agent_type or 'all'}"
+    cached_value = cache.get(key)
     if cached_value is not None:
         return cached_value
-    result = (
-        _db().table("relays").select("*").eq("is_active", True).execute()
-    )
-    cache.set("relays:active", result.data, ttl=_RELAYS_CACHE_TTL)
+    q = _db().table("relays").select("*").eq("is_active", True)
+    if agent_type:
+        q = q.eq("agent_type", agent_type)
+    result = q.execute()
+    cache.set(key, result.data, ttl=_RELAYS_CACHE_TTL)
     return result.data
 
 

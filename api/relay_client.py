@@ -73,7 +73,7 @@ async def add_ip(new_ip: str, old_ip: str | None = None,
         logger.error("IP validation: %s", e)
         return {"error": str(e)}
 
-    relays = db.get_active_relays()
+    relays = db.get_active_relays(agent_type="full")
     if not relays:
         return {"error": "no_active_relays"}
 
@@ -101,7 +101,7 @@ async def remove_ip(ip: str) -> dict:
     except ValueError:
         return {"error": f"invalid ip: {ip}"}
 
-    relays = db.get_active_relays()
+    relays = db.get_active_relays(agent_type="full")
     results = {}
 
     async def _process(relay):
@@ -139,9 +139,9 @@ async def full_sync(relay_id: int | None = None) -> dict:
                 logger.warning("Skipping non-IPv4: %s", ip)
 
     if relay_id:
-        relays = [r for r in db.list_relays() if r["id"] == relay_id]
+        relays = [r for r in db.list_relays() if r["id"] == relay_id and r.get("agent_type", "full") == "full"]
     else:
-        relays = db.get_active_relays()
+        relays = db.get_active_relays(agent_type="full")
 
     if not relays:
         return {"error": "no_relays"}
@@ -276,13 +276,14 @@ async def update_all_relays() -> dict:
 async def set_rate_limit(ip: str, mbps: float,
                          expires_at: str | None = None,
                          client_id: int | None = None) -> dict:
-    """Применить rate-limit на ВСЕХ активных relay'ях."""
+    """Применить rate-limit на ВСЕХ активных full-relay'ях.
+    Min-relay'и игнорируются — у них общий лимит, не per-IP."""
     try:
         ip = _validate_ipv4(ip)
     except ValueError as e:
         return {"error": str(e)}
 
-    relays = db.get_active_relays()
+    relays = db.get_active_relays(agent_type="full")
     if not relays:
         return {"error": "no_active_relays"}
 
@@ -302,13 +303,13 @@ async def set_rate_limit(ip: str, mbps: float,
 
 
 async def remove_rate_limit(ip: str) -> dict:
-    """Снять rate-limit на всех relay'ях."""
+    """Снять rate-limit на всех full-relay'ях."""
     try:
         ip = _validate_ipv4(ip)
     except ValueError as e:
         return {"error": str(e)}
 
-    relays = db.get_active_relays()
+    relays = db.get_active_relays(agent_type="full")
     results = {}
 
     async def _process(relay):

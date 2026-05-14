@@ -2,3 +2,8 @@
 .vercel
 __pycache__/
 .claude/
+
+# Go build artifacts
+relay-agent-go/bin/
+*.exe
+

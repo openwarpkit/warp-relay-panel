@@ -1,0 +1,194 @@
+package server
+
+import (
+	"encoding/json"
+	"log"
+	"net/http"
+	"time"
+
+	"github.com/openwarpkit/warp-relay-agent/internal/ipsetgo"
+	"github.com/openwarpkit/warp-relay-agent/internal/shell"
+)
+
+type ipReq struct {
+	IP string `json:"ip"`
+}
+
+type ipUpdateReq struct {
+	NewIP    string `json:"new_ip"`
+	OldIP    string `json:"old_ip,omitempty"`
+	ClientID *int64 `json:"client_id,omitempty"`
+}
+
+type syncEntry struct {
+	IP       string `json:"ip"`
+	ClientID int64  `json:"client_id"`
+}
+
+type syncReq struct {
+	Clients []syncEntry `json:"clients"`
+}
+
+func (s *Server) handleWhitelistUpdate(w http.ResponseWriter, r *http.Request) {
+	var req ipUpdateReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid json")
+		return
+	}
+	if !shell.ValidIPv4(req.NewIP) {
+		writeError(w, 400, "Invalid new_ip: "+req.NewIP)
+		return
+	}
+	if req.OldIP != "" && !shell.ValidIPv4(req.OldIP) {
+		writeError(w, 400, "Invalid old_ip: "+req.OldIP)
+		return
+	}
+
+	removed := ""
+	if req.ClientID != nil {
+		canRemove := s.Refcount.Add(req.NewIP, *req.ClientID, req.OldIP)
+		if req.OldIP != "" && canRemove {
+			s.deleteIP(req.OldIP)
+			removed = req.OldIP
+		} else if req.OldIP != "" {
+			log.Printf("Keeping %s in ipset (refcount=%d)", req.OldIP, s.Refcount.Count(req.OldIP))
+		}
+	} else if req.OldIP != "" {
+		s.deleteIP(req.OldIP)
+		removed = req.OldIP
+	}
+	if err := ipsetgo.Add(s.Cfg.IpsetName, req.NewIP); err != nil {
+		log.Printf("ipset add %s: %v", req.NewIP, err)
+	}
+	if s.PersistTrigger != nil {
+		s.PersistTrigger()
+	}
+
+	writeJSON(w, 200, map[string]interface{}{
+		"added":     req.NewIP,
+		"removed":   removed,
+		"client_id": req.ClientID,
+		"refcount":  s.Refcount.Count(req.NewIP),
+	})
+}
+
+// deleteIP — атомарное удаление: ipset del + conntrack flush для UDP-флоу.
+func (s *Server) deleteIP(ip string) {
+	if err := ipsetgo.Del(s.Cfg.IpsetName, ip); err != nil {
+		log.Printf("ipset del %s: %v", ip, err)
+	}
+	if err := s.Conntrack.DeleteBySrcUDP(ip); err != nil {
+		log.Printf("conntrack delete %s: %v", ip, err)
+	}
+}
+
+func (s *Server) handleWhitelistRemove(w http.ResponseWriter, r *http.Request) {
+	var req ipReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid json")
+		return
+	}
+	if !shell.ValidIPv4(req.IP) {
+		writeError(w, 400, "Invalid ip: "+req.IP)
+		return
+	}
+	canRemove := s.Refcount.RemoveClient(req.IP, 0)
+	if canRemove {
+		s.deleteIP(req.IP)
+		if s.PersistTrigger != nil {
+			s.PersistTrigger()
+		}
+		writeJSON(w, 200, map[string]string{"removed": req.IP})
+		return
+	}
+	rc := s.Refcount.Count(req.IP)
+	log.Printf("Keeping %s in ipset (refcount=%d)", req.IP, rc)
+	writeJSON(w, 200, map[string]interface{}{
+		"removed": nil, "kept": req.IP, "refcount": rc,
+	})
+}
+
+// handleWhitelistSync — fire-and-forget, тяжёлая работа в горутине.
+func (s *Server) handleWhitelistSync(w http.ResponseWriter, r *http.Request) {
+	var req syncReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid json")
+		return
+	}
+	total := len(req.Clients)
+	go s.doSync(req.Clients)
+	writeJSON(w, 200, map[string]interface{}{
+		"accepted":     true,
+		"received":     total,
+		"message":      "Sync started in background",
+		"check_status": "GET /health → last_sync",
+	})
+}
+
+func (s *Server) doSync(entries []syncEntry) {
+	startedAt := time.Now().In(time.FixedZone("MSK", 3*3600)).Format(time.RFC3339)
+	s.saveSyncStatus(map[string]interface{}{
+		"ok": nil, "in_progress": true,
+		"total": len(entries), "started_at": startedAt,
+	})
+
+	valid := []syncEntry{}
+	invalid := 0
+	for _, e := range entries {
+		if shell.ValidIPv4(e.IP) {
+			valid = append(valid, e)
+		} else {
+			invalid++
+		}
+	}
+
+	if err := ipsetgo.Create(s.Cfg.IpsetName, 1000000); err != nil {
+		log.Printf("ipset create %s: %v", s.Cfg.IpsetName, err)
+	}
+	if err := ipsetgo.Flush(s.Cfg.IpsetName); err != nil {
+		s.saveSyncStatus(map[string]interface{}{
+			"ok": false, "in_progress": false,
+			"error":       "flush failed: " + err.Error(),
+			"started_at":  startedAt,
+			"finished_at": time.Now().In(time.FixedZone("MSK", 3*3600)).Format(time.RFC3339),
+		})
+		return
+	}
+
+	uniqueIPs := make(map[string]struct{}, len(valid))
+	rcEntries := make(map[string][]int64, len(valid))
+	for _, e := range valid {
+		uniqueIPs[e.IP] = struct{}{}
+		rcEntries[e.IP] = append(rcEntries[e.IP], e.ClientID)
+	}
+	for ip := range uniqueIPs {
+		if err := ipsetgo.Add(s.Cfg.IpsetName, ip); err != nil {
+			log.Printf("ipset add %s: %v", ip, err)
+		}
+	}
+	s.Refcount.SetAll(rcEntries)
+	shell.Run("ipset save > /etc/ipset.rules 2>/dev/null", 10*time.Second)
+
+	s.saveSyncStatus(map[string]interface{}{
+		"ok": true, "in_progress": false,
+		"synced":      len(uniqueIPs),
+		"clients":     len(valid),
+		"invalid":     invalid,
+		"started_at":  startedAt,
+		"finished_at": time.Now().In(time.FixedZone("MSK", 3*3600)).Format(time.RFC3339),
+	})
+	log.Printf("Sync complete: %d IPs, %d clients, %d invalid", len(uniqueIPs), len(valid), invalid)
+}
+
+func (s *Server) handleWhitelistList(w http.ResponseWriter, r *http.Request) {
+	members, err := ipsetgo.Members(s.Cfg.IpsetName)
+	if err != nil {
+		writeJSON(w, 200, map[string]interface{}{"ips": []string{}, "error": err.Error()})
+		return
+	}
+	ips := make([]string, 0, len(members))
+	for ip := range members {
+		ips = append(ips, ip)
+	}
+	writeJSON(w, 200, map[string]interface{}{"ips": ips, "count": len(ips)})
+}
