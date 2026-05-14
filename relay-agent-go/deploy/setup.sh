@@ -39,31 +39,41 @@ REPO_DIR="$(cd "${GO_AGENT_DIR}/.." && pwd)"     # …/warp-relay-panel
 echo -e "${Y}[1/8] Установка пакетов...${N}"
 export DEBIAN_FRONTEND=noninteractive
 apt update -qq
-apt install -y -qq iptables ipset curl conntrack netfilter-persistent ipset-persistent git jq iproute2 build-essential
+apt install -y -qq iptables ipset curl conntrack netfilter-persistent ipset-persistent git jq iproute2
 
 # ═══════════════════════════════════════
-# 2. GO TOOLCHAIN
+# 2. GO TOOLCHAIN (только если нет prebuilt-бинаря)
 # ═══════════════════════════════════════
 
-echo -e "${Y}[2/8] Проверка Go тулчейна...${N}"
-GO_VERSION="1.22.5"
-if ! command -v go &>/dev/null || [[ "$(go version | awk '{print $3}')" < "go${GO_VERSION}" ]]; then
-    ARCH=$(dpkg --print-architecture)
-    case "$ARCH" in
-        amd64) GOARCH="amd64" ;;
-        arm64) GOARCH="arm64" ;;
-        *) echo -e "${R}Неизвестная архитектура: $ARCH${N}"; exit 1 ;;
-    esac
-    echo -e "${Y}  Скачиваем Go ${GO_VERSION}-${GOARCH}...${N}"
-    cd /tmp
-    curl -sLO "https://go.dev/dl/go${GO_VERSION}.linux-${GOARCH}.tar.gz"
-    rm -rf /usr/local/go
-    tar -C /usr/local -xzf "go${GO_VERSION}.linux-${GOARCH}.tar.gz"
-    rm -f "go${GO_VERSION}.linux-${GOARCH}.tar.gz"
-    ln -sf /usr/local/go/bin/go /usr/local/bin/go
-    echo -e "${G}  Go ${GO_VERSION} установлен${N}"
+PREBUILT_BIN="${GO_AGENT_DIR}/dist/warp-relay-agent"
+
+if [ -f "$PREBUILT_BIN" ] && [ -z "$BUILD_FROM_SOURCE" ]; then
+    echo -e "${G}[2/8] Найден prebuilt-бинарь: $PREBUILT_BIN${N}"
+    echo -e "${G}      Go-тулчейн НЕ устанавливаем, сборку пропускаем (BUILD_FROM_SOURCE=1 чтобы пересобрать)${N}"
+    USE_PREBUILT=1
 else
-    echo -e "${G}  Go уже установлен: $(go version)${N}"
+    echo -e "${Y}[2/8] Prebuilt-бинарь не найден — устанавливаем Go и собираем из исходников${N}"
+    apt install -y -qq build-essential
+    GO_VERSION="1.22.5"
+    if ! command -v go &>/dev/null || [[ "$(go version | awk '{print $3}')" < "go${GO_VERSION}" ]]; then
+        ARCH=$(dpkg --print-architecture)
+        case "$ARCH" in
+            amd64) GOARCH="amd64" ;;
+            arm64) GOARCH="arm64" ;;
+            *) echo -e "${R}Неизвестная архитектура: $ARCH${N}"; exit 1 ;;
+        esac
+        echo -e "${Y}  Скачиваем Go ${GO_VERSION}-${GOARCH}...${N}"
+        cd /tmp
+        curl -sLO "https://go.dev/dl/go${GO_VERSION}.linux-${GOARCH}.tar.gz"
+        rm -rf /usr/local/go
+        tar -C /usr/local -xzf "go${GO_VERSION}.linux-${GOARCH}.tar.gz"
+        rm -f "go${GO_VERSION}.linux-${GOARCH}.tar.gz"
+        ln -sf /usr/local/go/bin/go /usr/local/bin/go
+        echo -e "${G}  Go ${GO_VERSION} установлен${N}"
+    else
+        echo -e "${G}  Go уже установлен: $(go version)${N}"
+    fi
+    USE_PREBUILT=0
 fi
 
 # ═══════════════════════════════════════
@@ -166,11 +176,16 @@ fi
 # 6. BUILD GO BINARY
 # ═══════════════════════════════════════
 
-echo -e "${Y}[6/8] Сборка warp-relay-agent...${N}"
-cd "${GO_AGENT_DIR}"
-make tidy
-make build
-cp bin/warp-relay-agent ${INSTALL_DIR}/warp-relay-agent
+if [ "$USE_PREBUILT" = "1" ]; then
+    echo -e "${Y}[6/8] Установка prebuilt-бинаря...${N}"
+    cp "$PREBUILT_BIN" ${INSTALL_DIR}/warp-relay-agent
+else
+    echo -e "${Y}[6/8] Сборка warp-relay-agent (это может занять 1-3 минуты и >500 MB RAM)...${N}"
+    cd "${GO_AGENT_DIR}"
+    make tidy
+    make build
+    cp bin/warp-relay-agent ${INSTALL_DIR}/warp-relay-agent
+fi
 chmod +x ${INSTALL_DIR}/warp-relay-agent
 echo -e "${G}  $(${INSTALL_DIR}/warp-relay-agent --help 2>/dev/null || echo 'binary установлен')${N}"
 
