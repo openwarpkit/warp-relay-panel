@@ -187,7 +187,7 @@ else
     cp bin/warp-relay-agent ${INSTALL_DIR}/warp-relay-agent
 fi
 chmod +x ${INSTALL_DIR}/warp-relay-agent
-echo -e "${G}  $(${INSTALL_DIR}/warp-relay-agent --help 2>/dev/null || echo 'binary установлен')${N}"
+echo -e "${G}  binary установлен ($(stat -c %s ${INSTALL_DIR}/warp-relay-agent) байт)${N}"
 
 # ensure_rules.sh из Python-агента (общий)
 cp "${REPO_DIR}/relay-agent/ensure_rules.sh" ${INSTALL_DIR}/ensure_rules.sh
