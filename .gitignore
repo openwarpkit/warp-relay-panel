@@ -3,7 +3,8 @@
 __pycache__/
 .claude/
 
-# Go build artifacts
-relay-agent-go/bin/
+# Go build artifacts (бинари приходят из GitHub Releases)
+relay-agent/bin/
+relay-agent/dist/
 *.exe
 

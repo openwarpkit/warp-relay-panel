@@ -1,0 +1,84 @@
+name: Build & Release Relay Agent
+
+on:
+  push:
+    tags:
+      - 'agent-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag (e.g. agent-v2.2.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+          cache-dependency-path: relay-agent/go.sum
+
+      - name: Resolve tag and version
+        id: meta
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#agent-v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building $TAG (version=$VERSION)"
+
+      - name: Build full agent (amd64)
+        working-directory: relay-agent
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath \
+              -ldflags "-s -w -X main.Version=${{ steps.meta.outputs.version }}" \
+              -o warp-relay-agent ./cmd/agent
+          file warp-relay-agent
+          ls -lh warp-relay-agent
+
+      - name: Build min agent (amd64)
+        working-directory: relay-agent
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath \
+              -ldflags "-s -w -X main.Version=${{ steps.meta.outputs.version }}-min" \
+              -o warp-relay-agent-min ./cmd/agent-min
+          file warp-relay-agent-min
+          ls -lh warp-relay-agent-min
+
+      - name: Build full agent (arm64)
+        working-directory: relay-agent
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+            go build -trimpath \
+              -ldflags "-s -w -X main.Version=${{ steps.meta.outputs.version }}" \
+              -o warp-relay-agent-arm64 ./cmd/agent
+
+      - name: Build min agent (arm64)
+        working-directory: relay-agent
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+            go build -trimpath \
+              -ldflags "-s -w -X main.Version=${{ steps.meta.outputs.version }}-min" \
+              -o warp-relay-agent-min-arm64 ./cmd/agent-min
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: Relay Agent ${{ steps.meta.outputs.version }}
+          generate_release_notes: true
+          files: |
+            relay-agent/warp-relay-agent
+            relay-agent/warp-relay-agent-min
+            relay-agent/warp-relay-agent-arm64
+            relay-agent/warp-relay-agent-min-arm64

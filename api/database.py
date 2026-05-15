@@ -3,15 +3,15 @@ Supabase database operations.
 Все IP адреса хранятся зашифрованными (Fernet AES).
 Для поиска по IP используется SHA-256 хэш.
 
-v2 (2026-05): большинство hot-path операций переведены на атомарные RPC
-(activate_client_atomic, block_client_atomic, delete_client_atomic,
-get_client_full_with_bans, add_ip_ban_idempotent). Сохраняется fallback
-через env USE_RPC_ATOMIC=false на случай rollback.
+Hot-path операции — атомарные RPC (см. supabase_schema.sql):
+activate_client_atomic, block_client_atomic, delete_client_atomic,
+get_client_full_with_bans, add_ip_ban_idempotent, get_sync_payload,
+find_clients_by_ip, count_clients_on_ip, dashboard_stats.
 """
 
 import os
 import uuid
-from datetime import datetime, date, timezone
+from datetime import datetime, timezone
 from typing import Optional
 from supabase import create_client, Client
 from .crypto import encrypt_ip, decrypt_ip, hash_ip
@@ -19,8 +19,6 @@ from . import cache
 
 _client: Optional[Client] = None
 _PAGE_SIZE = 10000
-
-_USE_RPC = os.environ.get("USE_RPC_ATOMIC", "true").lower() != "false"
 
 
 def _db() -> Client:
@@ -78,12 +76,11 @@ def get_dashboard_stats() -> dict:
 # CLIENTS
 # ═══════════════════════════════════════
 
-def create_client_record(label: str = "", note: str = "") -> dict:
+def create_client_record(label: str = "") -> dict:
     token = uuid.uuid4().hex[:16]
-    data = {"token": token, "label": label, "note": note}
-    result = _db().table("clients").insert(data).execute()
+    result = _db().table("clients").insert({"token": token, "label": label}).execute()
     row = result.data[0]
-    return {"id": row["id"], "token": row["token"], "label": label, "note": note}
+    return {"id": row["id"], "token": row["token"], "label": label}
 
 
 def get_client_by_token(token: str) -> Optional[dict]:
@@ -128,41 +125,24 @@ def count_clients_on_ip(ip: str, exclude_client_id: int | None = None) -> int:
 
 # ── activate ──
 
-def activate_client(token: str, new_ip: str, user_agent: str = "") -> dict:
+def activate_client(token: str, new_ip: str) -> dict:
     """Активация по token. Атомарный RPC: 5 round-trip'ов → 1."""
-    max_act = int(os.environ.get("MAX_ACTIVATIONS_PER_DAY", "10"))
-
-    if _USE_RPC:
-        try:
-            result = _db().rpc("activate_client_atomic", {
-                "p_token": token,
-                "p_new_ip_enc": encrypt_ip(new_ip),
-                "p_new_ip_hash": hash_ip(new_ip),
-                "p_user_agent": user_agent or "",
-                "p_max_per_day": max_act,
-            }).execute()
-            return _wrap_activation_response(result.data, new_ip)
-        except Exception as e:
-            print(f"[activate_client] RPC error: {e}, fallback to legacy")
-    return _activate_client_legacy(token, new_ip, user_agent, max_act)
+    result = _db().rpc("activate_client_atomic", {
+        "p_token": token,
+        "p_new_ip_enc": encrypt_ip(new_ip),
+        "p_new_ip_hash": hash_ip(new_ip),
+    }).execute()
+    return _wrap_activation_response(result.data, new_ip)
 
 
 def activate_client_by_id(client_id: int, new_ip: str) -> dict:
     """Ручная активация по client_id и IP."""
-    max_act = int(os.environ.get("MAX_ACTIVATIONS_PER_DAY", "10"))
-
-    if _USE_RPC:
-        try:
-            result = _db().rpc("activate_client_by_id_atomic", {
-                "p_client_id": client_id,
-                "p_new_ip_enc": encrypt_ip(new_ip),
-                "p_new_ip_hash": hash_ip(new_ip),
-                "p_max_per_day": max_act,
-            }).execute()
-            return _wrap_activation_response(result.data, new_ip)
-        except Exception as e:
-            print(f"[activate_client_by_id] RPC error: {e}, fallback to legacy")
-    return _activate_client_by_id_legacy(client_id, new_ip, max_act)
+    result = _db().rpc("activate_client_by_id_atomic", {
+        "p_client_id": client_id,
+        "p_new_ip_enc": encrypt_ip(new_ip),
+        "p_new_ip_hash": hash_ip(new_ip),
+    }).execute()
+    return _wrap_activation_response(result.data, new_ip)
 
 
 def _wrap_activation_response(data: dict, new_ip: str) -> dict:
@@ -188,188 +168,43 @@ def _wrap_activation_response(data: dict, new_ip: str) -> dict:
     }
 
 
-# ── legacy fallbacks ──
-
-def _activate_client_legacy(token: str, new_ip: str, user_agent: str, max_act: int) -> dict:
-    client = get_client_by_token(token)
-    if not client:
-        return {"error": "invalid_token"}
-    if client["is_blocked"]:
-        return {"error": "blocked"}
-    ban = get_ip_ban(new_ip)
-    if ban:
-        return {"error": "ip_banned", "reason": ban["reason"]}
-
-    today = date.today().isoformat()
-    activations_today = client["_activations_today"]
-    if client["_reset_date"] != today:
-        activations_today = 0
-    if max_act > 0 and activations_today >= max_act:
-        return {"error": "daily_limit"}
-
-    old_ip = client["current_ip"]
-    if old_ip == new_ip:
-        return {"status": "already_active", "client_id": client["id"], "new_ip": new_ip}
-
-    old_ip_shared = False
-    if old_ip:
-        others = count_clients_on_ip(old_ip, exclude_client_id=client["id"])
-        old_ip_shared = others > 0
-
-    now = datetime.now(timezone.utc).isoformat()
-    _db().table("clients").update({
-        "previous_ip_enc": client["_raw_current_ip_enc"],
-        "previous_ip_hash": client.get("_raw_current_ip_hash"),
-        "current_ip_enc": encrypt_ip(new_ip),
-        "current_ip_hash": hash_ip(new_ip),
-        "last_activated_at": now,
-        "activations_today": activations_today + 1,
-        "activations_reset_date": today,
-    }).eq("id", client["id"]).execute()
-
-    _db().table("activation_log").insert({
-        "client_id": client["id"],
-        "ip_enc": encrypt_ip(new_ip),
-        "ip_hash": hash_ip(new_ip),
-        "user_agent": user_agent[:500] if user_agent else None,
-    }).execute()
-
-    return {
-        "status": "activated", "client_id": client["id"],
-        "old_ip": old_ip, "new_ip": new_ip, "old_ip_shared": old_ip_shared,
-    }
-
-
-def _activate_client_by_id_legacy(client_id: int, new_ip: str, max_act: int) -> dict:
-    client = get_client_by_id(client_id)
-    if not client:
-        return {"error": "client_not_found"}
-    if client["is_blocked"]:
-        return {"error": "blocked"}
-    ban = get_ip_ban(new_ip)
-    if ban:
-        return {"error": "ip_banned", "reason": ban["reason"]}
-
-    today = date.today().isoformat()
-    activations_today = client["_activations_today"]
-    if client["_reset_date"] != today:
-        activations_today = 0
-    if max_act > 0 and activations_today >= max_act:
-        return {"error": "daily_limit"}
-
-    old_ip = client["current_ip"]
-    if old_ip == new_ip:
-        return {"status": "already_active", "client_id": client["id"], "new_ip": new_ip}
-
-    old_ip_shared = False
-    if old_ip:
-        others = count_clients_on_ip(old_ip, exclude_client_id=client["id"])
-        old_ip_shared = others > 0
-
-    now = datetime.now(timezone.utc).isoformat()
-    _db().table("clients").update({
-        "previous_ip_enc": client["_raw_current_ip_enc"],
-        "previous_ip_hash": client.get("_raw_current_ip_hash"),
-        "current_ip_enc": encrypt_ip(new_ip),
-        "current_ip_hash": hash_ip(new_ip),
-        "last_activated_at": now,
-        "activations_today": activations_today + 1,
-        "activations_reset_date": today,
-    }).eq("id", client["id"]).execute()
-
-    _db().table("activation_log").insert({
-        "client_id": client["id"],
-        "ip_enc": encrypt_ip(new_ip),
-        "ip_hash": hash_ip(new_ip),
-        "user_agent": "manual_bot_activation",
-    }).execute()
-
-    return {
-        "status": "activated", "client_id": client["id"],
-        "old_ip": old_ip, "new_ip": new_ip, "old_ip_shared": old_ip_shared,
-    }
-
-
 # ── block / delete / full ──
 
 def block_client(client_id: int, blocked: bool = True) -> Optional[dict]:
     """Возвращает обновлённый клиент с current_ip_banned/previous_ip_banned/current_ip_shared."""
-    if _USE_RPC:
-        try:
-            result = _db().rpc("block_client_atomic", {
-                "p_client_id": client_id, "p_blocked": blocked,
-            }).execute()
-            data = result.data
-            if not data or "error" in data:
-                return None
-            return _decrypt_jsonb_client(data)
-        except Exception as e:
-            print(f"[block_client] RPC error: {e}, fallback")
-
-    _db().table("clients").update({"is_blocked": blocked}).eq("id", client_id).execute()
-    client = get_client_by_id(client_id)
-    if client:
-        client["current_ip_banned"] = bool(client["current_ip"]) and is_ip_banned(client["current_ip"])
-        client["previous_ip_banned"] = bool(client["previous_ip"]) and is_ip_banned(client["previous_ip"])
-        if client["current_ip"]:
-            others = count_clients_on_ip(client["current_ip"], exclude_client_id=client_id)
-            client["current_ip_shared"] = others > 0
-        else:
-            client["current_ip_shared"] = False
-    return client
+    result = _db().rpc("block_client_atomic", {
+        "p_client_id": client_id, "p_blocked": blocked,
+    }).execute()
+    data = result.data
+    if not data or "error" in data:
+        return None
+    return _decrypt_jsonb_client(data)
 
 
 def delete_client(client_id: int) -> Optional[dict]:
-    """Возвращает {deleted, id, current_ip, current_ip_shared} либо None."""
-    if _USE_RPC:
-        try:
-            result = _db().rpc("delete_client_atomic", {
-                "p_client_id": client_id,
-            }).execute()
-            data = result.data
-            if not data or "error" in data:
-                return None
-            return {
-                "id": data["id"],
-                "current_ip": _safe_decrypt(data.get("current_ip_enc")),
-                "current_ip_shared": bool(data.get("current_ip_shared", False)),
-            }
-        except Exception as e:
-            print(f"[delete_client] RPC error: {e}, fallback")
-
-    client = get_client_by_id(client_id)
-    if not client:
+    """Возвращает {id, current_ip, current_ip_shared} либо None."""
+    result = _db().rpc("delete_client_atomic", {
+        "p_client_id": client_id,
+    }).execute()
+    data = result.data
+    if not data or "error" in data:
         return None
-    _db().table("activation_log").delete().eq("client_id", client_id).execute()
-    _db().table("clients").delete().eq("id", client_id).execute()
-    others = count_clients_on_ip(client["current_ip"]) if client["current_ip"] else 0
     return {
-        "id": client_id,
-        "current_ip": client["current_ip"],
-        "current_ip_shared": others > 0,
+        "id": data["id"],
+        "current_ip": _safe_decrypt(data.get("current_ip_enc")),
+        "current_ip_shared": bool(data.get("current_ip_shared", False)),
     }
 
 
 def get_client_full(client_id: int) -> Optional[dict]:
     """Клиент + флаги бана + текущий rate-limit. 3 запроса → 1."""
-    if _USE_RPC:
-        try:
-            result = _db().rpc("get_client_full_with_bans", {
-                "p_client_id": client_id,
-            }).execute()
-            data = result.data
-            if not data or "error" in data:
-                return None
-            return _decrypt_jsonb_client(data)
-        except Exception as e:
-            print(f"[get_client_full] RPC error: {e}, fallback")
-
-    client = get_client_by_id(client_id)
-    if not client:
+    result = _db().rpc("get_client_full_with_bans", {
+        "p_client_id": client_id,
+    }).execute()
+    data = result.data
+    if not data or "error" in data:
         return None
-    client["current_ip_banned"] = bool(client["current_ip"]) and is_ip_banned(client["current_ip"])
-    client["previous_ip_banned"] = bool(client["previous_ip"]) and is_ip_banned(client["previous_ip"])
-    return client
+    return _decrypt_jsonb_client(data)
 
 
 def _decrypt_jsonb_client(data: dict) -> dict:
@@ -378,11 +213,9 @@ def _decrypt_jsonb_client(data: dict) -> dict:
         "id": data["id"],
         "token": data.get("token"),
         "label": data.get("label", ""),
-        "note": data.get("note", ""),
         "current_ip": _safe_decrypt(data.get("current_ip_enc")),
         "previous_ip": _safe_decrypt(data.get("previous_ip_enc")),
         "last_activated_at": data.get("last_activated_at"),
-        "activations_today": data.get("activations_today", 0),
         "is_blocked": bool(data.get("is_blocked", False)),
         "created_at": data.get("created_at"),
         "current_ip_banned": bool(data.get("current_ip_banned", False)),
@@ -408,15 +241,11 @@ def get_activation_logs(client_id: int, limit: int = 50) -> list[dict]:
         .select("*").eq("client_id", client_id)
         .order("created_at", desc=True).limit(limit).execute()
     )
-    logs = []
-    for r in result.data:
-        logs.append({
-            "id": r["id"],
-            "ip": _safe_decrypt(r.get("ip_enc")),
-            "user_agent": r.get("user_agent"),
-            "created_at": r["created_at"],
-        })
-    return logs
+    return [{
+        "id": r["id"],
+        "ip": _safe_decrypt(r.get("ip_enc")),
+        "created_at": r["created_at"],
+    } for r in result.data]
 
 
 def get_all_active_ips() -> list[str]:
@@ -443,23 +272,15 @@ def get_all_active_ips() -> list[str]:
 # ── decrypt + search ──
 
 def _decrypt_client(row: dict) -> dict:
-    current_ip = _safe_decrypt(row.get("current_ip_enc"))
-    previous_ip = _safe_decrypt(row.get("previous_ip_enc"))
     return {
         "id": row["id"],
         "token": row["token"],
         "label": row["label"],
-        "note": row.get("note", ""),
-        "current_ip": current_ip,
-        "previous_ip": previous_ip,
+        "current_ip": _safe_decrypt(row.get("current_ip_enc")),
+        "previous_ip": _safe_decrypt(row.get("previous_ip_enc")),
         "last_activated_at": row["last_activated_at"],
-        "activations_today": row["activations_today"],
         "is_blocked": row["is_blocked"],
         "created_at": row["created_at"],
-        "_activations_today": row["activations_today"],
-        "_reset_date": row.get("activations_reset_date"),
-        "_raw_current_ip_enc": row.get("current_ip_enc"),
-        "_raw_current_ip_hash": row.get("current_ip_hash"),
     }
 
 
@@ -491,34 +312,18 @@ def search_clients_by_ip(ip: str, include_log_history: bool = True) -> list[dict
 def add_ip_ban(ip: str, reason: str = "") -> dict:
     """Идемпотентный INSERT через RPC (без race-condition)."""
     ip_h = hash_ip(ip)
-    if _USE_RPC:
-        try:
-            result = _db().rpc("add_ip_ban_idempotent", {
-                "p_ip_hash": ip_h,
-                "p_ip_enc": encrypt_ip(ip),
-                "p_reason": reason,
-            }).execute()
-            data = result.data or {}
-            return {
-                "id": data.get("id"),
-                "ip": ip,
-                "reason": reason,
-                "already_exists": bool(data.get("already_exists", False)),
-            }
-        except Exception as e:
-            print(f"[add_ip_ban] RPC error: {e}, fallback")
-
-    existing = (
-        _db().table("ip_blacklist").select("id").eq("ip_hash", ip_h).execute()
-    )
-    if existing.data:
-        return {"id": existing.data[0]["id"], "already_exists": True}
-
-    result = _db().table("ip_blacklist").insert({
-        "ip_hash": ip_h, "ip_enc": encrypt_ip(ip), "reason": reason,
+    result = _db().rpc("add_ip_ban_idempotent", {
+        "p_ip_hash": ip_h,
+        "p_ip_enc": encrypt_ip(ip),
+        "p_reason": reason,
     }).execute()
-    row = result.data[0]
-    return {"id": row["id"], "ip": ip, "reason": reason, "already_exists": False}
+    data = result.data or {}
+    return {
+        "id": data.get("id"),
+        "ip": ip,
+        "reason": reason,
+        "already_exists": bool(data.get("already_exists", False)),
+    }
 
 
 def remove_ip_ban(ban_id: int) -> bool:

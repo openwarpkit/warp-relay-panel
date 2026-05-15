@@ -78,7 +78,6 @@ def _is_bot(user_agent: str) -> bool:
 
 class ClientCreate(BaseModel):
     label: str = ""
-    note: str = ""
 
 class ClientBlock(BaseModel):
     blocked: bool = True
@@ -200,7 +199,6 @@ TMPL_BOT = """<!DOCTYPE html>
 ERROR_MAP = {
     "invalid_token": ("Неверная ссылка", "Ссылка активации недействительна."),
     "blocked": ("Доступ заблокирован", "Ваш аккаунт заблокирован."),
-    "daily_limit": ("Лимит исчерпан", "Превышен лимит активаций на сегодня."),
     "ipv6_detected": ("IPv6 не поддерживается",
                       "Relay работает только с IPv4.<br>Отключите IPv6 или используйте мобильную сеть."),
     "invalid_ip": ("Ошибка определения IP", "Не удалось определить ваш IPv4 адрес."),
@@ -211,7 +209,6 @@ API_ERROR_MESSAGES = {
     "client_not_found": "Клиент не найден",
     "blocked": "Ваш аккаунт заблокирован",
     "ip_banned": "Этот IP-адрес заблокирован",
-    "daily_limit": "Превышен лимит активаций на сегодня",
     "invalid_ip": "Некорректный IP-адрес",
     "ipv6_not_supported": "IPv6 не поддерживается, нужен IPv4",
 }
@@ -283,7 +280,7 @@ async def activate(token: str, request: Request):
 
     logger.info("Activate: token=%s...%s ip=%s", token[:6], token[-4:], client_ip)
 
-    result = activate_client(token, client_ip, user_agent)
+    result = activate_client(token, client_ip)
 
     if "error" in result:
         if result["error"] == "ip_banned":
@@ -324,16 +321,11 @@ async def activate(token: str, request: Request):
 
 @app.post("/api/clients", dependencies=[Depends(require_api_key)])
 async def api_create_client(data: ClientCreate):
-    return create_client_record(label=data.label, note=data.note)
+    return create_client_record(label=data.label)
 
 @app.get("/api/clients", dependencies=[Depends(require_api_key)])
 async def api_list_clients(include_blocked: bool = True):
-    clients = list_clients(include_blocked=include_blocked)
-    for c in clients:
-        c.pop("_activations_today", None)
-        c.pop("_reset_date", None)
-        c.pop("_raw_current_ip_enc", None)
-    return clients
+    return list_clients(include_blocked=include_blocked)
 
 
 @app.get("/api/clients/search", dependencies=[Depends(require_api_key)])
@@ -351,8 +343,6 @@ async def api_search_clients(ip: str, include_log_history: bool = True):
             c["match_source"] = "previous"
         else:
             c["match_source"] = "history"
-        for k in ("_activations_today", "_reset_date", "_raw_current_ip_enc", "_raw_current_ip_hash"):
-            c.pop(k, None)
 
     return clients
 
@@ -362,8 +352,6 @@ async def api_get_client(client_id: int):
     client = get_client_by_id(client_id)
     if not client:
         raise HTTPException(404, "Client not found")
-    for key in ("_activations_today", "_reset_date", "_raw_current_ip_enc"):
-        client.pop(key, None)
     return client
 
 @app.get("/api/clients/{client_id}/logs", dependencies=[Depends(require_api_key)])
