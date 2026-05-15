@@ -7,4 +7,3 @@ __pycache__/
 relay-agent/bin/
 relay-agent/dist/
 *.exe
-
