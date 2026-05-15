@@ -73,6 +73,43 @@ def _is_bot(user_agent: str) -> bool:
 
 
 # ═══════════════════════════════════════
+# WARP / CLOUDFLARE DETECTION
+# ═══════════════════════════════════════
+
+# Cloudflare published IPv4 ranges (включают WARP egress) + RFC 6598 CGNAT
+# (используется WARP внутренне). Источник: https://www.cloudflare.com/ips-v4
+_WARP_NETWORKS = [
+    ipaddress.ip_network(cidr) for cidr in (
+        "173.245.48.0/20",
+        "103.21.244.0/22",
+        "103.22.200.0/22",
+        "103.31.4.0/22",
+        "141.101.64.0/18",
+        "108.162.192.0/18",
+        "190.93.240.0/20",
+        "188.114.96.0/20",
+        "197.234.240.0/22",
+        "198.41.128.0/17",
+        "162.158.0.0/15",
+        "104.16.0.0/13",
+        "104.24.0.0/14",
+        "172.64.0.0/13",
+        "131.0.72.0/22",
+        # CGNAT — внутренние egress-IP WARP
+        "100.64.0.0/10",
+    )
+]
+
+
+def _is_warp_ip(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr in net for net in _WARP_NETWORKS)
+
+
+# ═══════════════════════════════════════
 # SCHEMAS
 # ═══════════════════════════════════════
 
@@ -188,6 +225,33 @@ TMPL_IP_BANNED = """<!DOCTYPE html>
   <p class="hint">Если считаете это ошибкой — обратитесь к администратору.</p>
 </div></body></html>"""
 
+TMPL_WARP_DETECTED = """<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WARP Relay — Отключите VPN</title>
+<style>{style} .icon {{ color:#fbbf24; }}
+.btn {{ background:#3b82f6; color:#fff; border:none; border-radius:8px;
+       padding:0.75rem 1.5rem; font-size:1rem; font-weight:600;
+       cursor:pointer; margin-top:1.25rem; transition:background 0.15s; }}
+.btn:hover {{ background:#2563eb; }}
+.steps {{ text-align:left; margin:1rem 0; color:#cbd5e1; font-size:0.9rem;
+         line-height:1.7; padding-left:1.25rem; }}
+.steps li {{ margin-bottom:0.25rem; }}
+</style></head>
+<body><div class="card">
+  <div class="icon">⚠</div>
+  <h2>Обнаружен WARP / VPN</h2>
+  <p>Активация невозможна: ваш IP принадлежит подсети Cloudflare&nbsp;WARP.</p>
+  <div class="ip">{ip}</div>
+  <ol class="steps">
+    <li>Отключите Cloudflare&nbsp;WARP, 1.1.1.1 или любой&nbsp;VPN</li>
+    <li>Убедитесь, что соединение идёт через домашний&nbsp;Wi-Fi или мобильную сеть</li>
+    <li>Нажмите кнопку <b>Обновить</b></li>
+  </ol>
+  <button class="btn" onclick="location.reload()">Обновить</button>
+  <p class="hint">После активации можно снова включить WARP, если нужно.</p>
+</div></body></html>"""
+
 TMPL_BOT = """<!DOCTYPE html>
 <html lang="ru"><head><meta charset="utf-8">
 <meta property="og:title" content="WARP Relay — Активация">
@@ -211,6 +275,7 @@ API_ERROR_MESSAGES = {
     "ip_banned": "Этот IP-адрес заблокирован",
     "invalid_ip": "Некорректный IP-адрес",
     "ipv6_not_supported": "IPv6 не поддерживается, нужен IPv4",
+    "warp_detected": "Обнаружен Cloudflare WARP / VPN. Отключите WARP и повторите активацию",
 }
 
 
@@ -219,6 +284,13 @@ def _error_html(key: str, status: int = 403) -> HTMLResponse:
     return HTMLResponse(
         TMPL_ERROR.format(style=_BASE_STYLE, title=title, message=message),
         status_code=status,
+    )
+
+
+def _warp_detected_html(ip: str) -> HTMLResponse:
+    return HTMLResponse(
+        TMPL_WARP_DETECTED.format(style=_BASE_STYLE, ip=ip),
+        status_code=403,
     )
 
 
@@ -277,6 +349,11 @@ async def activate(token: str, request: Request):
     except ValueError:
         logger.error("Invalid IP: %s", client_ip)
         return _error_html("invalid_ip", 400)
+
+    if _is_warp_ip(client_ip):
+        logger.warning("WARP/Cloudflare IP blocked: token=%s...%s ip=%s",
+                       token[:6], token[-4:], client_ip)
+        return _warp_detected_html(client_ip)
 
     logger.info("Activate: token=%s...%s ip=%s", token[:6], token[-4:], client_ip)
 
@@ -407,6 +484,12 @@ async def api_activate_client_manual(client_id: int, data: ClientManualActivate)
     except ValueError:
         return {"error": "invalid_ip",
                 "detail": API_ERROR_MESSAGES["invalid_ip"]}
+
+    if _is_warp_ip(ip):
+        logger.warning("Manual activate blocked (WARP): client #%d ip=%s",
+                       client_id, ip)
+        return {"error": "warp_detected",
+                "detail": API_ERROR_MESSAGES["warp_detected"]}
 
     result = activate_client_by_id(client_id, ip)
 
