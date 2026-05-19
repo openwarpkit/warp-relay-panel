@@ -1,9 +1,12 @@
-// WARP Relay Agent v2.1.0 — Go-rewrite Python-агента (relay-agent/agent.py).
+// WARP Relay Agent v2.2.0 — Go-rewrite Python-агента (relay-agent/agent.py).
 // Single binary, low-memory, тот же API 1:1.
 //
 // v2.1.0: горячие операции (conntrack snapshot/delete/mark, ipset add/del/list)
 // переведены на native netlink (ti-mo/conntrack, vishvananda/netlink).
 // iptables/tc остаются через shell — редкие операции, ROI от netlink невелик.
+//
+// v2.2.0: в /traffic и /traffic/{ip} добавлено поле "client_ids"
+// (clientID, привязанные к IP в refcount.json).
 package main
 
 import (
@@ -33,7 +36,7 @@ import (
 )
 
 // Version проставляется через -ldflags при сборке.
-var Version = "2.1.0"
+var Version = "2.2.0"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
