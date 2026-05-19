@@ -78,7 +78,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	memUsed := memTotal - memAvail
 
-	t := s.Traffic.GetAll(s.Refcount.Count)
+	t := s.Traffic.GetAll(s.Refcount.Count, s.Refcount.ClientsFor)
 	online := s.onlineClients()
 	metrics := s.Metrics.Snapshot()
 
@@ -185,7 +185,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"sessions":  map[string]int{"assured": stats.Assured, "unreplied": stats.Unreplied},
 		"top_ports": topPorts,
 		"network":   speed,
-		"traffic":   s.Traffic.GetAll(s.Refcount.Count),
+		"traffic":   s.Traffic.GetAll(s.Refcount.Count, s.Refcount.ClientsFor),
 	})
 }
 

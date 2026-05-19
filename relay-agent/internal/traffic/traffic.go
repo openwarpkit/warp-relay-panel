@@ -163,15 +163,16 @@ func (m *Monitor) Loop(ctx context.Context) {
 
 // PerIP — публичная структура для эндпоинтов.
 type PerIP struct {
-	IP          string `json:"ip,omitempty"`
-	TXBytes     int64  `json:"tx_bytes"`
-	RXBytes     int64  `json:"rx_bytes"`
-	TotalBytes  int64  `json:"total_bytes"`
-	TXHuman     string `json:"tx_human"`
-	RXHuman     string `json:"rx_human"`
-	TotalHuman  string `json:"total_human"`
-	ClientsOnIP int    `json:"clients_on_ip"`
-	Updated     string `json:"updated,omitempty"`
+	IP          string  `json:"ip,omitempty"`
+	TXBytes     int64   `json:"tx_bytes"`
+	RXBytes     int64   `json:"rx_bytes"`
+	TotalBytes  int64   `json:"total_bytes"`
+	TXHuman     string  `json:"tx_human"`
+	RXHuman     string  `json:"rx_human"`
+	TotalHuman  string  `json:"total_human"`
+	ClientsOnIP int     `json:"clients_on_ip"`
+	ClientIDs   []int64 `json:"client_ids"`
+	Updated     string  `json:"updated,omitempty"`
 }
 
 type Summary struct {
@@ -187,7 +188,7 @@ type Summary struct {
 	IPCount      int              `json:"ip_count"`
 }
 
-func (m *Monitor) GetAll(refCount func(string) int) Summary {
+func (m *Monitor) GetAll(refCount func(string) int, clients func(string) []int64) Summary {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.checkMonthReset()
@@ -200,12 +201,17 @@ func (m *Monitor) GetAll(refCount func(string) int) Summary {
 	for ip, s := range m.state.IPs {
 		totalTX += s.TX
 		totalRX += s.RX
+		ids := clients(ip)
+		if ids == nil {
+			ids = []int64{}
+		}
 		out.IPs[ip] = PerIP{
 			TXBytes: s.TX, RXBytes: s.RX, TotalBytes: s.TX + s.RX,
 			TXHuman:     shell.FormatBytes(s.TX),
 			RXHuman:     shell.FormatBytes(s.RX),
 			TotalHuman:  shell.FormatBytes(s.TX + s.RX),
 			ClientsOnIP: refCount(ip),
+			ClientIDs:   ids,
 			Updated:     s.Updated,
 		}
 	}
@@ -222,9 +228,13 @@ func (m *Monitor) GetAll(refCount func(string) int) Summary {
 func (m *Monitor) GetIP(ip string, refCount func(string) int, clients func(string) []int64) (PerIP, []int64, string, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	ids := clients(ip)
+	if ids == nil {
+		ids = []int64{}
+	}
 	s, ok := m.state.IPs[ip]
 	if !ok {
-		return PerIP{IP: ip}, clients(ip), m.state.Month, false
+		return PerIP{IP: ip, ClientIDs: ids}, ids, m.state.Month, false
 	}
 	return PerIP{
 		IP:          ip,
@@ -233,8 +243,9 @@ func (m *Monitor) GetIP(ip string, refCount func(string) int, clients func(strin
 		RXHuman:     shell.FormatBytes(s.RX),
 		TotalHuman:  shell.FormatBytes(s.TX + s.RX),
 		ClientsOnIP: refCount(ip),
+		ClientIDs:   ids,
 		Updated:     s.Updated,
-	}, clients(ip), m.state.Month, true
+	}, ids, m.state.Month, true
 }
 
 func (m *Monitor) Reset() string {

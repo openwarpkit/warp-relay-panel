@@ -9,7 +9,7 @@ import (
 )
 
 func (s *Server) handleTrafficAll(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, s.Traffic.GetAll(noRefcount))
+	writeJSON(w, 200, s.Traffic.GetAll(noRefcount, noClients))
 }
 
 func (s *Server) handleTrafficByIP(w http.ResponseWriter, r *http.Request) {

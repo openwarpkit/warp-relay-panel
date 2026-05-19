@@ -97,6 +97,14 @@ def get_client_by_id(client_id: int) -> Optional[dict]:
     return _decrypt_client(result.data[0])
 
 
+def get_client_labels(ids: list[int]) -> dict[int, str]:
+    """Batch-резолв client_id → label. Возвращает {id: label} только для существующих."""
+    if not ids:
+        return {}
+    result = _db().table("clients").select("id,label").in_("id", ids).execute()
+    return {row["id"]: row.get("label", "") for row in (result.data or [])}
+
+
 def list_clients(include_blocked: bool = True) -> list[dict]:
     def _build(offset: int, limit: int):
         q = _db().table("clients").select("*").order("id").range(offset, offset + limit - 1)

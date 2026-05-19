@@ -147,6 +147,29 @@ Healthcheck панели.
 
 ---
 
+### `POST /api/clients/labels`
+Batch-резолв `client_id` → `label`. Полезно для UI: по `client_ids` из `/api/traffic` показать имена клиентов одним запросом вместо N штук `/api/clients/{id}`.
+
+**Request body:**
+```json
+{ "ids": [1, 7, 99] }
+```
+
+| Поле | Тип | Обязат. | Описание |
+|---|---|---|---|
+| `ids` | int[] | да | Список client_id |
+
+**Response 200:** маппинг `id (string)` → `label (string \| null)`. `null` если клиента с таким ID нет.
+```json
+{
+  "1": "Иван",
+  "7": "Пётр",
+  "99": null
+}
+```
+
+---
+
 ### `GET /api/clients/{client_id}`
 Получить клиента по ID.
 
@@ -538,6 +561,30 @@ Healthcheck панели.
 | `summary` | bool | `false` | Только totals, без `ips` map |
 | `top` | int | `null` | Только N топ-IP по трафику |
 
+**Response 200:**
+```json
+{
+  "ok": true,
+  "relay": "FI-Helsinki",
+  "month": "2026-05",
+  "last_reset": "2026-05-01T00:00:00+03:00",
+  "ips": {
+    "1.2.3.4": {
+      "tx_bytes": 100, "rx_bytes": 200, "total_bytes": 300,
+      "tx_human": "100 B", "rx_human": "200 B", "total_human": "300 B",
+      "clients_on_ip": 2,
+      "client_ids": [1, 7],
+      "updated": "2026-05-15T12:00:00+03:00"
+    }
+  },
+  "total_tx_bytes": 100, "total_rx_bytes": 200, "total_bytes": 300,
+  "total_tx": "100 B", "total_rx": "200 B", "total": "300 B",
+  "ip_count": 1
+}
+```
+
+`client_ids` — список clientID, привязанных к этому IP в `refcount.json` агента. У min-агента и для IP без привязки — пустой массив `[]`.
+
 ---
 
 ### `POST /api/relays/{relay_id}/sync`
@@ -783,21 +830,33 @@ Health-check всех relay'ев параллельно.
 ---
 
 ### `GET /api/traffic`
-Объединённый трафик со всех relay'ев.
+Объединённый трафик со всех relay'ев. Ключ — `name` relay. Чтобы из `client_ids` получить читаемые имена — батч-эндпоинт [`POST /api/clients/labels`](#post-apiclientslabels).
 
 **Response 200:**
 ```json
 {
   "FI-Helsinki": {
     "ok": true,
+    "relay": "FI-Helsinki",
     "month": "2026-05",
+    "last_reset": "2026-05-01T00:00:00+03:00",
     "ips": {
-      "1.2.3.4": { "tx_bytes": 100, "rx_bytes": 200, "total_bytes": 300, ... }
+      "1.2.3.4": {
+        "tx_bytes": 100, "rx_bytes": 200, "total_bytes": 300,
+        "tx_human": "100 B", "rx_human": "200 B", "total_human": "300 B",
+        "clients_on_ip": 2,
+        "client_ids": [1, 7],
+        "updated": "2026-05-15T12:00:00+03:00"
+      }
     },
-    "total_bytes": 300
+    "total_tx_bytes": 100, "total_rx_bytes": 200, "total_bytes": 300,
+    "total_tx": "100 B", "total_rx": "200 B", "total": "300 B",
+    "ip_count": 1
   }
 }
 ```
+
+`client_ids` — список clientID, сидящих за этим IP (из `refcount.json` агента). Для IP без привязки — `[]`.
 
 ---
 
@@ -986,6 +1045,7 @@ Health-check всех relay'ев параллельно.
       "tx_bytes": 100, "rx_bytes": 200, "total_bytes": 300,
       "tx_human": "100 B", "rx_human": "200 B", "total_human": "300 B",
       "clients_on_ip": 1,
+      "client_ids": [1],
       "updated": "..."
     }
   },
@@ -994,6 +1054,8 @@ Health-check всех relay'ев параллельно.
   "ip_count": 1
 }
 ```
+
+`client_ids` — список clientID, привязанных к этому IP в `refcount.json`. Для min-агента и IP без привязки — `[]`.
 
 ### `GET /traffic/{ip}`
 Один IP + список `client_ids` (на этом агенте).

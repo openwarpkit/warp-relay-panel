@@ -28,6 +28,7 @@ from .database import (
     list_clients, activate_client, activate_client_by_id,
     block_client, delete_client, get_client_full,
     get_activation_logs, delete_activation_logs, get_all_active_ips,
+    get_client_labels,
     add_relay, list_relays, get_active_relays, delete_relay, toggle_relay,
     add_ip_ban, remove_ip_ban, remove_ip_ban_by_ip, list_ip_bans,
     get_ip_ban,
@@ -147,6 +148,9 @@ class RateLimitCreate(BaseModel):
 
 class RateLimitRemove(BaseModel):
     ip: str
+
+class ClientLabelsRequest(BaseModel):
+    ids: list[int]
 
 
 # ═══════════════════════════════════════
@@ -405,6 +409,18 @@ async def api_list_clients(include_blocked: bool = True):
     return list_clients(include_blocked=include_blocked)
 
 
+@app.post("/api/clients/labels", dependencies=[Depends(require_api_key)])
+async def api_client_labels(data: ClientLabelsRequest):
+    """Batch-резолв client_id → label.
+
+    Удобно, чтобы по `client_ids` из `/api/traffic` показать имена клиентов
+    одним запросом вместо N штук `/api/clients/{id}`.
+
+    Возвращает {"<id>": "<label>"}; отсутствующие ID → null."""
+    found = get_client_labels(data.ids)
+    return {str(cid): found.get(cid) for cid in data.ids}
+
+
 @app.get("/api/clients/search", dependencies=[Depends(require_api_key)])
 async def api_search_clients(ip: str, include_log_history: bool = True):
     if not ip.strip():
@@ -628,6 +644,7 @@ async def api_add_relay(data: RelayCreate):
 async def api_list_relays(fields: str = "full"):
     """fields=basic — без last_health (легче payload)."""
     return list_relays(fields=fields)
+
 
 @app.delete("/api/relays/{relay_id}", dependencies=[Depends(require_api_key)])
 async def api_delete_relay(relay_id: int):
