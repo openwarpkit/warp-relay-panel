@@ -69,7 +69,85 @@ func New(path string, markMin, markMax int, ct *conntrackgo.Client) *Manager {
 		useNft:  os.Getenv("RATELIMIT_BACKEND") != "iptables",
 	}
 	mgr.load()
+	// Startup-init: создать nft warp_shaper + tc flow filter если их нет.
+	// Защищает от сценария «бинарь обновили, но ExecStartPre с ensure_rules.sh
+	// не отработал» — без этого первый /rate-limit / SetBatch падал бы с
+	// "No such file or directory".
+	if err := mgr.ensureBackend(); err != nil {
+		log.Printf("ratelimit: ensureBackend on startup: %v (watchdog will retry)", err)
+	}
 	return mgr
+}
+
+// ensureBackend идемпотентно создаёт nft warp_shaper-table + map + rule в
+// PREROUTING + root tc flow filter. Если всё уже на месте — возвращает nil
+// без shell-вызовов после быстрой проверки.
+//
+// Вызывается:
+//   - в New() при старте агента
+//   - из applyTC/SetBatch если получили "No such file or directory" от nft
+//     (runtime self-heal — кто-то снёс таблицу руками или после ребута)
+func (m *Manager) ensureBackend() error {
+	if !m.useNft {
+		return nil
+	}
+
+	// Быстрая проверка — если оба компонента на месте, ничего не делаем.
+	tableOk := false
+	rcT, _, _ := shell.Run("nft list table ip warp_shaper >/dev/null 2>&1", 5*time.Second)
+	if rcT == 0 {
+		tableOk = true
+	}
+	iface := shell.DefaultIface()
+	flowOk := false
+	if iface != "" {
+		_, out, _ := shell.Run(fmt.Sprintf("tc filter show dev %s parent 1:0 2>/dev/null", iface), 5*time.Second)
+		if strings.Contains(out, "flow chain") {
+			flowOk = true
+		}
+	}
+	if tableOk && flowOk {
+		return nil
+	}
+
+	// nft часть — таблица, chain в PREROUTING, map ip2mark, rule ct mark set.
+	if !tableOk {
+		nftInit := "add table ip warp_shaper\n" +
+			"add chain ip warp_shaper prerouting { type filter hook prerouting priority -150 ; }\n" +
+			"add map ip warp_shaper ip2mark { type ipv4_addr : mark ; }\n" +
+			"add rule ip warp_shaper prerouting ct mark set ip saddr map @ip2mark\n"
+		rc, _, errOut := shell.RunStdin("nft -f -", nftInit, 10*time.Second)
+		if rc != 0 && !isExistsErr(errOut) {
+			return fmt.Errorf("nft init warp_shaper: %s", errOut)
+		}
+		log.Println("ratelimit: nft warp_shaper table created")
+	}
+
+	// tc flow filter — нужен HTB qdisc, который ставит ensure_rules.sh.
+	// Если qdisc нет — пропускаем; watchdog запустит ensure_rules.sh.
+	if !flowOk && iface != "" {
+		_, qOut, _ := shell.Run(fmt.Sprintf("tc qdisc show dev %s 2>/dev/null", iface), 5*time.Second)
+		if strings.Contains(qOut, "qdisc htb 1:") {
+			rc, _, errOut := shell.Run(fmt.Sprintf(
+				"tc filter add dev %s parent 1:0 protocol ip prio 1 handle 1 flow map key mark addend 0xffffffff baseclass 1:1",
+				iface), 5*time.Second)
+			if rc == 0 {
+				log.Println("ratelimit: tc flow filter created")
+			} else if !isExistsErr(errOut) {
+				log.Printf("ratelimit: tc flow filter not created: %s", errOut)
+			}
+		}
+	}
+	return nil
+}
+
+// isMissingErr — nft / tc возвращают это сообщение когда таблица/map/класс
+// отсутствует. Триггер для runtime self-heal.
+func isMissingErr(stderr string) bool {
+	s := strings.ToLower(stderr)
+	return strings.Contains(s, "no such file or directory") ||
+		strings.Contains(s, "no such table") ||
+		strings.Contains(s, "could not process rule: no such")
 }
 
 func (m *Manager) load() {
@@ -129,10 +207,15 @@ func (m *Manager) applyTC(ip string, mbps float64, mark int) error {
 	if m.useNft {
 		// idempotent: nft при дубликате возвращает rc=1 + stderr "File exists".
 		// БЕЗ 2>&1 — иначе stderr перенаправится в stdout и isExistsErr не сработает.
-		rc, _, err := shell.Run(
-			fmt.Sprintf("nft add element ip warp_shaper ip2mark '{ %s : 0x%x }'", ip, mark),
-			5*time.Second,
-		)
+		cmd := fmt.Sprintf("nft add element ip warp_shaper ip2mark '{ %s : 0x%x }'", ip, mark)
+		rc, _, err := shell.Run(cmd, 5*time.Second)
+		// Runtime self-heal: таблица могла исчезнуть (ребут без сохранения,
+		// `nft flush ruleset`, и т.п.) — создаём её inline и повторяем.
+		if rc != 0 && !isExistsErr(err) && isMissingErr(err) {
+			if healErr := m.ensureBackend(); healErr == nil {
+				rc, _, err = shell.Run(cmd, 5*time.Second)
+			}
+		}
 		if rc != 0 && !isExistsErr(err) {
 			return fmt.Errorf("nft add element failed: %s", err)
 		}
@@ -341,11 +424,17 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 	// 3. Применить nft batch одним вызовом.
 	if nftBuf.Len() > 0 {
 		rc, _, errOut := shell.RunStdin("nft -f -", nftBuf.String(), 30*time.Second)
+		// Runtime self-heal: warp_shaper-таблицы нет → создаём + повторяем.
+		// "delete element" в batch при отсутствующем элементе тоже даёт
+		// "No such file or directory", но это не fatal — после ensureBackend
+		// add element всё равно создаст что надо.
+		if rc != 0 && isMissingErr(errOut) {
+			if healErr := m.ensureBackend(); healErr == nil {
+				rc, _, errOut = shell.RunStdin("nft -f -", nftBuf.String(), 30*time.Second)
+			}
+		}
 		if rc != 0 {
-			// "delete element" может упасть с File exists (если элемент отсутствует) —
-			// игнорируем такие, не помечаем как ошибку.
-			if !isExistsErr(errOut) && !strings.Contains(strings.ToLower(errOut), "no such file") {
-				// Не критично: nft мог частично применить.
+			if !isExistsErr(errOut) && !isMissingErr(errOut) {
 				log.Printf("ratelimit.SetBatch: nft batch returned rc=%d: %s", rc, errOut)
 			}
 		}

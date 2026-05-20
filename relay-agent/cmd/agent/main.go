@@ -34,6 +34,12 @@
 // см. api/relay_client.full_sync). Diff-remove: лимиты, которых нет в payload,
 // снимаются — agent state 1-в-1 совпадает с БД после Sync.
 // startupResync тоже переведён на SetBatch — N×fork+exec → 2 fork+exec.
+//
+// v2.2.6: self-heal nft warp_shaper. ratelimit.New() при старте создаёт
+// table+map+rule если их нет (ExecStartPre с ensure_rules.sh мог не
+// отработать). При runtime-ошибке "No such file or directory" в nft add/
+// /SetBatch — inline-init таблицы и повторение операции. Снимает кейс
+// «обновили бинарь без systemctl restart → /rate-limit падает с 500».
 package main
 
 import (
@@ -63,7 +69,7 @@ import (
 )
 
 // Version проставляется через -ldflags при сборке.
-var Version = "2.2.5"
+var Version = "2.2.6"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
