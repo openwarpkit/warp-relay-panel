@@ -28,6 +28,12 @@
 // v2.2.4: RemoveBatch для idle-cleanup в sharedlimit. Default
 // SHARED_SCAN_INTERVAL поднят 10s -> 30s (реже reconcile, ниже пиковая
 // нагрузка от applyTC; компромисс — клиенты получают лимит до 30s медленнее).
+//
+// v2.2.5: /whitelist/sync теперь принимает поле "rate_limits" и применяет
+// шейпинг батчем сразу после whitelist (panel шлёт rate_limits в payload —
+// см. api/relay_client.full_sync). Diff-remove: лимиты, которых нет в payload,
+// снимаются — agent state 1-в-1 совпадает с БД после Sync.
+// startupResync тоже переведён на SetBatch — N×fork+exec → 2 fork+exec.
 package main
 
 import (
@@ -57,7 +63,7 @@ import (
 )
 
 // Version проставляется через -ldflags при сборке.
-var Version = "2.2.4"
+var Version = "2.2.5"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
@@ -226,12 +232,24 @@ func startupResync(
 	rc.SetAll(rcEntries)
 	shell.Run("ipset save > /etc/ipset.rules 2>/dev/null", 10*time.Second)
 
+	// Rate-limits batch'ем — 1 nft + 1 tc + 1 conntrack Dump на все 200+ IP
+	// вместо N×fork+exec в цикле (см. ratelimit.SetBatch).
+	items := make([]ratelimit.SetItem, 0, len(payload.RateLimits))
 	for _, r := range payload.RateLimits {
 		if !shell.ValidIPv4(r.IP) {
 			continue
 		}
-		if _, err := rl.Set(r.IP, r.Mbps, r.ExpiresAt, r.ClientID); err != nil {
-			log.Printf("Startup-resync: rate-limit %s failed: %v", r.IP, err)
+		items = append(items, ratelimit.SetItem{
+			IP:        r.IP,
+			Mbps:      r.Mbps,
+			ExpiresAt: r.ExpiresAt,
+			ClientID:  r.ClientID,
+		})
+	}
+	if len(items) > 0 {
+		_, errs := rl.SetBatch(items)
+		for ip, err := range errs {
+			log.Printf("Startup-resync: rate-limit %s failed: %v", ip, err)
 		}
 	}
 	log.Printf("Startup-resync done: %d clients, %d rate_limits",

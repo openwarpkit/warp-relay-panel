@@ -115,9 +115,13 @@ async def remove_ip(ip: str) -> dict:
 
 async def full_sync(relay_id: int | None = None) -> dict:
     """
-    Отправляет whitelist на relay-агенты. Агент принимает данные и обрабатывает
-    их в фоне (fire-and-forget), чтобы не упираться в Vercel timeout.
+    Отправляет whitelist + rate-limits на relay-агенты. Агент принимает данные
+    и обрабатывает их в фоне (fire-and-forget), чтобы не упираться в Vercel timeout.
     Реальный результат проверяется через /health → last_sync.
+
+    Включает rate_limits в payload, чтобы после Sync на свежий relay шейпинг
+    был навешан сразу, а не «whitelist есть, но клиент с лимитом получает
+    безлимит до ручного POST /rate-limit».
     """
     clients = db.list_clients(include_blocked=False)
 
@@ -138,6 +142,25 @@ async def full_sync(relay_id: int | None = None) -> dict:
             except ValueError:
                 logger.warning("Skipping non-IPv4: %s", ip)
 
+    # Rate-limits: все актуальные записи из БД. Агент применит их батчем
+    # после ipset.SetAll. Для забаненных IP не отправляем — лимит не нужен,
+    # клиент всё равно не пройдёт через whitelist.
+    rate_limit_entries = []
+    for rl in db.list_rate_limits():
+        ip = rl.get("ip")
+        if not ip or ip in banned_ips:
+            continue
+        try:
+            ip = _validate_ipv4(ip)
+        except ValueError:
+            continue
+        entry = {"ip": ip, "mbps": float(rl["mbps"])}
+        if rl.get("expires_at"):
+            entry["expires_at"] = rl["expires_at"]
+        if rl.get("client_id") is not None:
+            entry["client_id"] = rl["client_id"]
+        rate_limit_entries.append(entry)
+
     if relay_id:
         relays = [r for r in db.list_relays() if r["id"] == relay_id and r.get("agent_type", "full") == "full"]
     else:
@@ -151,7 +174,10 @@ async def full_sync(relay_id: int | None = None) -> dict:
     async def _sync(relay):
         ok, data = await _agent_request(
             relay, "POST", "/whitelist/sync",
-            {"clients": client_entries},
+            {
+                "clients": client_entries,
+                "rate_limits": rate_limit_entries,
+            },
             timeout=SYNC_TIMEOUT,
         )
         # Пометка synced=True если агент принял payload.
@@ -168,6 +194,7 @@ async def full_sync(relay_id: int | None = None) -> dict:
     await asyncio.gather(*[_sync(r) for r in relays], return_exceptions=True)
     return {
         "total_clients": len(client_entries),
+        "total_rate_limits": len(rate_limit_entries),
         "skipped_banned": skipped_banned,
         "relays": results,
     }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/nellimonix/warp-relay-panel/relay-agent/internal/ipsetgo"
+	"github.com/nellimonix/warp-relay-panel/relay-agent/internal/ratelimit"
 	"github.com/nellimonix/warp-relay-panel/relay-agent/internal/shell"
 )
 
@@ -25,8 +26,16 @@ type syncEntry struct {
 	ClientID int64  `json:"client_id"`
 }
 
+type syncRateLimitEntry struct {
+	IP        string  `json:"ip"`
+	Mbps      float64 `json:"mbps"`
+	ExpiresAt string  `json:"expires_at,omitempty"`
+	ClientID  *int64  `json:"client_id,omitempty"`
+}
+
 type syncReq struct {
-	Clients []syncEntry `json:"clients"`
+	Clients    []syncEntry          `json:"clients"`
+	RateLimits []syncRateLimitEntry `json:"rate_limits,omitempty"`
 }
 
 func (s *Server) handleWhitelistUpdate(w http.ResponseWriter, r *http.Request) {
@@ -116,20 +125,24 @@ func (s *Server) handleWhitelistSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	total := len(req.Clients)
-	go s.doSync(req.Clients)
+	totalRL := len(req.RateLimits)
+	go s.doSync(req.Clients, req.RateLimits)
 	writeJSON(w, 200, map[string]interface{}{
-		"accepted":     true,
-		"received":     total,
-		"message":      "Sync started in background",
-		"check_status": "GET /health → last_sync",
+		"accepted":            true,
+		"received":            total,
+		"received_rate_limits": totalRL,
+		"message":             "Sync started in background",
+		"check_status":        "GET /health → last_sync",
 	})
 }
 
-func (s *Server) doSync(entries []syncEntry) {
+func (s *Server) doSync(entries []syncEntry, rlEntries []syncRateLimitEntry) {
 	startedAt := time.Now().In(time.FixedZone("MSK", 3*3600)).Format(time.RFC3339)
 	s.saveSyncStatus(map[string]interface{}{
 		"ok": nil, "in_progress": true,
-		"total": len(entries), "started_at": startedAt,
+		"total":             len(entries),
+		"total_rate_limits": len(rlEntries),
+		"started_at":        startedAt,
 	})
 
 	valid := []syncEntry{}
@@ -169,15 +182,65 @@ func (s *Server) doSync(entries []syncEntry) {
 	s.Refcount.SetAll(rcEntries)
 	shell.Run("ipset save > /etc/ipset.rules 2>/dev/null", 10*time.Second)
 
+	// Rate-limits: применить пришедшие batch'ем + удалить stale (которых нет в payload).
+	// Это даёт «полную пересинхронизацию» — после Sync шейпинг 1-в-1 соответствует БД.
+	appliedRL, removedRL, invalidRL := s.syncRateLimits(rlEntries)
+
 	s.saveSyncStatus(map[string]interface{}{
 		"ok": true, "in_progress": false,
-		"synced":      len(uniqueIPs),
-		"clients":     len(valid),
-		"invalid":     invalid,
-		"started_at":  startedAt,
-		"finished_at": time.Now().In(time.FixedZone("MSK", 3*3600)).Format(time.RFC3339),
+		"synced":              len(uniqueIPs),
+		"clients":             len(valid),
+		"invalid":             invalid,
+		"rate_limits_applied": appliedRL,
+		"rate_limits_removed": removedRL,
+		"rate_limits_invalid": invalidRL,
+		"started_at":          startedAt,
+		"finished_at":         time.Now().In(time.FixedZone("MSK", 3*3600)).Format(time.RFC3339),
 	})
-	log.Printf("Sync complete: %d IPs, %d clients, %d invalid", len(uniqueIPs), len(valid), invalid)
+	log.Printf("Sync complete: %d IPs, %d clients, %d invalid, %d rate-limits applied, %d stale removed",
+		len(uniqueIPs), len(valid), invalid, appliedRL, removedRL)
+}
+
+// syncRateLimits применяет batch + удаляет stale (которых нет в payload).
+// Если s.RateLimit nil или payload пустой и в state пусто — ничего не делает.
+func (s *Server) syncRateLimits(entries []syncRateLimitEntry) (applied, removed, invalid int) {
+	if s.RateLimit == nil {
+		return 0, 0, 0
+	}
+	items := make([]ratelimit.SetItem, 0, len(entries))
+	incoming := make(map[string]struct{}, len(entries))
+	for _, e := range entries {
+		if !shell.ValidIPv4(e.IP) || e.Mbps <= 0 {
+			invalid++
+			continue
+		}
+		items = append(items, ratelimit.SetItem{
+			IP:        e.IP,
+			Mbps:      e.Mbps,
+			ExpiresAt: e.ExpiresAt,
+			ClientID:  e.ClientID,
+		})
+		incoming[e.IP] = struct{}{}
+	}
+
+	if len(items) > 0 {
+		out, errs := s.RateLimit.SetBatch(items)
+		applied = len(out)
+		invalid += len(errs)
+	}
+
+	// Diff: всё что есть в локальном state, но нет в payload — снимаем.
+	var stale []string
+	for _, l := range s.RateLimit.All() {
+		if _, ok := incoming[l.IP]; !ok {
+			stale = append(stale, l.IP)
+		}
+	}
+	if len(stale) > 0 {
+		s.RateLimit.RemoveBatch(stale)
+		removed = len(stale)
+	}
+	return applied, removed, invalid
 }
 
 func (s *Server) handleWhitelistList(w http.ResponseWriter, r *http.Request) {
