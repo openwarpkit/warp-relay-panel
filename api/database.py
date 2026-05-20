@@ -98,10 +98,11 @@ def get_client_by_id(client_id: int) -> Optional[dict]:
 
 
 def get_client_labels(ids: list[int]) -> dict[int, str]:
-    """Batch-резолв client_id → label. Возвращает {id: label} только для существующих."""
+    """Batch-резолв client_id → label. Через RPC: массив идёт в JSON-body, без URL-лимита."""
     if not ids:
         return {}
-    result = _db().table("clients").select("id,label").in_("id", ids).execute()
+    unique_ids = list({int(i) for i in ids})
+    result = _db().rpc("get_client_labels", {"p_ids": unique_ids}).execute()
     return {row["id"]: row.get("label", "") for row in (result.data or [])}
 
 

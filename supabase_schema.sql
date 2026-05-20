@@ -463,6 +463,22 @@ $$;
 
 
 -- ═══════════════════════════════════════
+-- get_client_labels
+-- Batch-резолв id → label. Принимает массив в JSON-body,
+-- не упирается в URL-лимит (в отличие от ?id=in.(...)).
+-- ═══════════════════════════════════════
+CREATE OR REPLACE FUNCTION get_client_labels(p_ids BIGINT[])
+RETURNS TABLE (id BIGINT, label TEXT)
+LANGUAGE sql
+STABLE
+AS $$
+  SELECT id, label
+    FROM clients
+   WHERE id = ANY(p_ids);
+$$;
+
+
+-- ═══════════════════════════════════════
 -- add_ip_ban_idempotent
 -- INSERT ON CONFLICT DO NOTHING — без race condition.
 -- ═══════════════════════════════════════
