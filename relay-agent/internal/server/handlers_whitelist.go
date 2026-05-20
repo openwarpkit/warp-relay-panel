@@ -34,8 +34,10 @@ type syncRateLimitEntry struct {
 }
 
 type syncReq struct {
-	Clients    []syncEntry          `json:"clients"`
-	RateLimits []syncRateLimitEntry `json:"rate_limits,omitempty"`
+	Clients []syncEntry `json:"clients"`
+	// pointer: nil = поле отсутствует (старая panel) — лимиты не трогаем.
+	// pointer to [] = явный пустой массив — снять все локальные.
+	RateLimits *[]syncRateLimitEntry `json:"rate_limits,omitempty"`
 }
 
 func (s *Server) handleWhitelistUpdate(w http.ResponseWriter, r *http.Request) {
@@ -125,25 +127,35 @@ func (s *Server) handleWhitelistSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	total := len(req.Clients)
-	totalRL := len(req.RateLimits)
+	totalRL := -1 // -1 = поле отсутствует, лимиты не трогаем
+	if req.RateLimits != nil {
+		totalRL = len(*req.RateLimits)
+	}
 	go s.doSync(req.Clients, req.RateLimits)
 	writeJSON(w, 200, map[string]interface{}{
-		"accepted":            true,
-		"received":            total,
+		"accepted":             true,
+		"received":             total,
 		"received_rate_limits": totalRL,
-		"message":             "Sync started in background",
-		"check_status":        "GET /health → last_sync",
+		"message":              "Sync started in background",
+		"check_status":         "GET /health → last_sync",
 	})
 }
 
-func (s *Server) doSync(entries []syncEntry, rlEntries []syncRateLimitEntry) {
+// doSync — фоновая обработка sync payload.
+// rlEntries == nil — поле "rate_limits" отсутствует в payload (старая panel
+// или manual curl) → шейпинг не трогаем (чтобы случайно не снести лимиты).
+// rlEntries != nil — даже если пустой → diff-replace (полная синхронизация).
+func (s *Server) doSync(entries []syncEntry, rlEntries *[]syncRateLimitEntry) {
 	startedAt := time.Now().In(time.FixedZone("MSK", 3*3600)).Format(time.RFC3339)
-	s.saveSyncStatus(map[string]interface{}{
+	statusInit := map[string]interface{}{
 		"ok": nil, "in_progress": true,
-		"total":             len(entries),
-		"total_rate_limits": len(rlEntries),
-		"started_at":        startedAt,
-	})
+		"total":      len(entries),
+		"started_at": startedAt,
+	}
+	if rlEntries != nil {
+		statusInit["total_rate_limits"] = len(*rlEntries)
+	}
+	s.saveSyncStatus(statusInit)
 
 	valid := []syncEntry{}
 	invalid := 0
@@ -184,25 +196,31 @@ func (s *Server) doSync(entries []syncEntry, rlEntries []syncRateLimitEntry) {
 
 	// Rate-limits: применить пришедшие batch'ем + удалить stale (которых нет в payload).
 	// Это даёт «полную пересинхронизацию» — после Sync шейпинг 1-в-1 соответствует БД.
-	appliedRL, removedRL, invalidRL := s.syncRateLimits(rlEntries)
-
-	s.saveSyncStatus(map[string]interface{}{
+	// rlEntries == nil → старая panel или manual curl без поля → шейпинг не трогаем.
+	statusFin := map[string]interface{}{
 		"ok": true, "in_progress": false,
-		"synced":              len(uniqueIPs),
-		"clients":             len(valid),
-		"invalid":             invalid,
-		"rate_limits_applied": appliedRL,
-		"rate_limits_removed": removedRL,
-		"rate_limits_invalid": invalidRL,
-		"started_at":          startedAt,
-		"finished_at":         time.Now().In(time.FixedZone("MSK", 3*3600)).Format(time.RFC3339),
-	})
-	log.Printf("Sync complete: %d IPs, %d clients, %d invalid, %d rate-limits applied, %d stale removed",
-		len(uniqueIPs), len(valid), invalid, appliedRL, removedRL)
+		"synced":      len(uniqueIPs),
+		"clients":     len(valid),
+		"invalid":     invalid,
+		"started_at":  startedAt,
+		"finished_at": time.Now().In(time.FixedZone("MSK", 3*3600)).Format(time.RFC3339),
+	}
+	if rlEntries != nil {
+		appliedRL, removedRL, invalidRL := s.syncRateLimits(*rlEntries)
+		statusFin["rate_limits_applied"] = appliedRL
+		statusFin["rate_limits_removed"] = removedRL
+		statusFin["rate_limits_invalid"] = invalidRL
+		log.Printf("Sync complete: %d IPs, %d clients, %d invalid, %d rate-limits applied, %d stale removed",
+			len(uniqueIPs), len(valid), invalid, appliedRL, removedRL)
+	} else {
+		log.Printf("Sync complete: %d IPs, %d clients, %d invalid (rate_limits not in payload — skipped)",
+			len(uniqueIPs), len(valid), invalid)
+	}
+	s.saveSyncStatus(statusFin)
 }
 
 // syncRateLimits применяет batch + удаляет stale (которых нет в payload).
-// Если s.RateLimit nil или payload пустой и в state пусто — ничего не делает.
+// Вызывается только когда rate_limits явно есть в payload (даже пустой []).
 func (s *Server) syncRateLimits(entries []syncRateLimitEntry) (applied, removed, invalid int) {
 	if s.RateLimit == nil {
 		return 0, 0, 0
