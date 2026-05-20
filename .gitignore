@@ -1,2 +1,9 @@
 .env
 .vercel
+__pycache__/
+.claude/
+
+# Go build artifacts (бинари приходят из GitHub Releases)
+relay-agent/bin/
+relay-agent/dist/
+*.exe

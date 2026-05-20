@@ -1,16 +1,16 @@
-# WARP Relay Panel v1.2.2
+# WARP Relay Panel v1.3.0
 
-Панель управления whitelist для WARP Relay серверов.  
-Бесплатный хостинг на **Vercel + Supabase**.
+Панель управления whitelist и rate-limit'ами для WARP Relay серверов.
+Бесплатный хостинг на **Vercel + Supabase**, native Go-агент v2.1.0+ на relay'ях.
 
 ---
 
 ## Архитектура
 
 ```
-Telegram Bot  ──HTTP──▶  Vercel (FastAPI)  ──HTTP──▶  Relay Agent 1
-                         Supabase (PostgreSQL)  ────▶  Relay Agent 2
-                              ▲                 ────▶  Relay Agent N
+Telegram Bot  ──HTTP──▶  Vercel (FastAPI)  ──HTTP──▶  Relay Agent 1 (full)
+                         Supabase (PostgreSQL)  ────▶  Relay Agent 2 (full)
+                              ▲                 ────▶  Relay Agent N (min)
                               │
                        Клиент по ссылке
                        (определяется IPv4)
@@ -20,8 +20,13 @@ Telegram Bot  ──HTTP──▶  Vercel (FastAPI)  ──HTTP──▶  Relay 
 |-----------|-----|-----------|
 | API-панель | Vercel serverless | Бесплатно |
 | База данных | Supabase PostgreSQL | Бесплатно (500 MB) |
-| Relay Agent | На каждом relay-сервере | VPS |
+| Relay Agent (Go) | На каждом relay-сервере (~7 MB бинарь) | VPS |
 | Telegram Bot | Сервер | VPS |
+
+**Два типа relay-агента:**
+
+- **`full`** — whitelist через `ipset` + индивидуальные rate-limit'ы по запросам панели. Используется для подписчиков.
+- **`min`** — без whitelist, пропускает всех. Накладывает общий лимит N Mbps (default 25) на каждый активный клиентский IP. Используется для бесплатных/общих relay'ев.
 
 ---
 
@@ -30,13 +35,13 @@ Telegram Bot  ──HTTP──▶  Vercel (FastAPI)  ──HTTP──▶  Relay 
 ### 1. Панель (Vercel + Supabase) — 5 минут
 
 **Supabase:**
-1. Создать проект на [supabase.com](https://supabase.com)
-2. **SQL Editor** → вставить `supabase_schema.sql` → Run
-3. Скопировать **Project URL** и **service_role key**
+1. Создать проект на [supabase.com](https://supabase.com).
+2. **SQL Editor** → вставить [supabase_schema.sql](supabase_schema.sql) → Run. Скрипт идемпотентный — безопасно прогонять повторно.
+3. Скопировать **Project URL** и **service_role key**.
 
 **Vercel — деплой одной кнопкой:**
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/openwarpkit/warp-relay-panel&repository-name=warp-relay-panel)
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/nellimonix/warp-relay-panel&repository-name=warp-relay-panel)
 
 После деплоя → **Settings → Environment Variables** → задать:
 
@@ -47,21 +52,25 @@ Telegram Bot  ──HTTP──▶  Vercel (FastAPI)  ──HTTP──▶  Relay 
 | `ENCRYPTION_KEY` | Сгенерировать: `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
 | `API_KEY` | Любой секретный ключ для бота |
 | `AGENT_SECRET` | Общий секрет для relay-агентов |
-| `MAX_ACTIVATIONS_PER_DAY` | `10` (0 = без лимита) |
 
 → **Redeploy** чтобы подхватить переменные.
 
 ### 2. Relay-сервер — 1 команда
 
+Бинари приходят из GitHub Releases — на VPS не собирается ничего:
+
 ```bash
 ssh root@RELAY_IP
 
-git clone https://github.com/openwarpkit/warp-relay-panel.git /opt/warp-relay-panel
-bash /opt/warp-relay-panel/relay-agent/setup_relay.sh
+git clone https://github.com/nellimonix/warp-relay-panel.git /opt/warp-relay-panel
+sudo bash /opt/warp-relay-panel/relay-agent/deploy/setup.sh        # full
+# или
+sudo bash /opt/warp-relay-panel/relay-agent/deploy/setup-min.sh    # min
 ```
 
-Скрипт спросит `Agent secret` (тот же что `AGENT_SECRET` на Vercel) и порт (по умолчанию 7580).  
-Автоматически настроит: timezone МСК, iptables, ipset, systemd, автовосстановление при перезагрузке.
+Скрипт спросит `Agent secret` (тот же `AGENT_SECRET` что на Vercel) и порт (default 7580). Скачает свежий бинарь из [releases/latest](https://github.com/nellimonix/warp-relay-panel/releases/latest), настроит iptables/ipset/tc, заведёт systemd unit, включит автовосстановление правил при перезагрузке.
+
+Override owner/repo для форка: `AGENT_RELEASE_REPO=user/repo bash setup.sh`.
 
 ### 3. Добавить relay в панель
 
@@ -69,10 +78,17 @@ bash /opt/warp-relay-panel/relay-agent/setup_relay.sh
 PANEL="https://your-project.vercel.app"
 KEY="your-api-key"
 
+# Full-relay
 curl -X POST ${PANEL}/api/relays \
   -H "X-API-Key: ${KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"name": "FI-Helsinki", "host": "1.2.3.4", "agent_port": 7580}'
+  -d '{"name": "FI-Helsinki", "host": "1.2.3.4", "agent_port": 7580, "agent_secret": "...", "agent_type": "full"}'
+
+# Min-relay
+curl -X POST ${PANEL}/api/relays \
+  -H "X-API-Key: ${KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Free-1", "host": "5.6.7.8", "agent_port": 7580, "agent_secret": "...", "agent_type": "min"}'
 ```
 
 ### 4. Создать клиента
@@ -81,7 +97,7 @@ curl -X POST ${PANEL}/api/relays \
 curl -X POST ${PANEL}/api/clients \
   -H "X-API-Key: ${KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"label": "Иван", "note": "подписчик"}'
+  -d '{"label": "Иван"}'
 
 # Ответ: {"id": 1, "token": "a1b2c3d4e5f67890", ...}
 # Ссылка: https://your-project.vercel.app/activate/a1b2c3d4e5f67890
@@ -97,58 +113,42 @@ curl -X POST ${PANEL}/api/relays/sync-all -H "X-API-Key: ${KEY}"
 
 ## Обновление relay-серверов
 
-Обновление работает через API (fire-and-forget): панель отправляет команду, агент подтверждает получение и обновляется в фоне.
+**Release-driven flow:** агент НЕ собирается на VPS. CI собирает бинари при создании git-тега, агент скачивает свежий бинарь из GitHub Releases.
 
 ```bash
-# Обновить все relay:
+# Обновить все relay (fire-and-forget):
 curl -X POST ${PANEL}/api/relays/update-all -H "X-API-Key: ${KEY}"
 
 # Обновить один:
 curl -X POST ${PANEL}/api/relays/{id}/update -H "X-API-Key: ${KEY}"
 ```
 
-Ответ сразу сообщает какие relay приняли команду, а какие недоступны:
-```json
-{
-  "FI-Helsinki": {"accepted": true, "message": "Update started in background"},
-  "DE-Frankfurt": {"error": "[DE-Frankfurt] timeout: POST /update"}
-}
-```
+Что происходит на агенте при `/update`:
+1. `git pull` (для скриптов/конфигов в `/opt/warp-relay-panel`).
+2. GitHub API → узнать `tag_name` latest release.
+3. Если новее — скачать `warp-relay-agent` (или `-min`) из release assets.
+4. Atomic swap бинаря + `systemctl restart`.
 
-Проверить результат обновления — через `/health` каждого relay:
+Время: ~10-30 секунд (вместо ~3 минут компиляции). Нагрузка на VPS: ~7 MB download.
+
+Проверить результат — через `/health` каждого relay:
 ```bash
 curl -X GET ${PANEL}/api/relays/{id}/health -H "X-API-Key: ${KEY}"
-# → "last_update": {"ok": true, "new_version": "1.2.1", "finished_at": "..."}
+# → "last_update": {"ok": true, "release_tag": "agent-v2.2.0", "finished_at": "..."}
 ```
+
+### Создание нового релиза агента
+
+```bash
+git tag agent-v2.2.0
+git push origin agent-v2.2.0
+```
+
+Workflow [.github/workflows/release-agent.yml](.github/workflows/release-agent.yml) соберёт `warp-relay-agent`, `warp-relay-agent-min`, `*-arm64` и аттачит к Release.
 
 ### Автовосстановление при перезагрузке
 
-При каждом запуске агент (через `ExecStartPre`) проверяет и восстанавливает ipset и iptables правила из сохранённых конфигов.
-
-<details>
-<summary><b>Ручная установка relay (без git)</b></summary>
-
-```bash
-scp -r relay-agent root@RELAY_IP:/tmp/
-ssh root@RELAY_IP "bash /tmp/relay-agent/setup_relay.sh"
-```
-
-В этом режиме обновление через API не работает — только вручную через scp.
-
-</details>
-
-<details>
-<summary><b>Ручной деплой Vercel (без кнопки)</b></summary>
-
-```bash
-cd warp-relay-panel
-npm i -g vercel
-vercel
-# Задать переменные в Dashboard → Settings → Environment Variables
-vercel --prod
-```
-
-</details>
+При каждом запуске агент (через `ExecStartPre`) проверяет и восстанавливает ipset + iptables правила из сохранённых конфигов (`rules_recipe.json`).
 
 ---
 
@@ -158,13 +158,13 @@ vercel --prod
 
 `ENCRYPTION_KEY` используется для шифрования IP-адресов клиентов в базе данных (Fernet AES-128-CBC).
 
-> **⚠️ Если сменить `ENCRYPTION_KEY` — все ранее зашифрованные IP станут нечитаемыми.** Клиенты будут отображаться с ошибкой `decrypt_error`, активации продолжат работать (будут записываться новые IP с новым ключом), но история будет потеряна.
+> **⚠️ Если сменить `ENCRYPTION_KEY` — все ранее зашифрованные IP станут нечитаемыми.** Клиенты будут отображаться с ошибкой `decrypt_error`, активации продолжат работать (новые IP с новым ключом), но история будет потеряна.
 
 **Правила:**
 - Сгенерировать один раз: `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
-- Сохранить в надёжном месте (password manager)
-- Никогда не менять после начала работы с клиентами
-- Не коммитить в git
+- Сохранить в надёжном месте (password manager).
+- Никогда не менять после начала работы с клиентами.
+- Не коммитить в git.
 
 ### Relay-агент
 
@@ -176,7 +176,7 @@ ufw allow from PANEL_IP to any port 7580
 ufw deny 7580
 ```
 
-Если фиксированного IP нет (Vercel serverless) — защита через `AGENT_SECRET`.
+Если фиксированного IP нет (Vercel serverless) — защита через `AGENT_SECRET` (`X-Agent-Key` header).
 
 ### Шифрование в базе
 
@@ -184,7 +184,7 @@ ufw deny 7580
 
 ---
 
-## API
+## API панели
 
 Все `/api/*` эндпоинты требуют заголовок `X-API-Key`.
 
@@ -192,30 +192,35 @@ ufw deny 7580
 
 | Метод | Путь | Описание |
 |-------|------|----------|
-| `POST` | `/api/clients` | Создать `{"label":"...", "note":"..."}` |
+| `POST` | `/api/clients` | Создать `{"label":"..."}` |
 | `GET` | `/api/clients` | Список всех (`?include_blocked=false`) |
+| `GET` | `/api/clients/search?ip=1.2.3.4` | Поиск по current/previous IP + история активаций |
 | `GET` | `/api/clients/{id}` | Детали клиента |
-| `GET` | `/api/clients/{id}/logs` | История активаций |
+| `GET` | `/api/clients/{id}/full` | Клиент + флаги бана + текущий rate-limit (1 RPC) |
+| `POST` | `/api/clients/{id}/activate` | Ручная активация по IP `{"ip":"1.2.3.4"}` (для бота) |
+| `GET` | `/api/clients/{id}/logs` | История активаций (`?limit=50`) |
+| `DELETE` | `/api/clients/{id}/logs` | Очистить историю активаций |
 | `GET` | `/api/clients/{id}/traffic` | Трафик клиента со всех relay |
 | `PATCH` | `/api/clients/{id}/block` | Блокировать `{"blocked": true}` |
 | `DELETE` | `/api/clients/{id}` | Удалить (+ убрать IP с relay) |
 
-> **Общий IP:** при блокировке/удалении клиента IP удаляется с relay только если никто другой на этом IP не сидит.
+> **Общий IP:** при блокировке/удалении клиента IP удаляется с relay только если никто другой на этом IP не сидит (refcount).
 
 ### Relay-серверы
 
 | Метод | Путь | Описание |
 |-------|------|----------|
-| `POST` | `/api/relays` | Добавить relay |
-| `GET` | `/api/relays` | Список |
+| `POST` | `/api/relays` | Добавить `{name, host, agent_port, agent_secret, agent_type:"full"\|"min"}` |
+| `GET` | `/api/relays` | Список (`?fields=basic` — без last_health) |
 | `DELETE` | `/api/relays/{id}` | Удалить |
 | `PATCH` | `/api/relays/{id}/toggle` | Вкл/выкл `{"active": false}` |
 | `GET` | `/api/relays/{id}/health` | Здоровье + `last_update` |
 | `GET` | `/api/relays/{id}/stats` | Статистика (клиенты, трафик, порты) |
-| `GET` | `/api/relays/{id}/traffic` | Потребление трафика по IP |
-| `POST` | `/api/relays/{id}/sync` | Синхронизировать whitelist |
+| `GET` | `/api/relays/{id}/traffic` | Трафик по IP (`?summary=true`, `?top=10`) |
+| `POST` | `/api/relays/{id}/sync` | Синхронизировать whitelist (только full) |
 | `POST` | `/api/relays/{id}/update` | Обновить агент (fire-and-forget) |
-| `POST` | `/api/relays/sync-all` | Синхронизировать все relay |
+| `GET` | `/api/relays/{id}/whitelist-payload` | Полный payload для startup-resync (внутреннее) |
+| `POST` | `/api/relays/sync-all` | Синхронизировать все full-relay |
 | `POST` | `/api/relays/update-all` | Обновить все relay |
 | `GET` | `/api/relays/health-all` | Проверить все relay |
 
@@ -224,20 +229,35 @@ ufw deny 7580
 | Метод | Путь | Описание |
 |-------|------|----------|
 | `POST` | `/api/blacklist` | Забанить `{"ip":"1.2.3.4", "reason":"..."}` |
-| `GET` | `/api/blacklist` | Список всех банов |
+| `GET` | `/api/blacklist` | Список (`?page=0&per_page=20&search=1.2.3.4`) |
 | `GET` | `/api/blacklist/check/{ip}` | Проверить IP |
+| `GET` | `/api/blacklist/{id}` | Детали бана |
 | `DELETE` | `/api/blacklist/{id}` | Разбанить по ID |
 | `DELETE` | `/api/blacklist/by-ip` | Разбанить `{"ip":"1.2.3.4"}` |
 
 > **IP-бан** блокирует активацию для ЛЮБОГО клиента с этим IP. Клиенты не блокируются — могут активироваться с другого IP.
+
+### Rate-limits (per-IP, в Mbps)
+
+| Метод | Путь | Описание |
+|-------|------|----------|
+| `POST` | `/api/rate-limits` | Установить `{"ip","mbps","expires_in_seconds"?,"reason"?,"client_id"?}` |
+| `GET` | `/api/rate-limits` | Список всех |
+| `GET` | `/api/rate-limits/expired` | Истёкшие (для внешнего шедулера cleanup) |
+| `GET` | `/api/rate-limits/{ip}` | Получить лимит для IP |
+| `DELETE` | `/api/rate-limits/{ip}` | Снять лимит |
+| `DELETE` | `/api/rate-limits/by-ip` | Снять `{"ip":"..."}` (альтернатива) |
+
+> Rate-limits применяются только на full-relay (через CONNMARK + HTB). На min-relay — общий shared limit.
 
 ### Трафик / Статистика / Активация
 
 | Метод | Путь | Описание |
 |-------|------|----------|
 | `GET` | `/api/traffic` | Трафик со всех relay (по IP) |
-| `GET` | `/api/stats` | Общая статистика |
-| `GET` | `/activate/{token}` | Активация по ссылке (публичный) |
+| `GET` | `/api/stats` | Лёгкая статистика через RPC `dashboard_stats` |
+| `GET` | `/api/dashboard` | Главный экран: relays(basic) + stats |
+| `GET` | `/activate/{token}` | Активация по ссылке (публичный, HTML) |
 | `GET` | `/health` | Healthcheck |
 
 ---
@@ -246,19 +266,36 @@ ufw deny 7580
 
 Порт 7580. Все эндпоинты (кроме `/health`) требуют `X-Agent-Key`.
 
+### Full-агент
+
 | Метод | Путь | Описание |
 |-------|------|----------|
 | `POST` | `/whitelist/update` | `{"new_ip":"...", "old_ip":"...", "client_id": 1}` |
 | `POST` | `/whitelist/remove` | `{"ip":"..."}` |
-| `POST` | `/whitelist/sync` | `{"clients":[{"ip":"...", "client_id": 1}]}` |
+| `POST` | `/whitelist/sync` | `{"clients":[{"ip","client_id"}]}` (фоновая пересборка) |
 | `GET` | `/whitelist/list` | Текущий ipset |
+| `POST` | `/rate-limit` | `{"ip","mbps","expires_at"?,"client_id"?}` |
+| `DELETE` | `/rate-limit/{ip}` | Снять лимит |
+| `GET` | `/rate-limit/{ip}` | Получить лимит |
+| `GET` | `/rate-limits` | Список всех лимитов |
 | `GET` | `/traffic` | Трафик по IP за месяц (сброс по МСК) |
 | `GET` | `/traffic/{ip}` | Конкретный IP + `clients_on_ip` |
 | `POST` | `/traffic/reset` | Принудительный сброс |
-| `GET` | `/health` | Система + `last_update` (без авторизации) |
 | `GET` | `/stats` | Клиенты, порты, сессии, трафик |
 | `GET` | `/refcount` | Маппинг IP → client_ids |
-| `POST` | `/update` | Самообновление (fire-and-forget) |
+| `GET` | `/health` | Системный статус + `last_update` (без авторизации) |
+| `POST` | `/update` | Самообновление через GitHub Releases (fire-and-forget) |
+
+### Min-агент
+
+Те же `/health`, `/stats`, `/traffic*`, `/update` + специфичные:
+
+| Метод | Путь | Описание |
+|-------|------|----------|
+| `GET` | `/shaped` | IP под shared-лимитом + classid + lastSeen |
+| `POST` | `/shaped/reset` | Снять все shared-лимиты (reconcile навесит обратно) |
+
+Эндпоинты `/whitelist/*` и `/rate-limit*` на min-агенте возвращают `200 OK stub` (`{agent_type:"min", skipped:true}`) — панель их сама не дёргает (фильтр по `agent_type='full'`), но stub защищает от ошибок.
 
 ---
 
@@ -289,8 +326,17 @@ async def get_activate_url(token: str) -> str:
 async def get_client_info(client_id: int) -> dict:
     async with aiohttp.ClientSession() as session:
         async with session.get(
-            f"{PANEL_URL}/api/clients/{client_id}",
+            f"{PANEL_URL}/api/clients/{client_id}/full",
             headers=HEADERS,
+        ) as resp:
+            return await resp.json()
+
+async def manual_activate(client_id: int, ip: str) -> dict:
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"{PANEL_URL}/api/clients/{client_id}/activate",
+            headers=HEADERS,
+            json={"ip": ip},
         ) as resp:
             return await resp.json()
 
@@ -300,6 +346,15 @@ async def ban_ip(ip: str, reason: str = "") -> dict:
             f"{PANEL_URL}/api/blacklist",
             headers=HEADERS,
             json={"ip": ip, "reason": reason},
+        ) as resp:
+            return await resp.json()
+
+async def set_rate_limit(ip: str, mbps: float, ttl_seconds: int | None = None) -> dict:
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"{PANEL_URL}/api/rate-limits",
+            headers=HEADERS,
+            json={"ip": ip, "mbps": mbps, "expires_in_seconds": ttl_seconds},
         ) as resp:
             return await resp.json()
 ```
@@ -312,52 +367,71 @@ async def ban_ip(ip: str, reason: str = "") -> dict:
 
 ```
 warp-relay-panel/
-├── api/                        # Vercel serverless
-│   ├── index.py                # FastAPI (роуты, активация, блэклист)
-│   ├── database.py             # Supabase операции
-│   ├── relay_client.py         # HTTP-клиент для relay-агентов
-│   └── crypto.py               # Шифрование IP (Fernet)
-├── relay-agent/                # Ставится на каждый relay
-│   ├── agent.py                # FastAPI агент
-│   ├── setup_relay.sh          # Полная установка
-│   ├── update.sh               # Ручное обновление (fallback)
-│   ├── ensure_rules.sh         # Восстановление iptables/ipset
-│   ├── requirements.txt
-│   └── .env.example
-├── supabase_schema.sql         # SQL для создания таблиц
-├── vercel.json                 # Конфигурация Vercel
-├── requirements.txt            # Python зависимости (Vercel)
-└── .env.example                # Переменные окружения
+├── api/                              # Vercel serverless (Python FastAPI)
+│   ├── index.py                      # FastAPI (роуты, активация, blacklist, rate-limits)
+│   ├── database.py                   # Supabase операции (атомарные RPC)
+│   ├── relay_client.py               # HTTP-клиент к relay-агентам
+│   ├── crypto.py                     # Шифрование IP (Fernet)
+│   └── cache.py                      # In-memory TTL кэш
+├── relay-agent/                      # Go-агент (ставится на каждый relay)
+│   ├── cmd/agent/                    # full-агент
+│   ├── cmd/agent-min/                # min-агент
+│   ├── internal/                     # модули (server, selfupdate, ratelimit, ...)
+│   ├── deploy/
+│   │   ├── setup.sh                  # установка full
+│   │   ├── setup-min.sh              # установка min
+│   │   ├── ensure_rules.sh           # восстановление iptables/ipset (full)
+│   │   ├── ensure_rules_min.sh       # восстановление для min
+│   │   ├── warp-relay-agent.service
+│   │   └── warp-relay-agent-min.service
+│   ├── go.mod / go.sum
+│   ├── Makefile
+│   └── README.md
+├── .github/workflows/
+│   ├── release-agent.yml             # build & release бинарей по тегу agent-v*
+│   └── docker-build.yml
+├── supabase_schema.sql               # SQL для создания таблиц + RPC (источник истины)
+├── vercel.json                       # Конфигурация Vercel
+├── requirements.txt                  # Python зависимости (Vercel)
+└── .env.example                      # Переменные окружения
 ```
 
 ---
 
 ## Changelog
 
+### v1.3.0 (актуальная)
+- **Релиз-флоу через GitHub Actions:** бинари агента собираются CI и аттачатся к release при создании тега `agent-v*`. На VPS теперь ничего не компилируется.
+- **Self-update download-driven:** агент при `/update` скачивает свежий бинарь из GitHub Releases (~10-30 сек) вместо `make build` (~180 сек).
+- Удалён старый Python relay-agent (полностью на Go v2.1.0+).
+- Удалены deprecated поля БД: `clients.note`, `clients.activations_today`, `clients.activations_reset_date`, `activation_log.user_agent`.
+- Удалён дневной лимит активаций (`MAX_ACTIVATIONS_PER_DAY`).
+- Все миграции схлопнуты в единый `supabase_schema.sql` (источник истины), включая RPC.
+
+### v2.1.0 — Go-агент
+- Полная переписка relay-agent с Python на Go (single static binary ~7 MB).
+- Native netlink на горячих путях (`conntrack`, `ipset`) — резкое падение CPU.
+- NAT rules management + per-IP rate-limit через CONNMARK + HTB.
+- Поддержка двух типов агентов: `full` (whitelist + per-IP rate-limit) и `min` (без whitelist, общий лимит на каждый активный IP).
+- prebuilt-бинари (теперь живут в GitHub Releases, не в репо).
+
 ### v1.2.2
-- Фоновая синхронизация whitelist через `/whitelist/sync`
-- Статус последней синхронизации в `/health` → `last_sync` (`ok`, `synced`, `clients`, `in_progress`)
-- Пагинация выборок из Supabase (`list_clients`, `list_ip_bans`, `get_all_active_ips`)
-- Исправлено удаление осиротевших IP из ipset (`RefCountMap.remove_client` — когда refcount=0, но IP остался в map)
-- Таймаут HTTP-запросов на `/whitelist/sync` поднят до 30 сек (страховка для больших payload)
-- В ответе `full_sync` теперь `{total_clients, skipped_banned, relays: {...}}` вместо плоского словаря
+- Фоновая синхронизация whitelist через `/whitelist/sync`.
+- Статус последней синхронизации в `/health` → `last_sync`.
+- Пагинация выборок из Supabase.
+- Исправлено удаление осиротевших IP из ipset.
 
 ### v1.2.1
-- Обновление relay через API (fire-and-forget, без таймаутов Vercel)
-- Статус последнего обновления в `/health` → `last_update`
-- Timezone МСК на всех relay (трафик сбрасывается по московскому времени)
-- Документация `ENCRYPTION_KEY`
+- Обновление relay через API (fire-and-forget, без таймаутов Vercel).
+- Статус последнего обновления в `/health` → `last_update`.
+- Timezone МСК на всех relay (трафик сбрасывается по московскому времени).
 
 ### v1.2.0
-- IP-блэклист (хард-бан по IP)
-- Защита общих IP (refcount на панели и агенте)
-- Мониторинг трафика по IP (conntrack accounting)
-- Фильтрация ботов (Telegram preview и др.)
-- Автовосстановление iptables/ipset при перезагрузке
-- Самообновление relay через API
-
-### v1.0.1
-- Исправлен `ipset destroy` → `ipset flush`
+- IP-блэклист (хард-бан по IP).
+- Защита общих IP (refcount на панели и агенте).
+- Мониторинг трафика по IP (conntrack accounting).
+- Фильтрация ботов (Telegram preview и др.).
+- Автовосстановление iptables/ipset при перезагрузке.
 
 ### v1.0.0
-- Первый релиз
+- Первый релиз.

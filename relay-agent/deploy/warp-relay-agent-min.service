@@ -1,0 +1,18 @@
+[Unit]
+Description=WARP Relay Agent (MIN — shared 25 Mbps per IP, no whitelist)
+After=network.target netfilter-persistent.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/warp-relay-agent
+ExecStartPre=/bin/bash /opt/warp-relay-agent/ensure_rules.sh
+ExecStart=/opt/warp-relay-agent/warp-relay-agent-min
+Restart=always
+RestartSec=5
+EnvironmentFile=/opt/warp-relay-agent/.env
+
+LimitNOFILE=65536
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

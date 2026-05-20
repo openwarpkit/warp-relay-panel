@@ -1,0 +1,18 @@
+[Unit]
+Description=WARP Relay Agent (Go)
+After=network.target ipset-restore.service netfilter-persistent.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/warp-relay-agent
+ExecStartPre=/bin/bash /opt/warp-relay-agent/ensure_rules.sh
+ExecStart=/opt/warp-relay-agent/warp-relay-agent
+Restart=always
+RestartSec=5
+EnvironmentFile=/opt/warp-relay-agent/.env
+
+LimitNOFILE=65536
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

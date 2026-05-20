@@ -13,11 +13,11 @@
   GET              /api/stats
 """
 
-import asyncio
 import ipaddress
 import logging
 import os
 import re
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Request, HTTPException, Depends, Header
 from fastapi.responses import HTMLResponse
@@ -26,19 +26,21 @@ from pydantic import BaseModel
 from .database import (
     create_client_record, get_client_by_token, get_client_by_id,
     list_clients, activate_client, activate_client_by_id,
-    block_client, delete_client,
+    block_client, delete_client, get_client_full,
     get_activation_logs, delete_activation_logs, get_all_active_ips,
-    count_clients_on_ip,
+    get_client_labels,
     add_relay, list_relays, get_active_relays, delete_relay, toggle_relay,
     add_ip_ban, remove_ip_ban, remove_ip_ban_by_ip, list_ip_bans,
-    is_ip_banned, get_ip_ban,
+    get_ip_ban,
+    add_rate_limit, remove_rate_limit_by_ip, get_rate_limit,
+    list_rate_limits, list_expired_rate_limits, get_sync_payload,
 )
 from . import relay_client
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("panel")
 
-API_VERSION = "1.2.2"
+API_VERSION = "1.3.0"
 app = FastAPI(title="WARP Relay Panel", version=API_VERSION)
 
 
@@ -72,12 +74,48 @@ def _is_bot(user_agent: str) -> bool:
 
 
 # ═══════════════════════════════════════
+# WARP / CLOUDFLARE DETECTION
+# ═══════════════════════════════════════
+
+# Cloudflare published IPv4 ranges (включают WARP egress) + RFC 6598 CGNAT
+# (используется WARP внутренне). Источник: https://www.cloudflare.com/ips-v4
+_WARP_NETWORKS = [
+    ipaddress.ip_network(cidr) for cidr in (
+        "173.245.48.0/20",
+        "103.21.244.0/22",
+        "103.22.200.0/22",
+        "103.31.4.0/22",
+        "141.101.64.0/18",
+        "108.162.192.0/18",
+        "190.93.240.0/20",
+        "188.114.96.0/20",
+        "197.234.240.0/22",
+        "198.41.128.0/17",
+        "162.158.0.0/15",
+        "104.16.0.0/13",
+        "104.24.0.0/14",
+        "172.64.0.0/13",
+        "131.0.72.0/22",
+        # CGNAT — внутренние egress-IP WARP
+        "100.64.0.0/10",
+    )
+]
+
+
+def _is_warp_ip(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr in net for net in _WARP_NETWORKS)
+
+
+# ═══════════════════════════════════════
 # SCHEMAS
 # ═══════════════════════════════════════
 
 class ClientCreate(BaseModel):
     label: str = ""
-    note: str = ""
 
 class ClientBlock(BaseModel):
     blocked: bool = True
@@ -101,6 +139,19 @@ class IPBanCreate(BaseModel):
 class IPBanRemove(BaseModel):
     ip: str
 
+class RateLimitCreate(BaseModel):
+    ip: str
+    mbps: float
+    expires_in_seconds: int | None = None   # None = бессрочно
+    reason: str = ""
+    client_id: int | None = None
+
+class RateLimitRemove(BaseModel):
+    ip: str
+
+class ClientLabelsRequest(BaseModel):
+    ids: list[int]
+
 
 # ═══════════════════════════════════════
 # HTML ШАБЛОНЫ
@@ -122,6 +173,8 @@ h2 { margin-bottom:0.5rem; }
 .hint { color:#94a3b8; font-size:0.85rem; margin-top:1rem; line-height:1.5; }
 .reason { background:#7f1d1d33; border:1px solid #7f1d1d; border-radius:8px;
           padding:0.75rem; margin-top:1rem; color:#fca5a5; font-size:0.9rem; }
+.ratelimit { background:#78350f33; border:1px solid #b45309; border-radius:8px;
+             padding:0.75rem; margin-top:1rem; color:#fcd34d; font-size:0.9rem; }
 """
 
 TMPL_SUCCESS = """<!DOCTYPE html>
@@ -134,6 +187,7 @@ TMPL_SUCCESS = """<!DOCTYPE html>
   <h2>Доступ активирован</h2>
   <p>Ваш IP:</p>
   <div class="ip">{ip}</div>
+  {rate_limit_block}
   <p class="hint">Теперь подключайтесь к WARP.<br>При смене сети — активируйте повторно.</p>
 </div></body></html>"""
 
@@ -146,6 +200,7 @@ TMPL_SAME = """<!DOCTYPE html>
   <div class="icon">✓</div>
   <h2>Доступ уже активен</h2>
   <div class="ip">{ip}</div>
+  {rate_limit_block}
   <p class="hint">Ваш IP не изменился, всё работает.</p>
 </div></body></html>"""
 
@@ -174,6 +229,33 @@ TMPL_IP_BANNED = """<!DOCTYPE html>
   <p class="hint">Если считаете это ошибкой — обратитесь к администратору.</p>
 </div></body></html>"""
 
+TMPL_WARP_DETECTED = """<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WARP Relay — Отключите VPN</title>
+<style>{style} .icon {{ color:#fbbf24; }}
+.btn {{ background:#3b82f6; color:#fff; border:none; border-radius:8px;
+       padding:0.75rem 1.5rem; font-size:1rem; font-weight:600;
+       cursor:pointer; margin-top:1.25rem; transition:background 0.15s; }}
+.btn:hover {{ background:#2563eb; }}
+.steps {{ text-align:left; margin:1rem 0; color:#cbd5e1; font-size:0.9rem;
+         line-height:1.7; padding-left:1.25rem; }}
+.steps li {{ margin-bottom:0.25rem; }}
+</style></head>
+<body><div class="card">
+  <div class="icon">⚠</div>
+  <h2>Обнаружен WARP / VPN</h2>
+  <p>Активация невозможна: ваш IP принадлежит подсети Cloudflare&nbsp;WARP.</p>
+  <div class="ip">{ip}</div>
+  <ol class="steps">
+    <li>Отключите Cloudflare&nbsp;WARP, 1.1.1.1 или любой&nbsp;VPN</li>
+    <li>Убедитесь, что соединение идёт через домашний&nbsp;Wi-Fi или мобильную сеть</li>
+    <li>Нажмите кнопку <b>Обновить</b></li>
+  </ol>
+  <button class="btn" onclick="location.reload()">Обновить</button>
+  <p class="hint">После активации можно снова включить WARP, если нужно.</p>
+</div></body></html>"""
+
 TMPL_BOT = """<!DOCTYPE html>
 <html lang="ru"><head><meta charset="utf-8">
 <meta property="og:title" content="WARP Relay — Активация">
@@ -185,7 +267,6 @@ TMPL_BOT = """<!DOCTYPE html>
 ERROR_MAP = {
     "invalid_token": ("Неверная ссылка", "Ссылка активации недействительна."),
     "blocked": ("Доступ заблокирован", "Ваш аккаунт заблокирован."),
-    "daily_limit": ("Лимит исчерпан", "Превышен лимит активаций на сегодня."),
     "ipv6_detected": ("IPv6 не поддерживается",
                       "Relay работает только с IPv4.<br>Отключите IPv6 или используйте мобильную сеть."),
     "invalid_ip": ("Ошибка определения IP", "Не удалось определить ваш IPv4 адрес."),
@@ -196,9 +277,9 @@ API_ERROR_MESSAGES = {
     "client_not_found": "Клиент не найден",
     "blocked": "Ваш аккаунт заблокирован",
     "ip_banned": "Этот IP-адрес заблокирован",
-    "daily_limit": "Превышен лимит активаций на сегодня",
     "invalid_ip": "Некорректный IP-адрес",
     "ipv6_not_supported": "IPv6 не поддерживается, нужен IPv4",
+    "warp_detected": "Обнаружен Cloudflare WARP / VPN. Отключите WARP и повторите активацию",
 }
 
 
@@ -210,6 +291,13 @@ def _error_html(key: str, status: int = 403) -> HTMLResponse:
     )
 
 
+def _warp_detected_html(ip: str) -> HTMLResponse:
+    return HTMLResponse(
+        TMPL_WARP_DETECTED.format(style=_BASE_STYLE, ip=ip),
+        status_code=403,
+    )
+
+
 def _ip_banned_html(reason: str = "") -> HTMLResponse:
     reason_block = ""
     if reason:
@@ -217,6 +305,21 @@ def _ip_banned_html(reason: str = "") -> HTMLResponse:
     return HTMLResponse(
         TMPL_IP_BANNED.format(style=_BASE_STYLE, reason_block=reason_block),
         status_code=403,
+    )
+
+
+def _rate_limit_block_html(rate_limit: dict | None) -> str:
+    if not rate_limit:
+        return ""
+    mbps = rate_limit.get("mbps")
+    expires_at = rate_limit.get("expires_at")
+    if expires_at:
+        until = f"до {expires_at[:16].replace('T', ' ')} UTC"
+    else:
+        until = "бессрочно"
+    return (
+        f'<div class="ratelimit">⚠ Ограничение скорости: '
+        f'<b>{mbps} Mbps</b> ({until})</div>'
     )
 
 
@@ -251,9 +354,14 @@ async def activate(token: str, request: Request):
         logger.error("Invalid IP: %s", client_ip)
         return _error_html("invalid_ip", 400)
 
+    if _is_warp_ip(client_ip):
+        logger.warning("WARP/Cloudflare IP blocked: token=%s...%s ip=%s",
+                       token[:6], token[-4:], client_ip)
+        return _warp_detected_html(client_ip)
+
     logger.info("Activate: token=%s...%s ip=%s", token[:6], token[-4:], client_ip)
 
-    result = activate_client(token, client_ip, user_agent)
+    result = activate_client(token, client_ip)
 
     if "error" in result:
         if result["error"] == "ip_banned":
@@ -261,10 +369,14 @@ async def activate(token: str, request: Request):
             return _ip_banned_html(result.get("reason", ""))
         return _error_html(result["error"])
 
+    rl_block = _rate_limit_block_html(result.get("rate_limit"))
+
     if result["status"] == "already_active":
         # Re-push IP на relay (идемпотентно).
         await relay_client.add_ip(client_ip, client_id=result["client_id"])
-        return HTMLResponse(TMPL_SAME.format(style=_BASE_STYLE, ip=client_ip))
+        return HTMLResponse(TMPL_SAME.format(
+            style=_BASE_STYLE, ip=client_ip, rate_limit_block=rl_block,
+        ))
 
     old_ip = result.get("old_ip")
     new_ip = result["new_ip"]
@@ -279,7 +391,9 @@ async def activate(token: str, request: Request):
     relay_results = await relay_client.add_ip(new_ip, old_ip, client_id=cid)
     logger.info("Relay sync: %s", relay_results)
 
-    return HTMLResponse(TMPL_SUCCESS.format(style=_BASE_STYLE, ip=client_ip))
+    return HTMLResponse(TMPL_SUCCESS.format(
+        style=_BASE_STYLE, ip=client_ip, rate_limit_block=rl_block,
+    ))
 
 
 # ═══════════════════════════════════════
@@ -288,16 +402,23 @@ async def activate(token: str, request: Request):
 
 @app.post("/api/clients", dependencies=[Depends(require_api_key)])
 async def api_create_client(data: ClientCreate):
-    return create_client_record(label=data.label, note=data.note)
+    return create_client_record(label=data.label)
 
 @app.get("/api/clients", dependencies=[Depends(require_api_key)])
 async def api_list_clients(include_blocked: bool = True):
-    clients = list_clients(include_blocked=include_blocked)
-    for c in clients:
-        c.pop("_activations_today", None)
-        c.pop("_reset_date", None)
-        c.pop("_raw_current_ip_enc", None)
-    return clients
+    return list_clients(include_blocked=include_blocked)
+
+
+@app.post("/api/clients/labels", dependencies=[Depends(require_api_key)])
+async def api_client_labels(data: ClientLabelsRequest):
+    """Batch-резолв client_id → label.
+
+    Удобно, чтобы по `client_ids` из `/api/traffic` показать имена клиентов
+    одним запросом вместо N штук `/api/clients/{id}`.
+
+    Возвращает {"<id>": "<label>"}; отсутствующие ID → null."""
+    found = get_client_labels(data.ids)
+    return {str(cid): found.get(cid) for cid in data.ids}
 
 
 @app.get("/api/clients/search", dependencies=[Depends(require_api_key)])
@@ -315,8 +436,6 @@ async def api_search_clients(ip: str, include_log_history: bool = True):
             c["match_source"] = "previous"
         else:
             c["match_source"] = "history"
-        for k in ("_activations_today", "_reset_date", "_raw_current_ip_enc", "_raw_current_ip_hash"):
-            c.pop(k, None)
 
     return clients
 
@@ -326,8 +445,6 @@ async def api_get_client(client_id: int):
     client = get_client_by_id(client_id)
     if not client:
         raise HTTPException(404, "Client not found")
-    for key in ("_activations_today", "_reset_date", "_raw_current_ip_enc"):
-        client.pop(key, None)
     return client
 
 @app.get("/api/clients/{client_id}/logs", dependencies=[Depends(require_api_key)])
@@ -361,17 +478,10 @@ async def api_client_traffic(client_id: int):
 
 @app.get("/api/clients/{client_id}/full", dependencies=[Depends(require_api_key)])
 async def api_get_client_full(client_id: int):
-    """Клиент + флаг забанен ли его current_ip + previous_ip."""
-    client = get_client_by_id(client_id)
+    """Клиент + флаги бана current/previous + текущий rate_limit. 1 RPC."""
+    client = get_client_full(client_id)
     if not client:
         raise HTTPException(404, "Client not found")
-
-    for key in ("_activations_today", "_reset_date", "_raw_current_ip_enc", "_raw_current_ip_hash"):
-        client.pop(key, None)
-
-    client["current_ip_banned"] = bool(client["current_ip"]) and is_ip_banned(client["current_ip"])
-    client["previous_ip_banned"] = bool(client["previous_ip"]) and is_ip_banned(client["previous_ip"])
-
     return client
 
 @app.post("/api/clients/{client_id}/activate", dependencies=[Depends(require_api_key)])
@@ -391,6 +501,12 @@ async def api_activate_client_manual(client_id: int, data: ClientManualActivate)
         return {"error": "invalid_ip",
                 "detail": API_ERROR_MESSAGES["invalid_ip"]}
 
+    if _is_warp_ip(ip):
+        logger.warning("Manual activate blocked (WARP): client #%d ip=%s",
+                       client_id, ip)
+        return {"error": "warp_detected",
+                "detail": API_ERROR_MESSAGES["warp_detected"]}
+
     result = activate_client_by_id(client_id, ip)
 
     if "error" in result:
@@ -403,7 +519,10 @@ async def api_activate_client_manual(client_id: int, data: ClientManualActivate)
     if result["status"] == "already_active":
         await relay_client.add_ip(ip, client_id=result["client_id"])
         logger.info("Manual activate (same IP): client #%d ip=%s", client_id, ip)
-        return {"status": "already_active", "client_id": client_id, "ip": ip}
+        return {
+            "status": "already_active", "client_id": client_id, "ip": ip,
+            "rate_limit": result.get("rate_limit"),
+        }
 
     old_ip = result.get("old_ip")
     new_ip = result["new_ip"]
@@ -424,47 +543,37 @@ async def api_activate_client_manual(client_id: int, data: ClientManualActivate)
         "client_id": client_id,
         "ip": new_ip,
         "old_ip": result.get("old_ip"),
+        "rate_limit": result.get("rate_limit"),
         "relay_sync": relay_results,
     }
 
 @app.patch("/api/clients/{client_id}/block", dependencies=[Depends(require_api_key)])
 async def api_block_client(client_id: int, data: ClientBlock):
-    client = get_client_by_id(client_id)
-    if not client:
+    """Блокировка/разблокировка через атомарный RPC. current_ip_shared
+    приходит сразу — не нужен отдельный count_clients_on_ip."""
+    updated = block_client(client_id, data.blocked)
+    if not updated:
         raise HTTPException(404, "Client not found")
 
-    updated = block_client(client_id, data.blocked)
-
-    # Удаление IP с relay — как было, но используем уже обновлённый client
-    if data.blocked and client["current_ip"]:
-        others = count_clients_on_ip(client["current_ip"], exclude_client_id=client_id)
-        if others == 0:
-            await relay_client.remove_ip(client["current_ip"])
-        else:
-            logger.info("Block client #%d: IP %s shared by %d others, keeping",
-                        client_id, client["current_ip"], others)
-
-    # Чистим внутренние поля
-    if updated:
-        for k in ("_activations_today", "_reset_date", "_raw_current_ip_enc", "_raw_current_ip_hash"):
-            updated.pop(k, None)
-        # Добавляем флаги бан-чека (как в /full)
-        updated["current_ip_banned"] = bool(updated["current_ip"]) and is_ip_banned(updated["current_ip"])
-        updated["previous_ip_banned"] = bool(updated["previous_ip"]) and is_ip_banned(updated["previous_ip"])
+    if data.blocked and updated["current_ip"] and not updated["current_ip_shared"]:
+        await relay_client.remove_ip(updated["current_ip"])
+    elif data.blocked and updated["current_ip"]:
+        logger.info("Block client #%d: IP %s shared, keeping in ipset",
+                    client_id, updated["current_ip"])
     return updated
+
 
 @app.delete("/api/clients/{client_id}", dependencies=[Depends(require_api_key)])
 async def api_delete_client(client_id: int):
-    client = delete_client(client_id)
-    if not client:
+    """Удаление через атомарный RPC: возвращает {id, current_ip, current_ip_shared}."""
+    result = delete_client(client_id)
+    if not result:
         raise HTTPException(404, "Client not found")
-    if client["current_ip"]:
-        others = count_clients_on_ip(client["current_ip"])
-        if others == 0:
-            await relay_client.remove_ip(client["current_ip"])
-        else:
-            logger.info("Delete client #%d: IP %s shared by %d others, keeping",
-                        client_id, client["current_ip"], others)
+    if result["current_ip"] and not result["current_ip_shared"]:
+        await relay_client.remove_ip(result["current_ip"])
+    elif result["current_ip"]:
+        logger.info("Delete client #%d: IP %s shared, keeping in ipset",
+                    client_id, result["current_ip"])
     return {"deleted": True, "id": client_id}
 
 
@@ -535,6 +644,7 @@ async def api_add_relay(data: RelayCreate):
 async def api_list_relays(fields: str = "full"):
     """fields=basic — без last_health (легче payload)."""
     return list_relays(fields=fields)
+
 
 @app.delete("/api/relays/{relay_id}", dependencies=[Depends(require_api_key)])
 async def api_delete_relay(relay_id: int):
@@ -630,6 +740,103 @@ async def api_dashboard():
     stats["active_relays"] = sum(1 for r in relays if r.get("is_active"))
 
     return {"relays": relays, "stats": stats}
+
+
+# ═══════════════════════════════════════
+# API: RATE-LIMITS
+# ═══════════════════════════════════════
+
+@app.post("/api/rate-limits", dependencies=[Depends(require_api_key)])
+async def api_set_rate_limit(data: RateLimitCreate):
+    """
+    Создать/обновить rate-limit для IP.
+    expires_in_seconds=null означает бессрочно.
+    Сохраняет в Supabase + push на все активные relay'и.
+    """
+    try:
+        ip = str(ipaddress.ip_address(data.ip))
+        if isinstance(ipaddress.ip_address(ip), ipaddress.IPv6Address):
+            return {"error": "ipv6_not_supported"}
+    except ValueError:
+        return {"error": "invalid_ip"}
+    if data.mbps <= 0:
+        raise HTTPException(400, "mbps must be > 0")
+
+    expires_at = None
+    if data.expires_in_seconds is not None and data.expires_in_seconds > 0:
+        expires_at = (
+            datetime.now(timezone.utc)
+            + timedelta(seconds=data.expires_in_seconds)
+        ).isoformat()
+
+    record = add_rate_limit(
+        ip=ip, mbps=data.mbps,
+        expires_at=expires_at, reason=data.reason,
+        client_id=data.client_id,
+    )
+    relay_results = await relay_client.set_rate_limit(
+        ip=ip, mbps=data.mbps,
+        expires_at=expires_at, client_id=data.client_id,
+    )
+    logger.info("Rate-limit set: %s = %s Mbps (expires=%s)", ip, data.mbps, expires_at)
+    return {**record, "applied_to": relay_results}
+
+
+@app.delete("/api/rate-limits/by-ip", dependencies=[Depends(require_api_key)])
+async def api_remove_rate_limit_by_ip(data: RateLimitRemove):
+    """Снять rate-limit по IP. Удаляет из БД и со всех relay'ев."""
+    deleted = remove_rate_limit_by_ip(data.ip)
+    relay_results = await relay_client.remove_rate_limit(data.ip)
+    if not deleted and not any(r.get("ok") for r in relay_results.values()):
+        raise HTTPException(404, "Rate-limit not found")
+    return {"deleted": True, "ip": data.ip, "removed_from": relay_results}
+
+
+@app.delete("/api/rate-limits/{ip}", dependencies=[Depends(require_api_key)])
+async def api_remove_rate_limit(ip: str):
+    """Снять rate-limit по IP в URL."""
+    deleted = remove_rate_limit_by_ip(ip)
+    relay_results = await relay_client.remove_rate_limit(ip)
+    if not deleted and not any(r.get("ok") for r in relay_results.values()):
+        raise HTTPException(404, "Rate-limit not found")
+    return {"deleted": True, "ip": ip, "removed_from": relay_results}
+
+
+@app.get("/api/rate-limits", dependencies=[Depends(require_api_key)])
+async def api_list_rate_limits():
+    return list_rate_limits()
+
+
+@app.get("/api/rate-limits/expired", dependencies=[Depends(require_api_key)])
+async def api_list_expired_rate_limits():
+    """Для внешнего шедулера юзера: всё, что пора снять (expires_at < NOW)."""
+    return list_expired_rate_limits()
+
+
+@app.get("/api/rate-limits/{ip}", dependencies=[Depends(require_api_key)])
+async def api_get_rate_limit(ip: str):
+    rl = get_rate_limit(ip)
+    if not rl:
+        return {"ip": ip, "limited": False}
+    return {"limited": True, **rl}
+
+
+# ═══════════════════════════════════════
+# WHITELIST PAYLOAD (для startup-resync агента)
+# ═══════════════════════════════════════
+
+@app.get("/api/relays/{relay_id}/whitelist-payload",
+         dependencies=[Depends(require_api_key)])
+async def api_relay_whitelist_payload(relay_id: int):
+    """
+    Полный payload для агента: расшифрованные IP клиентов + текущие rate_limits.
+    Вызывается агентом на startup для пересборки in-memory state.
+    relay_id передаётся для логирования; payload одинаков для всех relay'ев.
+    """
+    payload = get_sync_payload()
+    logger.info("Whitelist-payload requested by relay #%d: %d clients, %d rate_limits",
+                relay_id, len(payload["clients"]), len(payload["rate_limits"]))
+    return payload
 
 
 # ═══════════════════════════════════════
