@@ -89,7 +89,9 @@ func (w *Watchdog) check() Checks {
 		c.FlowFilter = true
 		if iface != "" {
 			rc, out, _ := shell.Run(fmt.Sprintf("tc filter show dev %s parent 1:0 2>/dev/null", iface), 5*time.Second)
-			c.FlowFilter = rc == 0 && strings.Contains(out, "flow map")
+			// Реальный вывод iproute2 6.x: "filter ... flow chain 0 handle 0x1 map keys mark ..."
+			// Старый grep "flow map" не матчит — между "flow" и "map" есть "chain N handle 0xN".
+			c.FlowFilter = rc == 0 && strings.Contains(out, "flow chain")
 		}
 	} else {
 		// в iptables-режиме эти чеки не релевантны — отдаём true чтобы не триггерить heal

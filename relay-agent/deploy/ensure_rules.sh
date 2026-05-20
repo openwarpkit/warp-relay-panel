@@ -163,7 +163,10 @@ if [ "${RATELIMIT_BACKEND:-nftables}" != "iptables" ] && command -v nft &>/dev/n
             ct mark set ip saddr map @ip2mark
     fi
 
-    # Миграция: убрать старые per-IP iptables-mangle CONNMARK правила.
+    # Миграция iptables → nft. ДО создания flow filter, иначе он не вставится
+    # из-за конфликта prio с осиротевшими fw-фильтрами.
+    # iptables может печатать "--set-xmark 0xM/0xffffffff" (новый формат iptables-nft);
+    # старый "--set-mark" тоже ловим.
     REMOVED=0
     while IFS= read -r rule; do
         if [ -n "$rule" ]; then
@@ -171,21 +174,13 @@ if [ "${RATELIMIT_BACKEND:-nftables}" != "iptables" ] && command -v nft &>/dev/n
             iptables -t mangle $DEL_RULE 2>/dev/null && REMOVED=$((REMOVED+1)) || true
         fi
     done < <(iptables -t mangle -S PREROUTING 2>/dev/null | \
-             grep -E '\-m conntrack --ctorigsrc .* -j CONNMARK --set-mark')
+             grep -E '\-m conntrack --ctorigsrc .* -j CONNMARK --set-(x)?mark')
     if [ "$REMOVED" -gt 0 ]; then
         echo -e "${G}[ensure] migrated $REMOVED iptables-mangle rule(s) to nftables${N}"
     fi
 
-    # Один root tc flow filter — заменяет per-IP fw filter'ы.
     if [ -n "$IFACE" ]; then
-        if ! tc filter show dev "$IFACE" parent 1:0 2>/dev/null | grep -q "flow map"; then
-            echo -e "${Y}[ensure] tc: создаём root flow filter на $IFACE${N}"
-            tc filter add dev "$IFACE" parent 1:0 protocol ip prio 1 \
-                handle 1 flow map keys nfmark baseclass 1:0 2>/dev/null || \
-                echo -e "${R}[ensure] tc flow filter не создан (ядро без act_flow?)${N}"
-        fi
-
-        # Миграция: убрать старые per-IP fw filter'ы.
+        # Миграция fw-filter'ов ДО flow-filter'а.
         REMOVED_FW=0
         while IFS= read -r handle; do
             if [ -n "$handle" ]; then
@@ -193,9 +188,18 @@ if [ "${RATELIMIT_BACKEND:-nftables}" != "iptables" ] && command -v nft &>/dev/n
                     REMOVED_FW=$((REMOVED_FW+1)) || true
             fi
         done < <(tc filter show dev "$IFACE" parent 1:0 2>/dev/null | \
-                 grep -oP 'fw\s+handle\s+\K0x[0-9a-f]+|fw\b.*flowid 1:\K[0-9]+' | sort -u)
+                 grep -oP 'fw chain \S+ handle \K0x[0-9a-f]+' | sort -u)
         if [ "$REMOVED_FW" -gt 0 ]; then
             echo -e "${G}[ensure] migrated $REMOVED_FW tc fw-filter(s) to flow-map${N}"
+        fi
+
+        # Один root tc flow filter — заменяет per-IP fw filter'ы.
+        # Синтаксис подробно — см. ensure_rules_min.sh.
+        if ! tc filter show dev "$IFACE" parent 1:0 2>/dev/null | grep -q "flow map"; then
+            echo -e "${Y}[ensure] tc: создаём root flow filter на $IFACE${N}"
+            tc filter add dev "$IFACE" parent 1:0 protocol ip prio 1 \
+                handle 1 flow map key mark addend 0xffffffff baseclass 1:1 2>&1 || \
+                echo -e "${R}[ensure] tc flow filter не создан${N}"
         fi
     fi
 elif [ "${RATELIMIT_BACKEND:-nftables}" != "iptables" ]; then

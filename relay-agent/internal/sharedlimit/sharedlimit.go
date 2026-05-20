@@ -56,7 +56,7 @@ func New(ct *conntrackgo.Client, rl *ratelimit.Manager, cfg Config) *Manager {
 
 // reconcile делает один проход:
 //   - снимает snapshot активных клиентов из conntrack
-//   - новым IP — apply rate-limit
+//   - новым IP — apply rate-limit (batch одним вызовом nft+tc)
 //   - idle (> IdleGrace) — remove
 func (m *Manager) reconcile() {
 	// TTL = половина ScanInterval: при default 10s даёт 5s кеша. /shaped-handler
@@ -69,31 +69,44 @@ func (m *Manager) reconcile() {
 	now := time.Now()
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Новые / обновление lastSeen
+	// 1. Собрать список новых IP под одним lock'ом (без обращений к rl).
+	newIPs := make([]string, 0)
 	for ip := range active {
 		if _, ok := m.seen[ip]; !ok {
-			if _, err := m.rl.Set(ip, m.cfg.LimitMbps, "", nil); err != nil {
-				log.Printf("sharedlimit: apply %s failed: %v", ip, err)
-				continue
-			}
-			log.Printf("sharedlimit: + %s @ %.1f Mbps", ip, m.cfg.LimitMbps)
+			newIPs = append(newIPs, ip)
 		}
 		m.seen[ip] = now
 	}
-
-	// Удаляем idle (отсутствуют в active И простаивают > IdleGrace)
+	// 2. Удалить idle IP (только из seen — limit снимаем после unlock).
+	toRemove := make([]string, 0)
 	for ip, lastSeen := range m.seen {
 		if _, stillActive := active[ip]; stillActive {
 			continue
 		}
 		if now.Sub(lastSeen) > m.cfg.IdleGrace {
-			if _, ok := m.rl.Remove(ip); ok {
-				log.Printf("sharedlimit: - %s (idle %s)", ip, now.Sub(lastSeen).Round(time.Second))
-			}
+			toRemove = append(toRemove, ip)
 			delete(m.seen, ip)
 		}
+	}
+	m.mu.Unlock()
+
+	// 3. Batch apply для новых (за пределами m.mu — внутри rl свой mutex).
+	if len(newIPs) > 0 {
+		items := make([]ratelimit.SetItem, 0, len(newIPs))
+		for _, ip := range newIPs {
+			items = append(items, ratelimit.SetItem{IP: ip, Mbps: m.cfg.LimitMbps})
+		}
+		applied, errs := m.rl.SetBatch(items)
+		log.Printf("sharedlimit: batch +%d @ %.1f Mbps (%d errors)", len(applied), m.cfg.LimitMbps, len(errs))
+		for ip, e := range errs {
+			log.Printf("sharedlimit: apply %s failed: %v", ip, e)
+		}
+	}
+
+	// 4. Удалить лимиты для idle — batch.
+	if len(toRemove) > 0 {
+		removed := m.rl.RemoveBatch(toRemove)
+		log.Printf("sharedlimit: batch -%d (idle)", len(removed))
 	}
 }
 

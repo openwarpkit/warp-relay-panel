@@ -39,6 +39,32 @@ func Run(cmd string, timeout time.Duration) (int, string, string) {
 	return rc, strings.TrimSpace(string(stdout)), strings.TrimSpace(stderrStr)
 }
 
+// RunStdin executes `cmd` with the given string piped to stdin. Used for batch
+// operations: `nft -f -`, `tc -batch -`, `iptables-restore`. One fork+exec per
+// batch instead of N — снимает burst CPU при applyTC десятков IP сразу.
+func RunStdin(cmd, stdin string, timeout time.Duration) (int, string, string) {
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	c := exec.CommandContext(ctx, "/bin/sh", "-c", cmd)
+	c.Stdin = strings.NewReader(stdin)
+	var stderrBuf strings.Builder
+	c.Stderr = &stderrBuf
+	stdout, err := c.Output()
+	rc := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			rc = exitErr.ExitCode()
+		} else {
+			rc = -1
+			stderrBuf.WriteString(err.Error())
+		}
+	}
+	return rc, strings.TrimSpace(string(stdout)), strings.TrimSpace(stderrBuf.String())
+}
+
 // ValidIPv4 — быстрая проверка по regex (полная валидация — net.ParseIP).
 func ValidIPv4(ip string) bool {
 	if !ipv4Re.MatchString(ip) {

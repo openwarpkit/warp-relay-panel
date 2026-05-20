@@ -30,7 +30,7 @@ import (
 	"github.com/nellimonix/warp-relay-panel/relay-agent/internal/watchdog"
 )
 
-var Version = "2.2.1-min"
+var Version = "2.2.4-min"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)

@@ -81,7 +81,7 @@ func Load() Config {
 		RateLimitMarkMax: 998,
 
 		SharedLimitMbps:    envFloat("SHARED_LIMIT_MBPS", 25.0),
-		SharedScanInterval: envInt("SHARED_SCAN_INTERVAL", 10),
+		SharedScanInterval: envInt("SHARED_SCAN_INTERVAL", 30),
 		SharedIdleGrace:    envInt("SHARED_IDLE_GRACE", 60),
 		WarpDstIP:          env("WARP_DST_IP", ""),
 		WarpDstHostname:    env("WARP_DST_HOSTNAME", "engage.cloudflareclient.com"),

@@ -2,7 +2,7 @@
 
 BIN := warp-relay-agent
 BIN_MIN := warp-relay-agent-min
-VERSION ?= 2.2.1
+VERSION ?= 2.2.4
 LDFLAGS := -s -w -X main.Version=$(VERSION)
 LDFLAGS_MIN := -s -w -X main.Version=$(VERSION)-min
 

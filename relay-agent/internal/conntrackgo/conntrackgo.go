@@ -234,10 +234,56 @@ func (c *Client) DeleteBySrcUDP(srcIP string) error {
 	return nil
 }
 
+// MarkBySrcsUDP — batch-вариант MarkBySrcUDP. За один Dump обновляет mark для
+// N источников (разные mark на разный IP). Используется в SetBatch / RestoreAll.
+// Возвращает количество обновлённых flow'ов и первую ошибку (если была).
+func (c *Client) MarkBySrcsUDP(maxAge time.Duration, srcToMark map[string]uint32) (int, error) {
+	if len(srcToMark) == 0 {
+		return 0, nil
+	}
+	flows, err := c.cachedDump(maxAge)
+	if err != nil {
+		return 0, err
+	}
+	conn, err := c.ensureConn()
+	if err != nil {
+		return 0, err
+	}
+	updated := 0
+	for i := range flows {
+		f := flows[i]
+		if f.TupleOrig.Proto.Protocol != protoUDP {
+			continue
+		}
+		src := f.TupleOrig.IP.SourceAddress.String()
+		newMark, ok := srcToMark[src]
+		if !ok {
+			continue
+		}
+		if f.Mark == newMark {
+			continue // уже правильный mark, пропускаем
+		}
+		f.Mark = newMark
+		if err := conn.Update(f); err != nil {
+			if !errIsENOENT(err) {
+				log.Printf("conntrack update mark %s: %v", src, err)
+			}
+			continue
+		}
+		updated++
+	}
+	return updated, nil
+}
+
 // MarkBySrcUDP проставляет mark всем существующим UDP-флоу с заданным src.
 // Аналог shell `conntrack -U -s {ip} -p udp --mark {mark}`.
-func (c *Client) MarkBySrcUDP(srcIP string, mark uint32) error {
-	flows, err := c.dumpWithRetry()
+//
+// maxAge — TTL для cache: 0 = всегда свежий Dump (~30MB heap + 5-30ms CPU).
+// При batch-applyTC (RestoreAll / sharedlimit reconcile с N новыми IP) передача
+// разумного maxAge (например, 5s — половина SharedScanInterval) переиспользует
+// один и тот же snapshot и снимает N×Dump → 1×Dump.
+func (c *Client) MarkBySrcUDP(maxAge time.Duration, srcIP string, mark uint32) error {
+	flows, err := c.cachedDump(maxAge)
 	if err != nil {
 		return err
 	}

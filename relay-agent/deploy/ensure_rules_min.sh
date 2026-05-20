@@ -134,9 +134,10 @@ if [ "${RATELIMIT_BACKEND:-nftables}" != "iptables" ] && command -v nft &>/dev/n
             ct mark set ip saddr map @ip2mark
     fi
 
-    # Миграция: при наличии новой nft-таблицы — выпилить старые per-IP iptables-mangle
-    # CONNMARK правила (они продолжат работать в ядре с тем же mark, но добавляют
-    # линейный overhead на каждый пакет — ровно то от чего избавляемся).
+    # Миграция iptables → nft. Делаем ДО создания flow filter'а, чтобы не было
+    # конфликта prio с осиротевшими fw-фильтрами от прошлой жизни.
+    # iptables печатает "--set-xmark 0xM/0xffffffff" (новый формат iptables-nft);
+    # старый "--set-mark" тоже ловим на всякий случай.
     REMOVED=0
     while IFS= read -r rule; do
         if [ -n "$rule" ]; then
@@ -144,22 +145,15 @@ if [ "${RATELIMIT_BACKEND:-nftables}" != "iptables" ] && command -v nft &>/dev/n
             iptables -t mangle $DEL_RULE 2>/dev/null && REMOVED=$((REMOVED+1)) || true
         fi
     done < <(iptables -t mangle -S PREROUTING 2>/dev/null | \
-             grep -E '\-m conntrack --ctorigsrc .* -j CONNMARK --set-mark')
+             grep -E '\-m conntrack --ctorigsrc .* -j CONNMARK --set-(x)?mark')
     if [ "$REMOVED" -gt 0 ]; then
         echo -e "${G}[ensure-min] migrated $REMOVED iptables-mangle rule(s) to nftables${N}"
     fi
 
-    # Один root tc flow filter маршрутизирует пакеты в class 1:<nfmark> за O(1).
-    # Заменяет N штук "tc filter ... fw flowid 1:M" одним вызовом.
     if [ -n "$IFACE" ]; then
-        if ! tc filter show dev "$IFACE" parent 1:0 2>/dev/null | grep -q "flow map"; then
-            echo -e "${Y}[ensure-min] tc: создаём root flow filter на $IFACE${N}"
-            tc filter add dev "$IFACE" parent 1:0 protocol ip prio 1 \
-                handle 1 flow map keys nfmark baseclass 1:0 2>/dev/null || \
-                echo -e "${R}[ensure-min] tc flow filter не создан (ядро без act_flow?)${N}"
-        fi
-
-        # Миграция: убрать старые per-IP fw filter'ы (они теперь дублируются flow-filter'ом).
+        # Миграция: убрать старые per-IP fw filter'ы. ДО создания flow filter,
+        # иначе flow не вставится — "Specified filter kind does not match existing one".
+        # Grep ищет любые handle'ы у fw-фильтров на parent 1:0.
         REMOVED_FW=0
         while IFS= read -r handle; do
             if [ -n "$handle" ]; then
@@ -167,9 +161,24 @@ if [ "${RATELIMIT_BACKEND:-nftables}" != "iptables" ] && command -v nft &>/dev/n
                     REMOVED_FW=$((REMOVED_FW+1)) || true
             fi
         done < <(tc filter show dev "$IFACE" parent 1:0 2>/dev/null | \
-                 grep -oP 'fw\s+handle\s+\K0x[0-9a-f]+|fw\b.*flowid 1:\K[0-9]+' | sort -u)
+                 grep -oP 'fw chain \S+ handle \K0x[0-9a-f]+' | sort -u)
         if [ "$REMOVED_FW" -gt 0 ]; then
             echo -e "${G}[ensure-min] migrated $REMOVED_FW tc fw-filter(s) to flow-map${N}"
+        fi
+
+        # Один root tc flow filter маршрутизирует пакеты в class 1:<mark> за O(1).
+        # Заменяет N штук "tc filter ... fw flowid 1:M" одним вызовом.
+        #
+        # Синтаксис: "flow map key mark addend 0xffffffff baseclass 1:1"
+        #   - "key mark" (singular, не "keys nfmark" — это другое имя в iproute2 6.x)
+        #   - "baseclass 1:1" — дефолт для map-режима (явный 1:0 у нас даёт "Illegal baseclass")
+        #   - "addend 0xffffffff" = +(-1) → итог: classid = (1:1) + (mark - 1) = 1:mark
+        # Без addend classid был бы 1:(mark+1) — несовпадение с HTB-классом 1:mark.
+        if ! tc filter show dev "$IFACE" parent 1:0 2>/dev/null | grep -q "flow map"; then
+            echo -e "${Y}[ensure-min] tc: создаём root flow filter на $IFACE${N}"
+            tc filter add dev "$IFACE" parent 1:0 protocol ip prio 1 \
+                handle 1 flow map key mark addend 0xffffffff baseclass 1:1 2>&1 || \
+                echo -e "${R}[ensure-min] tc flow filter не создан${N}"
         fi
     fi
 elif [ "${RATELIMIT_BACKEND:-nftables}" != "iptables" ]; then

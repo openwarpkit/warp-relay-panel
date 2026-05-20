@@ -10,8 +10,24 @@
 //
 // v2.2.1: per-IP CONNMARK переведены с N iptables-mangle правил на один
 // nft map @ip2mark (O(1) lookup), per-IP tc fw filter'ы заменены одним
-// root "flow map keys nfmark" — снимает softirq-нагрузку при 100+ rate-limit'ах.
+// root tc flow filter — снимает softirq-нагрузку при 100+ rate-limit'ах.
 // Откат: RATELIMIT_BACKEND=iptables. Кешируемый conntrack-snapshot, pprof endpoint.
+//
+// v2.2.2: фикс синтаксиса root flow filter ("flow map key mark addend
+// 0xffffffff baseclass 1:1" — для iproute2 6.x), миграционные grep'ы в
+// ensure_rules.sh теперь ловят iptables --set-xmark и tc fw chain handle.
+// MarkBySrcUDP использует cachedDump → при N новых IP за один reconcile
+// один Dump вместо N (снимает CPU-burst при applyTC).
+// Watchdog: grep "flow chain" вместо "flow map". nft add element без 2>&1,
+// чтобы isExistsErr ловил дубль-add (idempotency).
+//
+// v2.2.3: SetBatch / MarkBySrcsUDP — N applyTC за 2 fork+exec (nft -f - + tc
+// -batch -) + 1 conntrack Dump. RestoreAll и sharedlimit.reconcile используют
+// batch — startup-burst 222 IP падает с 30%×12s до 7%×1s.
+//
+// v2.2.4: RemoveBatch для idle-cleanup в sharedlimit. Default
+// SHARED_SCAN_INTERVAL поднят 10s -> 30s (реже reconcile, ниже пиковая
+// нагрузка от applyTC; компромисс — клиенты получают лимит до 30s медленнее).
 package main
 
 import (
@@ -41,7 +57,7 @@ import (
 )
 
 // Version проставляется через -ldflags при сборке.
-var Version = "2.2.1"
+var Version = "2.2.4"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
