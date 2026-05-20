@@ -113,7 +113,8 @@ func noRefcount(ip string) int { return 0 }
 func noClients(ip string) []int64 { return nil }
 
 func (s *Server) onlineClients() map[string]interface{} {
-	assured, err := s.Conntrack.AssuredUDPSrcs()
+	// 2s кеша — дедуп для параллельных /health и /stats вызовов от панели.
+	assured, err := s.Conntrack.AssuredUDPSrcs(2 * time.Second)
 	if err != nil {
 		assured = map[string]struct{}{}
 	}
@@ -137,7 +138,7 @@ func (s *Server) onlineClients() map[string]interface{} {
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	online := s.onlineClients()
 
-	stats, err := s.Conntrack.StatsUDP()
+	stats, err := s.Conntrack.StatsUDP(2 * time.Second)
 	if err != nil {
 		writeError(w, 500, "conntrack stats: "+err.Error())
 		return

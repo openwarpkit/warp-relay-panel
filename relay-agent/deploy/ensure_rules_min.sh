@@ -111,4 +111,69 @@ if [ -n "$IFACE" ]; then
     fi
 fi
 
+# ── nftables warp_shaper (per-IP CONNMARK через O(1) map lookup) ──
+# Заменяет N штук "iptables -t mangle PREROUTING -m conntrack --ctorigsrc IP -j CONNMARK"
+# одной общей конструкцией с hash-map. На 200+ IP даёт колоссальное снижение CPU в softirq.
+# Переключатель: RATELIMIT_BACKEND=iptables в systemd unit → пропустить nft-инициализацию.
+if [ "${RATELIMIT_BACKEND:-nftables}" != "iptables" ] && ! command -v nft &>/dev/null; then
+    # На существующих relay'ях после self-update nft может отсутствовать —
+    # ставим один раз без интерактива. Если apt недоступен — graceful fallback ниже.
+    echo -e "${Y}[ensure-min] nft не установлен, ставим apt-пакет nftables...${N}"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nftables 2>/dev/null || \
+        echo -e "${R}[ensure-min] apt install nftables не удался — продолжаем в legacy iptables-режиме${N}"
+fi
+if [ "${RATELIMIT_BACKEND:-nftables}" != "iptables" ] && command -v nft &>/dev/null; then
+    if ! nft list table ip warp_shaper >/dev/null 2>&1; then
+        echo -e "${Y}[ensure-min] nft: создаём table ip warp_shaper${N}"
+        nft add table ip warp_shaper
+        nft add chain ip warp_shaper prerouting \
+            "{ type filter hook prerouting priority -150 ; }"
+        nft add map ip warp_shaper ip2mark \
+            "{ type ipv4_addr : mark ; }"
+        nft add rule ip warp_shaper prerouting \
+            ct mark set ip saddr map @ip2mark
+    fi
+
+    # Миграция: при наличии новой nft-таблицы — выпилить старые per-IP iptables-mangle
+    # CONNMARK правила (они продолжат работать в ядре с тем же mark, но добавляют
+    # линейный overhead на каждый пакет — ровно то от чего избавляемся).
+    REMOVED=0
+    while IFS= read -r rule; do
+        if [ -n "$rule" ]; then
+            DEL_RULE=$(echo "$rule" | sed 's/^-A/-D/')
+            iptables -t mangle $DEL_RULE 2>/dev/null && REMOVED=$((REMOVED+1)) || true
+        fi
+    done < <(iptables -t mangle -S PREROUTING 2>/dev/null | \
+             grep -E '\-m conntrack --ctorigsrc .* -j CONNMARK --set-mark')
+    if [ "$REMOVED" -gt 0 ]; then
+        echo -e "${G}[ensure-min] migrated $REMOVED iptables-mangle rule(s) to nftables${N}"
+    fi
+
+    # Один root tc flow filter маршрутизирует пакеты в class 1:<nfmark> за O(1).
+    # Заменяет N штук "tc filter ... fw flowid 1:M" одним вызовом.
+    if [ -n "$IFACE" ]; then
+        if ! tc filter show dev "$IFACE" parent 1:0 2>/dev/null | grep -q "flow map"; then
+            echo -e "${Y}[ensure-min] tc: создаём root flow filter на $IFACE${N}"
+            tc filter add dev "$IFACE" parent 1:0 protocol ip prio 1 \
+                handle 1 flow map keys nfmark baseclass 1:0 2>/dev/null || \
+                echo -e "${R}[ensure-min] tc flow filter не создан (ядро без act_flow?)${N}"
+        fi
+
+        # Миграция: убрать старые per-IP fw filter'ы (они теперь дублируются flow-filter'ом).
+        REMOVED_FW=0
+        while IFS= read -r handle; do
+            if [ -n "$handle" ]; then
+                tc filter del dev "$IFACE" parent 1:0 prio 1 handle "$handle" fw 2>/dev/null && \
+                    REMOVED_FW=$((REMOVED_FW+1)) || true
+            fi
+        done < <(tc filter show dev "$IFACE" parent 1:0 2>/dev/null | \
+                 grep -oP 'fw\s+handle\s+\K0x[0-9a-f]+|fw\b.*flowid 1:\K[0-9]+' | sort -u)
+        if [ "$REMOVED_FW" -gt 0 ]; then
+            echo -e "${G}[ensure-min] migrated $REMOVED_FW tc fw-filter(s) to flow-map${N}"
+        fi
+    fi
+elif [ "${RATELIMIT_BACKEND:-nftables}" != "iptables" ]; then
+    echo -e "${Y}[ensure-min] nft не установлен — выполняется в legacy iptables-режиме${N}"
+fi
+
 echo "[ensure-min] Done"

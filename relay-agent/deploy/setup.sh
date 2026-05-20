@@ -42,7 +42,8 @@ RELEASE_REPO="${AGENT_RELEASE_REPO:-nellimonix/warp-relay-panel}"
 echo -e "${Y}[1/7] Установка пакетов...${N}"
 export DEBIAN_FRONTEND=noninteractive
 apt update -qq
-apt install -y -qq iptables ipset curl conntrack netfilter-persistent ipset-persistent git jq iproute2
+# nftables нужен для O(1) per-IP CONNMARK через map @ip2mark (v2.2.1+)
+apt install -y -qq iptables nftables ipset curl conntrack netfilter-persistent ipset-persistent git jq iproute2
 
 # ═══════════════════════════════════════
 # 2. СИСТЕМА

@@ -2,16 +2,24 @@
 //
 // Дизайн:
 //   - на каждый IP — уникальный fwmark M ∈ [10..998]
-//   - iptables -t mangle -A PREROUTING -m conntrack --ctorigsrc IP -j CONNMARK --set-mark M
+//   - nftables map ip2mark: { IP : M } (один общий rule в PREROUTING делает
+//     O(1) lookup и ct mark set вместо N линейных iptables-правил)
 //   - tc class add dev IFACE parent 1: classid 1:M htb rate Nmbit ceil Nmbit burst 16k
-//   - tc filter add dev IFACE parent 1:0 prio 1 handle M fw flowid 1:M
+//   - один root tc filter "flow map keys nfmark baseclass 1:0" направляет
+//     каждый пакет в class 1:<nfmark> за O(1) — заменяет N per-IP fw-фильтров
 //
 // POSTROUTING --restore-mark уже стоит (см. ensure_rules.sh) — он переносит
-// mark из conntrack на исходящий пакет; tc на egress матчит и шейпит.
+// mark из conntrack на исходящий пакет; tc flow на egress матчит nfmark и шейпит.
 // Симметрия: одна conntrack-запись несёт оба направления.
 //
-// iptables/tc операции — через shell (редкие, экономия от netlink невелика).
+// Инициализация nftables-таблицы и tc flow filter — в ensure_rules.sh
+// (ExecStartPre + watchdog). Здесь только per-IP элементы map'ы и HTB-классы.
+//
+// nftables/tc операции — через shell (редкие, экономия от netlink невелика).
 // conntrack -U (mark на существующих флоу) — через netlink (горячий путь).
+//
+// Переключатель backend'а: RATELIMIT_BACKEND=iptables откатывает на старый
+// per-IP iptables + fw-filter режим (на случай отсутствия nft / отката).
 package ratelimit
 
 import (
@@ -40,13 +48,14 @@ type Limit struct {
 }
 
 type Manager struct {
-	mu      sync.Mutex
-	path    string
-	markMin int
-	markMax int
-	m       map[string]Limit // ip → Limit
-	used    map[int]bool     // mark → in-use
-	ct      *conntrackgo.Client
+	mu       sync.Mutex
+	path     string
+	markMin  int
+	markMax  int
+	m        map[string]Limit // ip → Limit
+	used     map[int]bool     // mark → in-use
+	ct       *conntrackgo.Client
+	useNft   bool // false → старый путь (iptables PREROUTING + tc fw-filter per IP)
 }
 
 func New(path string, markMin, markMax int, ct *conntrackgo.Client) *Manager {
@@ -57,6 +66,7 @@ func New(path string, markMin, markMax int, ct *conntrackgo.Client) *Manager {
 		m:       make(map[string]Limit),
 		used:    make(map[int]bool),
 		ct:      ct,
+		useNft:  os.Getenv("RATELIMIT_BACKEND") != "iptables",
 	}
 	mgr.load()
 	return mgr
@@ -108,27 +118,40 @@ func (m *Manager) allocateMark() (int, error) {
 
 func (m *Manager) releaseMark(mark int) { delete(m.used, mark) }
 
-// applyTC применяет tc/iptables правила — атомарно по best-effort.
+// applyTC применяет tc/(nft|iptables) правила — атомарно по best-effort.
 func (m *Manager) applyTC(ip string, mbps float64, mark int) error {
 	iface := shell.DefaultIface()
 	if iface == "" {
 		return fmt.Errorf("no default interface")
 	}
 
-	checkRC, _, _ := shell.Run(
-		fmt.Sprintf("iptables -t mangle -C PREROUTING -m conntrack --ctorigsrc %s -j CONNMARK --set-mark %d 2>/dev/null", ip, mark),
-		5*time.Second,
-	)
-	if checkRC != 0 {
+	// PREROUTING: проставить ct mark.
+	if m.useNft {
+		// idempotent: при отсутствии map'а warp_shaper создастся в ensure_rules.sh
 		rc, _, err := shell.Run(
-			fmt.Sprintf("iptables -t mangle -A PREROUTING -m conntrack --ctorigsrc %s -j CONNMARK --set-mark %d", ip, mark),
+			fmt.Sprintf("nft add element ip warp_shaper ip2mark '{ %s : 0x%x }' 2>&1", ip, mark),
 			5*time.Second,
 		)
-		if rc != 0 {
-			return fmt.Errorf("iptables add failed: %s", err)
+		if rc != 0 && !isExistsErr(err) {
+			return fmt.Errorf("nft add element failed: %s", err)
+		}
+	} else {
+		checkRC, _, _ := shell.Run(
+			fmt.Sprintf("iptables -t mangle -C PREROUTING -m conntrack --ctorigsrc %s -j CONNMARK --set-mark %d 2>/dev/null", ip, mark),
+			5*time.Second,
+		)
+		if checkRC != 0 {
+			rc, _, err := shell.Run(
+				fmt.Sprintf("iptables -t mangle -A PREROUTING -m conntrack --ctorigsrc %s -j CONNMARK --set-mark %d", ip, mark),
+				5*time.Second,
+			)
+			if rc != 0 {
+				return fmt.Errorf("iptables add failed: %s", err)
+			}
 		}
 	}
 
+	// HTB-класс per IP — нужен в обоих backend'ах для индивидуальной ставки.
 	rc, _, err := shell.Run(
 		fmt.Sprintf("tc class add dev %s parent 1: classid 1:%d htb rate %.2fmbit ceil %.2fmbit burst 16k 2>&1", iface, mark, mbps, mbps),
 		5*time.Second,
@@ -137,12 +160,17 @@ func (m *Manager) applyTC(ip string, mbps float64, mark int) error {
 		return fmt.Errorf("tc class failed: %s", err)
 	}
 
-	rc, _, err = shell.Run(
-		fmt.Sprintf("tc filter add dev %s protocol ip parent 1:0 prio 1 handle %d fw flowid 1:%d 2>&1", iface, mark, mark),
-		5*time.Second,
-	)
-	if rc != 0 && !isExistsErr(err) {
-		return fmt.Errorf("tc filter failed: %s", err)
+	// tc-фильтр: в nft-режиме один root flow filter в ensure_rules.sh маршрутизирует
+	// по nfmark в class 1:M за O(1) — per-IP fw filter не нужен. В iptables-режиме
+	// нужны per-IP fw filter'ы (старый дизайн).
+	if !m.useNft {
+		rc, _, err := shell.Run(
+			fmt.Sprintf("tc filter add dev %s protocol ip parent 1:0 prio 1 handle %d fw flowid 1:%d 2>&1", iface, mark, mark),
+			5*time.Second,
+		)
+		if rc != 0 && !isExistsErr(err) {
+			return fmt.Errorf("tc filter failed: %s", err)
+		}
 	}
 
 	// Пометить уже существующие conntrack-флоу с этим src — netlink (быстро).
@@ -157,12 +185,18 @@ func (m *Manager) removeTC(ip string, mark int) {
 	if iface == "" {
 		return
 	}
-	shell.Run(
-		fmt.Sprintf("iptables -t mangle -D PREROUTING -m conntrack --ctorigsrc %s -j CONNMARK --set-mark %d 2>/dev/null", ip, mark),
-		5*time.Second)
-	shell.Run(
-		fmt.Sprintf("tc filter del dev %s protocol ip parent 1:0 prio 1 handle %d fw 2>/dev/null", iface, mark),
-		5*time.Second)
+	if m.useNft {
+		shell.Run(
+			fmt.Sprintf("nft delete element ip warp_shaper ip2mark '{ %s }' 2>/dev/null", ip),
+			5*time.Second)
+	} else {
+		shell.Run(
+			fmt.Sprintf("iptables -t mangle -D PREROUTING -m conntrack --ctorigsrc %s -j CONNMARK --set-mark %d 2>/dev/null", ip, mark),
+			5*time.Second)
+		shell.Run(
+			fmt.Sprintf("tc filter del dev %s protocol ip parent 1:0 prio 1 handle %d fw 2>/dev/null", iface, mark),
+			5*time.Second)
+	}
 	shell.Run(
 		fmt.Sprintf("tc class del dev %s classid 1:%d 2>/dev/null", iface, mark),
 		5*time.Second)
@@ -291,7 +325,11 @@ func (m *Manager) RestoreAll() (applied []string, failed []string) {
 
 var classRe = regexp.MustCompile(`class htb 1:(\d+)`)
 
-// Verify возвращает список IP, для которых tc-класс отсутствует.
+// nftIPRe — IPv4 в выводе `nft list map ip warp_shaper ip2mark`.
+// Формат: `elements = { 1.2.3.4 : 0x0000000a, ... }` (опционально с timeouts).
+var nftIPRe = regexp.MustCompile(`(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s*:`)
+
+// Verify возвращает список IP, для которых отсутствует tc-класс или nft-элемент.
 func (m *Manager) Verify() []string {
 	iface := shell.DefaultIface()
 	if iface == "" {
@@ -316,11 +354,29 @@ func (m *Manager) Verify() []string {
 			}
 		}
 	}
+
+	// Для nft-backend проверяем что IP есть в map @ip2mark. Если таблицы нет
+	// (ensure_rules.sh не отработал) — Verify заставит RestoreAll переапплаить,
+	// что попытается воссоздать элементы (ошибка nft пробросится в applyTC).
+	nftIPs := map[string]bool{}
+	if m.useNft {
+		rc, nftOut, _ := shell.Run("nft list map ip warp_shaper ip2mark 2>/dev/null", 5*time.Second)
+		if rc == 0 {
+			for _, match := range nftIPRe.FindAllStringSubmatch(nftOut, -1) {
+				nftIPs[match[1]] = true
+			}
+		}
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	missing := make([]string, 0)
 	for ip, l := range m.m {
 		if !existing[l.Mark] {
+			missing = append(missing, ip)
+			continue
+		}
+		if m.useNft && !nftIPs[ip] {
 			missing = append(missing, ip)
 		}
 	}

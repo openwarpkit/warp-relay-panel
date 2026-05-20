@@ -9,6 +9,7 @@ package servermin
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/pprof"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -49,6 +50,22 @@ func (s *Server) Routes() http.Handler {
 	r.Post("/shaped/reset", s.handleShapedReset)
 
 	r.Post("/update", s.handleSelfUpdate)
+
+	// pprof — под тем же authMiddleware (X-Agent-Key). Использовать так:
+	//   curl -H "X-Agent-Key: $SECRET" http://relay:7580/debug/pprof/profile?seconds=60 > cpu.prof
+	//   go tool pprof -http=:8081 cpu.prof
+	r.Route("/debug/pprof", func(r chi.Router) {
+		r.HandleFunc("/", pprof.Index)
+		r.HandleFunc("/cmdline", pprof.Cmdline)
+		r.HandleFunc("/profile", pprof.Profile)
+		r.HandleFunc("/symbol", pprof.Symbol)
+		r.HandleFunc("/trace", pprof.Trace)
+		for _, name := range []string{
+			"goroutine", "heap", "allocs", "threadcreate", "block", "mutex",
+		} {
+			r.Handle("/"+name, pprof.Handler(name))
+		}
+	})
 
 	// /refcount → пустой объект (для совместимости с панелью)
 	r.Get("/refcount", s.handleNoopJSON(map[string]interface{}{}))

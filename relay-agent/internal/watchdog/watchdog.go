@@ -35,11 +35,13 @@ type Watchdog struct {
 }
 
 type Checks struct {
-	Ipset     bool
-	NAT       bool
-	Forward   bool
-	IPForward bool
-	HTB       bool
+	Ipset      bool
+	NAT        bool
+	Forward    bool
+	IPForward  bool
+	HTB        bool
+	NftShaper  bool // nft table warp_shaper + map ip2mark
+	FlowFilter bool // tc root "flow map keys nfmark" filter
 }
 
 func (w *Watchdog) check() Checks {
@@ -77,6 +79,23 @@ func (w *Watchdog) check() Checks {
 		rc, out, _ := shell.Run(fmt.Sprintf("tc qdisc show dev %s 2>/dev/null", iface), 5*time.Second)
 		c.HTB = rc == 0 && strings.Contains(out, "qdisc htb 1:")
 	}
+
+	// nftables warp_shaper + tc flow filter — только если backend не отключён.
+	// Если бинарь nft отсутствует — пропускаем (legacy iptables-режим).
+	useNft := os.Getenv("RATELIMIT_BACKEND") != "iptables"
+	if useNft {
+		rcNft, _, _ := shell.Run("nft list table ip warp_shaper >/dev/null 2>&1", 5*time.Second)
+		c.NftShaper = (rcNft == 0)
+		c.FlowFilter = true
+		if iface != "" {
+			rc, out, _ := shell.Run(fmt.Sprintf("tc filter show dev %s parent 1:0 2>/dev/null", iface), 5*time.Second)
+			c.FlowFilter = rc == 0 && strings.Contains(out, "flow map")
+		}
+	} else {
+		// в iptables-режиме эти чеки не релевантны — отдаём true чтобы не триггерить heal
+		c.NftShaper = true
+		c.FlowFilter = true
+	}
 	return c
 }
 
@@ -97,12 +116,18 @@ func brokenList(c Checks) []string {
 	if !c.HTB {
 		out = append(out, "htb")
 	}
+	if !c.NftShaper {
+		out = append(out, "nft_shaper")
+	}
+	if !c.FlowFilter {
+		out = append(out, "flow_filter")
+	}
 	return out
 }
 
 func (w *Watchdog) heal(c Checks) []string {
 	actions := []string{}
-	if !c.Ipset || !c.NAT || !c.Forward || !c.HTB {
+	if !c.Ipset || !c.NAT || !c.Forward || !c.HTB || !c.NftShaper || !c.FlowFilter {
 		if _, err := os.Stat(w.EnsureScriptPath); err == nil {
 			shell.Run(fmt.Sprintf("bash %s 2>&1", w.EnsureScriptPath), 60*time.Second)
 			actions = append(actions, "ran ensure_rules.sh")

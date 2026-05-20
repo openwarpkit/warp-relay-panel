@@ -1,4 +1,4 @@
-// WARP Relay Agent v2.2.0 — Go-rewrite Python-агента (relay-agent/agent.py).
+// WARP Relay Agent v2.2.1 — Go-rewrite Python-агента (relay-agent/agent.py).
 // Single binary, low-memory, тот же API 1:1.
 //
 // v2.1.0: горячие операции (conntrack snapshot/delete/mark, ipset add/del/list)
@@ -7,6 +7,11 @@
 //
 // v2.2.0: в /traffic и /traffic/{ip} добавлено поле "client_ids"
 // (clientID, привязанные к IP в refcount.json).
+//
+// v2.2.1: per-IP CONNMARK переведены с N iptables-mangle правил на один
+// nft map @ip2mark (O(1) lookup), per-IP tc fw filter'ы заменены одним
+// root "flow map keys nfmark" — снимает softirq-нагрузку при 100+ rate-limit'ах.
+// Откат: RATELIMIT_BACKEND=iptables. Кешируемый conntrack-snapshot, pprof endpoint.
 package main
 
 import (
@@ -36,7 +41,7 @@ import (
 )
 
 // Version проставляется через -ldflags при сборке.
-var Version = "2.2.0"
+var Version = "2.2.1"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)

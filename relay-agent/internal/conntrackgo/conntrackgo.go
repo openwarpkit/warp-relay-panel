@@ -33,9 +33,17 @@ type UDPFlow struct {
 
 // Client — persistent netlink-соединение с лениво-восстанавливаемой реконнекцией.
 // Один Conn используется все время процесса, пересоздаётся при ошибке.
+//
+// Кеш Dump'а: публичные методы принимают maxAge — если последний снимок свежее,
+// возвращается он же. Снимает GC-pressure от ~30MB аллокаций на каждом Dump и
+// дедупит параллельные запросы от разных Loop'ов.
 type Client struct {
 	mu   sync.Mutex
 	conn *conntrack.Conn
+
+	snapMu    sync.Mutex
+	snapFlows []conntrack.Flow
+	snapAt    time.Time
 }
 
 func New() *Client {
@@ -92,6 +100,28 @@ func (c *Client) Close() error {
 	return nil
 }
 
+// cachedDump возвращает кешированный Dump если ему меньше maxAge, иначе
+// делает свежий. maxAge<=0 — всегда свежий (для горячих операций типа MarkBySrcUDP).
+// Сериализует параллельные cache-miss'ы под snapMu — другие читатели ждут активный
+// Dump вместо того чтобы делать свой.
+func (c *Client) cachedDump(maxAge time.Duration) ([]conntrack.Flow, error) {
+	if maxAge <= 0 {
+		return c.dumpWithRetry()
+	}
+	c.snapMu.Lock()
+	defer c.snapMu.Unlock()
+	if c.snapFlows != nil && time.Since(c.snapAt) < maxAge {
+		return c.snapFlows, nil
+	}
+	flows, err := c.dumpWithRetry()
+	if err != nil {
+		return nil, err
+	}
+	c.snapFlows = flows
+	c.snapAt = time.Now()
+	return flows, nil
+}
+
 // dumpWithRetry делает Dump, при системных ошибках реконнектит и пробует ещё раз.
 func (c *Client) dumpWithRetry() ([]conntrack.Flow, error) {
 	conn, err := c.ensureConn()
@@ -114,8 +144,9 @@ func (c *Client) dumpWithRetry() ([]conntrack.Flow, error) {
 // SnapshotUDP возвращает все UDP-флоу с accounting-данными.
 // Исключает source = 162.159.* и 172.* (CF-internal обратный трафик),
 // а также флоу с sport/dport = 22 (SSH-шум).
-func (c *Client) SnapshotUDP() ([]UDPFlow, error) {
-	flows, err := c.dumpWithRetry()
+// maxAge — TTL кеша Dump'а; 0 = всегда свежий.
+func (c *Client) SnapshotUDP(maxAge time.Duration) ([]UDPFlow, error) {
+	flows, err := c.cachedDump(maxAge)
 	if err != nil {
 		return nil, err
 	}
@@ -147,8 +178,9 @@ func (c *Client) SnapshotUDP() ([]UDPFlow, error) {
 
 // AssuredUDPSrcs возвращает уникальные source IP для UDP-флоу со статусом ASSURED,
 // без CF-internal префиксов. Ровно то, что давал shell-pipeline `conntrack -L | grep ASSURED | …`.
-func (c *Client) AssuredUDPSrcs() (map[string]struct{}, error) {
-	flows, err := c.dumpWithRetry()
+// maxAge — TTL кеша Dump'а; 0 = всегда свежий.
+func (c *Client) AssuredUDPSrcs(maxAge time.Duration) (map[string]struct{}, error) {
+	flows, err := c.cachedDump(maxAge)
 	if err != nil {
 		return nil, err
 	}
@@ -269,8 +301,9 @@ func asErrno(err error, target *syscall.Errno) bool {
 // клиента, активно использующего relay.
 //
 // Используется в min-agent reconcile-loop'е (заменяет shell awk-pipeline).
-func (c *Client) ActiveUDPClients(dstIP string, ports map[uint16]bool) (map[string]struct{}, error) {
-	flows, err := c.dumpWithRetry()
+// maxAge — TTL кеша Dump'а; 0 = всегда свежий.
+func (c *Client) ActiveUDPClients(maxAge time.Duration, dstIP string, ports map[uint16]bool) (map[string]struct{}, error) {
+	flows, err := c.cachedDump(maxAge)
 	if err != nil {
 		return nil, err
 	}
@@ -304,8 +337,9 @@ type UDPStats struct {
 
 // StatsUDP возвращает счётчики ASSURED/UNREPLIED и top-dport за один Dump.
 // Аналог shell `conntrack -L | grep ASSURED | wc -l` + `... | grep -oP 'dport=\K[0-9]+' | sort | uniq -c`.
-func (c *Client) StatsUDP() (UDPStats, error) {
-	flows, err := c.dumpWithRetry()
+// maxAge — TTL кеша Dump'а; 0 = всегда свежий.
+func (c *Client) StatsUDP(maxAge time.Duration) (UDPStats, error) {
+	flows, err := c.cachedDump(maxAge)
 	if err != nil {
 		return UDPStats{}, err
 	}
