@@ -16,7 +16,9 @@
 import ipaddress
 import logging
 import os
+import pathlib
 import re
+import string
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Request, HTTPException, Depends, Header
@@ -500,118 +502,27 @@ class ClientLabelsRequest(BaseModel):
 # HTML ШАБЛОНЫ
 # ═══════════════════════════════════════
 
-_BASE_STYLE = """
-* { margin:0; padding:0; box-sizing:border-box; }
-body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-       display:flex; justify-content:center; align-items:center;
-       min-height:100vh; margin:0; background:#0f172a; color:#e2e8f0; }
-.card { background:#1e293b; border-radius:16px; padding:2.5rem;
-        max-width:420px; width:90%; text-align:center;
-        box-shadow:0 4px 24px rgba(0,0,0,0.4); }
-.icon { font-size:3rem; margin-bottom:0.75rem; }
-h2 { margin-bottom:0.5rem; }
-.ip { background:#334155; padding:0.5rem 1rem; border-radius:8px;
-      font-family:'SF Mono',Monaco,monospace; margin:1rem 0; display:inline-block;
-      font-size:1.1rem; letter-spacing:0.5px; }
-.hint { color:#94a3b8; font-size:0.85rem; margin-top:1rem; line-height:1.5; }
-.reason { background:#7f1d1d33; border:1px solid #7f1d1d; border-radius:8px;
-          padding:0.75rem; margin-top:1rem; color:#fca5a5; font-size:0.9rem; }
-.ratelimit { background:#78350f33; border:1px solid #b45309; border-radius:8px;
-             padding:0.75rem; margin-top:1rem; color:#fcd34d; font-size:0.9rem; }
-"""
+_TPL_DIR = pathlib.Path(__file__).parent / "templates"
 
-TMPL_SUCCESS = """<!DOCTYPE html>
-<html lang="ru"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WARP Relay — Активировано</title>
-<style>{style} .icon {{ color:#4ade80; }}</style></head>
-<body><div class="card">
-  <div class="icon">✓</div>
-  <h2>Доступ активирован</h2>
-  <p>Ваш IP:</p>
-  <div class="ip">{ip}</div>
-  {rate_limit_block}
-  <p class="hint">Теперь подключайтесь к WARP.<br>При смене сети — активируйте повторно.</p>
-</div></body></html>"""
 
-TMPL_SAME = """<!DOCTYPE html>
-<html lang="ru"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WARP Relay — Активен</title>
-<style>{style} .icon {{ color:#60a5fa; }}</style></head>
-<body><div class="card">
-  <div class="icon">✓</div>
-  <h2>Доступ уже активен</h2>
-  <div class="ip">{ip}</div>
-  {rate_limit_block}
-  <p class="hint">Ваш IP не изменился, всё работает.</p>
-</div></body></html>"""
+def _load(name: str) -> str:
+    return (_TPL_DIR / name).read_text(encoding="utf-8")
 
-TMPL_ERROR = """<!DOCTYPE html>
-<html lang="ru"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WARP Relay — Ошибка</title>
-<style>{style} .icon {{ color:#f87171; }}</style></head>
-<body><div class="card">
-  <div class="icon">✕</div>
-  <h2>{title}</h2>
-  <p>{message}</p>
-  <p class="hint">Если нужна помощь — напишите в <a href="tg://resolve?domain=findllimonix_chat" target="_blank">чат поддержки</a>, постараемся разобраться.</p>
-</div></body></html>"""
 
-TMPL_IP_BANNED = """<!DOCTYPE html>
-<html lang="ru"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WARP Relay — Заблокирован</title>
-<style>{style} .icon {{ color:#f87171; }}</style></head>
-<body><div class="card">
-  <div class="icon">⛔</div>
-  <h2>Доступ запрещён</h2>
-  <p>Ваш IP-адрес заблокирован за нарушение правил.</p>
-  {reason_block}
-  <p class="hint">Считаете блокировку ошибкой? Напишите в <a href="tg://resolve?domain=findllimonix_chat" target="_blank">чат поддержки</a> — мы разберёмся.</p>
-</div></body></html>"""
+_BASE_STYLE = _load("base.css")
+_TPL_SUCCESS = string.Template(_load("success.html"))
+_TPL_SAME = string.Template(_load("same.html"))
+_TPL_ERROR = string.Template(_load("error.html"))
+_TPL_IP_BANNED = string.Template(_load("ip_banned.html"))
+_TPL_WARP_DETECTED = string.Template(_load("warp_detected.html"))
+_TPL_BOT = _load("bot.html")
 
-TMPL_WARP_DETECTED = """<!DOCTYPE html>
-<html lang="ru"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WARP Relay — Отключите VPN</title>
-<style>{style} .icon {{ color:#fbbf24; }}
-.btn {{ background:#3b82f6; color:#fff; border:none; border-radius:8px;
-       padding:0.75rem 1.5rem; font-size:1rem; font-weight:600;
-       cursor:pointer; margin-top:1.25rem; transition:background 0.15s; }}
-.btn:hover {{ background:#2563eb; }}
-.steps {{ text-align:left; margin:1rem 0; color:#cbd5e1; font-size:0.9rem;
-         line-height:1.7; padding-left:1.25rem; }}
-.steps li {{ margin-bottom:0.25rem; }}
-</style></head>
-<body><div class="card">
-  <div class="icon">⚠</div>
-  <h2>Обнаружен WARP / VPN</h2>
-  <p>Активация невозможна: ваш IP принадлежит подсети Cloudflare&nbsp;WARP.</p>
-  <div class="ip">{ip}</div>
-  <ol class="steps">
-    <li>Отключите Cloudflare&nbsp;WARP, 1.1.1.1 или любой&nbsp;VPN</li>
-    <li>Убедитесь, что соединение идёт через домашний&nbsp;Wi-Fi или мобильную сеть</li>
-    <li>Нажмите кнопку <b>Обновить</b></li>
-  </ol>
-  <button class="btn" onclick="location.reload()">Обновить</button>
-  <p class="hint">После активации можно снова включить WARP, если нужно.</p>
-</div></body></html>"""
-
-TMPL_BOT = """<!DOCTYPE html>
-<html lang="ru"><head><meta charset="utf-8">
-<meta property="og:title" content="WARP Relay — Активация">
-<meta property="og:description" content="Нажмите на ссылку для активации доступа к WARP">
-<meta property="og:type" content="website">
-<title>WARP Relay</title></head>
-<body></body></html>"""
 
 ERROR_MAP = {
     "invalid_token": ("Неверная ссылка", "Ссылка активации недействительна."),
     "blocked": ("Доступ заблокирован", "Ваш аккаунт заблокирован."),
     "ipv6_detected": ("IPv6 не поддерживается",
-                      "Relay работает только с IPv4.<br>Отключите IPv6 или используйте мобильную сеть."),
+                      "Relay работает только с IPv4. Отключите IPv6 или используйте мобильную сеть."),
     "invalid_ip": ("Ошибка определения IP", "Не удалось определить ваш IPv4 адрес."),
 }
 
@@ -629,14 +540,14 @@ API_ERROR_MESSAGES = {
 def _error_html(key: str, status: int = 403) -> HTMLResponse:
     title, message = ERROR_MAP.get(key, ("Ошибка", key))
     return HTMLResponse(
-        TMPL_ERROR.format(style=_BASE_STYLE, title=title, message=message),
+        _TPL_ERROR.safe_substitute(style=_BASE_STYLE, title=title, message=message),
         status_code=status,
     )
 
 
 def _warp_detected_html(ip: str) -> HTMLResponse:
     return HTMLResponse(
-        TMPL_WARP_DETECTED.format(style=_BASE_STYLE, ip=ip),
+        _TPL_WARP_DETECTED.safe_substitute(style=_BASE_STYLE, ip=ip),
         status_code=403,
     )
 
@@ -644,9 +555,11 @@ def _warp_detected_html(ip: str) -> HTMLResponse:
 def _ip_banned_html(reason: str = "") -> HTMLResponse:
     reason_block = ""
     if reason:
-        reason_block = f'<div class="reason">Причина: {reason}</div>'
+        reason_block = (
+            f'<div class="notice notice-error"><b>Причина:</b> {reason}</div>'
+        )
     return HTMLResponse(
-        TMPL_IP_BANNED.format(style=_BASE_STYLE, reason_block=reason_block),
+        _TPL_IP_BANNED.safe_substitute(style=_BASE_STYLE, reason_block=reason_block),
         status_code=403,
     )
 
@@ -661,8 +574,13 @@ def _rate_limit_block_html(rate_limit: dict | None) -> str:
     else:
         until = "бессрочно"
     return (
-        f'<div class="ratelimit">⚠ Ограничение скорости: '
-        f'<b>{mbps} Mbps</b> ({until})</div>'
+        '<div class="rate-limit">'
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+        'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+        '<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/>'
+        '<line x1="12" y1="16" x2="12.01" y2="16"/></svg>'
+        f'<span>Ограничение скорости: <b>{mbps} Mbps</b> ({until})</span>'
+        '</div>'
     )
 
 
@@ -676,7 +594,7 @@ async def activate(token: str, request: Request):
 
     if _is_bot(user_agent):
         logger.info("Bot blocked: token=%s...%s ua=%s", token[:6], token[-4:], user_agent[:80])
-        return HTMLResponse(TMPL_BOT, status_code=200)
+        return HTMLResponse(_TPL_BOT, status_code=200)
 
     client_ip = (
         request.headers.get("x-relay-real-ip")
@@ -717,7 +635,7 @@ async def activate(token: str, request: Request):
     if result["status"] == "already_active":
         # Re-push IP на relay (идемпотентно).
         await relay_client.add_ip(client_ip, client_id=result["client_id"])
-        return HTMLResponse(TMPL_SAME.format(
+        return HTMLResponse(_TPL_SAME.safe_substitute(
             style=_BASE_STYLE, ip=client_ip, rate_limit_block=rl_block,
         ))
 
@@ -734,7 +652,7 @@ async def activate(token: str, request: Request):
     relay_results = await relay_client.add_ip(new_ip, old_ip, client_id=cid)
     logger.info("Relay sync: %s", relay_results)
 
-    return HTMLResponse(TMPL_SUCCESS.format(
+    return HTMLResponse(_TPL_SUCCESS.safe_substitute(
         style=_BASE_STYLE, ip=client_ip, rate_limit_block=rl_block,
     ))
 
