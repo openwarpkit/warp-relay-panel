@@ -556,7 +556,7 @@ TMPL_ERROR = """<!DOCTYPE html>
   <div class="icon">✕</div>
   <h2>{title}</h2>
   <p>{message}</p>
-  <p class="hint">Обратитесь к администратору.</p>
+  <p class="hint">Если нужна помощь — напишите в <a href="tg://resolve?domain=findllimonix_chat" target="_blank">чат поддержки</a>, постараемся разобраться.</p>
 </div></body></html>"""
 
 TMPL_IP_BANNED = """<!DOCTYPE html>
@@ -569,7 +569,7 @@ TMPL_IP_BANNED = """<!DOCTYPE html>
   <h2>Доступ запрещён</h2>
   <p>Ваш IP-адрес заблокирован за нарушение правил.</p>
   {reason_block}
-  <p class="hint">Если считаете это ошибкой — обратитесь к администратору.</p>
+  <p class="hint">Считаете блокировку ошибкой? Напишите в <a href="tg://resolve?domain=findllimonix_chat" target="_blank">чат поддержки</a> — мы разберёмся.</p>
 </div></body></html>"""
 
 TMPL_WARP_DETECTED = """<!DOCTYPE html>
