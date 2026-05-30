@@ -131,9 +131,25 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go tm.Loop(ctx)
-	go ms.Loop(ctx)
-	go wd.Loop(ctx, time.Duration(cfg.RulesWatchdogInterval)*time.Second)
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tm.Loop(ctx)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ms.Loop(ctx)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		wd.Loop(ctx, time.Duration(cfg.RulesWatchdogInterval)*time.Second)
+	}()
 
 	// Restore rate-limits сразу
 	if applied, failed := rl.RestoreAll(); len(applied) > 0 || len(failed) > 0 {
@@ -174,6 +190,10 @@ func main() {
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("HTTP server error: %v", err)
 	}
+
+	// Wait for background workers to finish their graceful shutdown
+	wg.Wait()
+	log.Println("All background workers stopped. Exiting.")
 }
 
 // makeDebouncedPersist возвращает функцию, которая откладывает
