@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -313,13 +314,12 @@ func (u *Updater) Run() {
 		StartedAt:  startedAt,
 		FinishedAt: nowISO(),
 	})
-	log.Printf("Update complete: %s → %s, restarting via systemd...", u.Version, tag)
+	log.Printf("Update complete: %s → %s, restarting via SIGTERM...", u.Version, tag)
 
-	// 7. systemctl restart (отложенный, чтобы успеть отдать ответ).
-	cmd := exec.Command("bash", "-c", "sleep 2 && systemctl restart warp-relay-agent")
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	cmd.Start()
+	// 7. SIGTERM (отложенный, чтобы успеть отдать ответ).
+	time.AfterFunc(2*time.Second, func() {
+		syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+	})
 }
 
 func truncate(s string, n int) string {
