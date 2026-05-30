@@ -88,8 +88,26 @@ func (m *Monitor) save() {
 		return
 	}
 	data, _ := json.MarshalIndent(m.state, "", "  ")
-	if err := os.WriteFile(m.path, data, 0o644); err != nil {
-		log.Printf("traffic: save error: %v", err)
+	tmpPath := m.path + ".tmp"
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		log.Printf("traffic: save error (create tmp): %v", err)
+		return
+	}
+	defer f.Close()
+	if _, err := f.Write(data); err != nil {
+		os.Remove(tmpPath)
+		log.Printf("traffic: save error (write tmp): %v", err)
+		return
+	}
+	if err := f.Sync(); err != nil {
+		os.Remove(tmpPath)
+		log.Printf("traffic: save error (sync tmp): %v", err)
+		return
+	}
+	if err := os.Rename(tmpPath, m.path); err != nil {
+		os.Remove(tmpPath)
+		log.Printf("traffic: save error (rename): %v", err)
 	}
 }
 

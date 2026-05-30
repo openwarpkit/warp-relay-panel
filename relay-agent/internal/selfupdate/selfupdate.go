@@ -78,7 +78,27 @@ func (u *Updater) saveStatus(s Status) {
 		return
 	}
 	data, _ := json.MarshalIndent(s, "", "  ")
-	os.WriteFile(u.StatusPath, data, 0o644)
+	tmpPath := u.StatusPath + ".tmp"
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		log.Printf("selfupdate: saveStatus error (create tmp): %v", err)
+		return
+	}
+	defer f.Close()
+	if _, err := f.Write(data); err != nil {
+		os.Remove(tmpPath)
+		log.Printf("selfupdate: saveStatus error (write tmp): %v", err)
+		return
+	}
+	if err := f.Sync(); err != nil {
+		os.Remove(tmpPath)
+		log.Printf("selfupdate: saveStatus error (sync tmp): %v", err)
+		return
+	}
+	if err := os.Rename(tmpPath, u.StatusPath); err != nil {
+		os.Remove(tmpPath)
+		log.Printf("selfupdate: saveStatus error (rename): %v", err)
+	}
 }
 
 func (u *Updater) LastStatus() *Status {
