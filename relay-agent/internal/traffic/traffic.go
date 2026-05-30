@@ -175,6 +175,7 @@ func (m *Monitor) Loop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			m.Collect()
 			return
 		case <-t.C:
 			m.Collect()
