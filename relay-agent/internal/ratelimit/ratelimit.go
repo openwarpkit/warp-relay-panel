@@ -406,17 +406,37 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 	}
 	plans := make([]plan, 0, len(items))
 	errs := make(map[string]error)
+
+	// Pre-build used marks array for O(1) allocation during batch processing
+	usedMarks := make([]bool, m.markMax+1)
+	for _, l := range m.m {
+		if l.Mark >= m.markMin && l.Mark <= m.markMax {
+			usedMarks[l.Mark] = true
+		}
+	}
+	nextFreeMark := m.markMin
+
 	for _, it := range items {
 		var pl plan
 		pl.item = it
 		if existing, ok := m.m[it.IP]; ok {
 			pl.mark = existing.Mark
 		} else {
-			mark, err := m.allocateMark()
-			if err != nil {
-				errs[it.IP] = err
+			// Find next free mark O(1) per iteration
+			mark := 0
+			for i := nextFreeMark; i <= m.markMax; i++ {
+				if !usedMarks[i] {
+					mark = i
+					nextFreeMark = i + 1
+					break
+				}
+			}
+			if mark == 0 {
+				errs[it.IP] = fmt.Errorf("no free marks available (max %d limits)", m.markMax-m.markMin+1)
 				continue
 			}
+			usedMarks[mark] = true
+			m.used[mark] = true
 			pl.mark = mark
 			pl.isNew = true
 		}
