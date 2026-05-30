@@ -14,6 +14,7 @@ import (
 )
 
 const protoUDP = 17
+const numShards = 256
 
 // UDPFlow — минимальный набор для traffic accounting.
 type UDPFlow struct {
@@ -33,24 +34,58 @@ type FlowKey struct {
 	DstPort uint16
 }
 
+func (k FlowKey) Hash() uint32 {
+	hash := uint32(2166136261)
+	for i := 0; i < len(k.SrcIP); i++ {
+		hash ^= uint32(k.SrcIP[i])
+		hash *= 16777619
+	}
+	for i := 0; i < len(k.DstIP); i++ {
+		hash ^= uint32(k.DstIP[i])
+		hash *= 16777619
+	}
+	hash ^= uint32(k.SrcPort)
+	hash *= 16777619
+	hash ^= uint32(k.DstPort)
+	hash *= 16777619
+	return hash
+}
+
+type flowShard struct {
+	mu    sync.RWMutex
+	flows map[FlowKey]conntrack.Flow
+}
+
 type Client struct {
 	mu   sync.Mutex
 	conn *conntrack.Conn
 
-	flowsMu sync.RWMutex
-	flows   map[FlowKey]conntrack.Flow
+	shards [numShards]*flowShard
 
 	stopListen chan struct{}
+	wg         sync.WaitGroup
 }
 
 func New() *Client {
 	c := &Client{
-		flows:      make(map[FlowKey]conntrack.Flow, 10000),
 		stopListen: make(chan struct{}),
 	}
+	for i := 0; i < numShards; i++ {
+		c.shards[i] = &flowShard{
+			flows: make(map[FlowKey]conntrack.Flow, 64),
+		}
+	}
 	c.enableAccounting()
+	
+	c.wg.Add(2)
 	go c.listenWorker()
+	go c.reconcileWorker()
+	
 	return c
+}
+
+func (c *Client) getShard(k FlowKey) *flowShard {
+	return c.shards[k.Hash()%numShards]
 }
 
 func (c *Client) enableAccounting() {
@@ -89,6 +124,7 @@ func (c *Client) reset() {
 
 func (c *Client) Close() error {
 	close(c.stopListen)
+	c.wg.Wait()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.conn != nil {
@@ -100,6 +136,7 @@ func (c *Client) Close() error {
 }
 
 func (c *Client) listenWorker() {
+	defer c.wg.Done()
 	for {
 		select {
 		case <-c.stopListen:
@@ -114,10 +151,14 @@ func (c *Client) listenWorker() {
 			continue
 		}
 
+		// Initial sync
 		flows, err := conn.Dump(nil)
 		if err == nil {
-			c.flowsMu.Lock()
-			c.flows = make(map[FlowKey]conntrack.Flow, len(flows))
+			for i := 0; i < numShards; i++ {
+				c.shards[i].mu.Lock()
+				c.shards[i].flows = make(map[FlowKey]conntrack.Flow, len(flows)/numShards+1)
+				c.shards[i].mu.Unlock()
+			}
 			for _, f := range flows {
 				if f.TupleOrig.Proto.Protocol == protoUDP {
 					k := FlowKey{
@@ -126,15 +167,17 @@ func (c *Client) listenWorker() {
 						SrcPort: f.TupleOrig.Proto.SourcePort,
 						DstPort: f.TupleOrig.Proto.DestinationPort,
 					}
-					c.flows[k] = f
+					shard := c.getShard(k)
+					shard.mu.Lock()
+					shard.flows[k] = f
+					shard.mu.Unlock()
 				}
 			}
-			c.flowsMu.Unlock()
 		} else {
 			log.Printf("conntrack listenWorker: dump failed: %v", err)
 		}
 
-		evChan := make(chan conntrack.Event, 1024)
+		evChan := make(chan conntrack.Event, 4096)
 		errChan, err := conn.Listen(evChan, 4, netfilter.GroupsCT)
 		if err != nil {
 			log.Printf("conntrack listenWorker: listen failed: %v", err)
@@ -162,14 +205,15 @@ func (c *Client) listenWorker() {
 					DstPort: ev.Flow.TupleOrig.Proto.DestinationPort,
 				}
 
-				c.flowsMu.Lock()
+				shard := c.getShard(k)
+				shard.mu.Lock()
 				switch ev.Type {
 				case conntrack.EventNew, conntrack.EventUpdate:
-					c.flows[k] = *ev.Flow
+					shard.flows[k] = *ev.Flow
 				case conntrack.EventDestroy:
-					delete(c.flows, k)
+					delete(shard.flows, k)
 				}
-				c.flowsMu.Unlock()
+				shard.mu.Unlock()
 
 			case err := <-errChan:
 				log.Printf("conntrack listenWorker: worker error: %v", err)
@@ -182,49 +226,109 @@ func (c *Client) listenWorker() {
 	}
 }
 
-func (c *Client) SnapshotUDP() ([]UDPFlow, error) {
-	c.flowsMu.RLock()
-	defer c.flowsMu.RUnlock()
+// reconcileWorker periodically syncs byte counters and removes zombies
+func (c *Client) reconcileWorker() {
+	defer c.wg.Done()
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.stopListen:
+			return
+		case <-ticker.C:
+			c.reconcileOnce()
+		}
+	}
+}
 
-	out := make([]UDPFlow, 0, len(c.flows))
-	for _, f := range c.flows {
-		src := f.TupleOrig.IP.SourceAddress.String()
-		dst := f.TupleOrig.IP.DestinationAddress.String()
-		sport := f.TupleOrig.Proto.SourcePort
-		dport := f.TupleOrig.Proto.DestinationPort
-		if strings.HasPrefix(src, "162.159.") || strings.HasPrefix(src, "172.") {
-			continue
+func (c *Client) reconcileOnce() {
+	conn, err := c.ensureConn()
+	if err != nil {
+		return
+	}
+	flows, err := conn.Dump(nil)
+	if err != nil {
+		return
+	}
+
+	activeKernel := make(map[FlowKey]conntrack.Flow, len(flows))
+	for _, f := range flows {
+		if f.TupleOrig.Proto.Protocol == protoUDP {
+			k := FlowKey{
+				SrcIP:   f.TupleOrig.IP.SourceAddress.String(),
+				DstIP:   f.TupleOrig.IP.DestinationAddress.String(),
+				SrcPort: f.TupleOrig.Proto.SourcePort,
+				DstPort: f.TupleOrig.Proto.DestinationPort,
+			}
+			activeKernel[k] = f
 		}
-		if dport == 22 || sport == 22 {
-			continue
+	}
+
+	for i := 0; i < numShards; i++ {
+		shard := c.shards[i]
+		shard.mu.Lock()
+		for k := range shard.flows {
+			if kf, ok := activeKernel[k]; ok {
+				flow := shard.flows[k]
+				flow.CountersOrig = kf.CountersOrig
+				flow.CountersReply = kf.CountersReply
+				flow.Status = kf.Status
+				shard.flows[k] = flow
+			} else {
+				delete(shard.flows, k)
+			}
 		}
-		out = append(out, UDPFlow{
-			SrcIP:      src,
-			DstIP:      dst,
-			SrcPort:    sport,
-			DstPort:    dport,
-			BytesOrig:  f.CountersOrig.Bytes,
-			BytesReply: f.CountersReply.Bytes,
-			Assured:    f.Status.Assured(),
-		})
+		shard.mu.Unlock()
+	}
+}
+
+func (c *Client) SnapshotUDP() ([]UDPFlow, error) {
+	var out []UDPFlow
+	for i := 0; i < numShards; i++ {
+		shard := c.shards[i]
+		shard.mu.RLock()
+		for _, f := range shard.flows {
+			src := f.TupleOrig.IP.SourceAddress.String()
+			dst := f.TupleOrig.IP.DestinationAddress.String()
+			sport := f.TupleOrig.Proto.SourcePort
+			dport := f.TupleOrig.Proto.DestinationPort
+			if strings.HasPrefix(src, "162.159.") || strings.HasPrefix(src, "172.") {
+				continue
+			}
+			if dport == 22 || sport == 22 {
+				continue
+			}
+			out = append(out, UDPFlow{
+				SrcIP:      src,
+				DstIP:      dst,
+				SrcPort:    sport,
+				DstPort:    dport,
+				BytesOrig:  f.CountersOrig.Bytes,
+				BytesReply: f.CountersReply.Bytes,
+				Assured:    f.Status.Assured(),
+			})
+		}
+		shard.mu.RUnlock()
 	}
 	return out, nil
 }
 
 func (c *Client) AssuredUDPSrcs() (map[string]struct{}, error) {
-	c.flowsMu.RLock()
-	defer c.flowsMu.RUnlock()
-
 	out := make(map[string]struct{}, 256)
-	for _, f := range c.flows {
-		if !f.Status.Assured() {
-			continue
+	for i := 0; i < numShards; i++ {
+		shard := c.shards[i]
+		shard.mu.RLock()
+		for _, f := range shard.flows {
+			if !f.Status.Assured() {
+				continue
+			}
+			src := f.TupleOrig.IP.SourceAddress.String()
+			if strings.HasPrefix(src, "162.159.") {
+				continue
+			}
+			out[src] = struct{}{}
 		}
-		src := f.TupleOrig.IP.SourceAddress.String()
-		if strings.HasPrefix(src, "162.159.") {
-			continue
-		}
-		out[src] = struct{}{}
+		shard.mu.RUnlock()
 	}
 	return out, nil
 }
@@ -235,14 +339,17 @@ func (c *Client) DeleteBySrcUDP(srcIP string) error {
 		return err
 	}
 
-	c.flowsMu.RLock()
 	var toDelete []conntrack.Flow
-	for _, f := range c.flows {
-		if f.TupleOrig.IP.SourceAddress.String() == srcIP {
-			toDelete = append(toDelete, f)
+	for i := 0; i < numShards; i++ {
+		shard := c.shards[i]
+		shard.mu.RLock()
+		for _, f := range shard.flows {
+			if f.TupleOrig.IP.SourceAddress.String() == srcIP {
+				toDelete = append(toDelete, f)
+			}
 		}
+		shard.mu.RUnlock()
 	}
-	c.flowsMu.RUnlock()
 
 	for _, f := range toDelete {
 		if err := conn.Delete(f); err != nil {
@@ -263,18 +370,21 @@ func (c *Client) MarkBySrcsUDP(srcToMark map[string]uint32) (int, error) {
 		return 0, err
 	}
 
-	c.flowsMu.RLock()
 	var toUpdate []conntrack.Flow
-	for _, f := range c.flows {
-		src := f.TupleOrig.IP.SourceAddress.String()
-		newMark, ok := srcToMark[src]
-		if ok && f.Mark != newMark {
-			fCopy := f
-			fCopy.Mark = newMark
-			toUpdate = append(toUpdate, fCopy)
+	for i := 0; i < numShards; i++ {
+		shard := c.shards[i]
+		shard.mu.RLock()
+		for _, f := range shard.flows {
+			src := f.TupleOrig.IP.SourceAddress.String()
+			newMark, ok := srcToMark[src]
+			if ok && f.Mark != newMark {
+				fCopy := f
+				fCopy.Mark = newMark
+				toUpdate = append(toUpdate, fCopy)
+			}
 		}
+		shard.mu.RUnlock()
 	}
-	c.flowsMu.RUnlock()
 
 	updated := 0
 	for _, f := range toUpdate {
@@ -295,18 +405,20 @@ func (c *Client) MarkBySrcUDP(srcIP string, mark uint32) error {
 		return err
 	}
 
-	c.flowsMu.RLock()
 	var toUpdate []conntrack.Flow
-	for _, f := range c.flows {
-		if f.TupleOrig.IP.SourceAddress.String() == srcIP {
-			fCopy := f
-			fCopy.Mark = mark
-			toUpdate = append(toUpdate, fCopy)
+	for i := 0; i < numShards; i++ {
+		shard := c.shards[i]
+		shard.mu.RLock()
+		for _, f := range shard.flows {
+			if f.TupleOrig.IP.SourceAddress.String() == srcIP {
+				fCopy := f
+				fCopy.Mark = mark
+				toUpdate = append(toUpdate, fCopy)
+			}
 		}
+		shard.mu.RUnlock()
 	}
-	c.flowsMu.RUnlock()
 
-	updated := 0
 	for _, f := range toUpdate {
 		if err := conn.Update(f); err != nil {
 			if !errIsENOENT(err) {
@@ -314,7 +426,6 @@ func (c *Client) MarkBySrcUDP(srcIP string, mark uint32) error {
 			}
 			continue
 		}
-		updated++
 	}
 	return nil
 }
@@ -347,22 +458,24 @@ func asErrno(err error, target *syscall.Errno) bool {
 }
 
 func (c *Client) ActiveUDPClients(dstIP string, ports map[uint16]bool) (map[string]struct{}, error) {
-	c.flowsMu.RLock()
-	defer c.flowsMu.RUnlock()
-
 	out := make(map[string]struct{}, 64)
-	for _, f := range c.flows {
-		if !ports[f.TupleOrig.Proto.DestinationPort] {
-			continue
+	for i := 0; i < numShards; i++ {
+		shard := c.shards[i]
+		shard.mu.RLock()
+		for _, f := range shard.flows {
+			if !ports[f.TupleOrig.Proto.DestinationPort] {
+				continue
+			}
+			if f.TupleReply.IP.SourceAddress.String() != dstIP {
+				continue
+			}
+			src := f.TupleOrig.IP.SourceAddress.String()
+			if strings.HasPrefix(src, "162.159.") || strings.HasPrefix(src, "172.") {
+				continue
+			}
+			out[src] = struct{}{}
 		}
-		if f.TupleReply.IP.SourceAddress.String() != dstIP {
-			continue
-		}
-		src := f.TupleOrig.IP.SourceAddress.String()
-		if strings.HasPrefix(src, "162.159.") || strings.HasPrefix(src, "172.") {
-			continue
-		}
-		out[src] = struct{}{}
+		shard.mu.RUnlock()
 	}
 	return out, nil
 }
@@ -374,22 +487,24 @@ type UDPStats struct {
 }
 
 func (c *Client) StatsUDP() (UDPStats, error) {
-	c.flowsMu.RLock()
-	defer c.flowsMu.RUnlock()
-
 	out := UDPStats{TopPorts: make(map[uint16]int, 64)}
-	for _, f := range c.flows {
-		if f.TupleOrig.Proto.DestinationPort == 22 ||
-			f.TupleOrig.Proto.SourcePort == 22 {
-			continue
+	for i := 0; i < numShards; i++ {
+		shard := c.shards[i]
+		shard.mu.RLock()
+		for _, f := range shard.flows {
+			if f.TupleOrig.Proto.DestinationPort == 22 ||
+				f.TupleOrig.Proto.SourcePort == 22 {
+				continue
+			}
+			if f.Status.Assured() {
+				out.Assured++
+			}
+			if !f.Status.SeenReply() {
+				out.Unreplied++
+			}
+			out.TopPorts[f.TupleOrig.Proto.DestinationPort]++
 		}
-		if f.Status.Assured() {
-			out.Assured++
-		}
-		if !f.Status.SeenReply() {
-			out.Unreplied++
-		}
-		out.TopPorts[f.TupleOrig.Proto.DestinationPort]++
+		shard.mu.RUnlock()
 	}
 	return out, nil
 }
