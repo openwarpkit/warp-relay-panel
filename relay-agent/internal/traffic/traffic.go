@@ -94,17 +94,24 @@ func (m *Monitor) save() {
 		log.Printf("traffic: save error (create tmp): %v", err)
 		return
 	}
-	defer f.Close()
+
 	if _, err := f.Write(data); err != nil {
+		f.Close()
 		os.Remove(tmpPath)
 		log.Printf("traffic: save error (write tmp): %v", err)
 		return
 	}
 	if err := f.Sync(); err != nil {
+		f.Close()
 		os.Remove(tmpPath)
 		log.Printf("traffic: save error (sync tmp): %v", err)
 		return
 	}
+	if err := f.Close(); err != nil {
+        os.Remove(tmpPath)
+        log.Printf("traffic: save error (close tmp): %v", err)
+        return
+    }
 	if err := os.Rename(tmpPath, m.path); err != nil {
 		os.Remove(tmpPath)
 		log.Printf("traffic: save error (rename): %v", err)

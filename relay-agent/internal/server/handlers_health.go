@@ -30,7 +30,23 @@ func (s *Server) saveSyncStatus(status map[string]interface{}) {
 	path := s.Cfg.DataDir + "/sync_status.json"
 	os.MkdirAll(s.Cfg.DataDir, 0o755)
 	data, _ := json.MarshalIndent(status, "", "  ")
-	os.WriteFile(path, data, 0o644)
+	tmpPath := path + ".tmp"
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	if _, err := f.Write(data); err != nil {
+		return
+	}
+	if err := f.Sync(); err != nil {
+		return
+	}
+	if err := f.Close(); err != nil {
+		return
+	}
+	os.Rename(tmpPath, path)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

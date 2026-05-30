@@ -179,8 +179,30 @@ func (m *Manager) save() {
 		out[ip] = l
 	}
 	data, _ := json.MarshalIndent(out, "", "  ")
-	if err := os.WriteFile(m.path, data, 0o644); err != nil {
-		log.Printf("ratelimit: save error: %v", err)
+
+	tmpPath := m.path + ".tmp"
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		log.Printf("ratelimit: create tmp file error: %v", err)
+		return
+	}
+
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		log.Printf("ratelimit: write tmp file error: %v", err)
+		return
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		log.Printf("ratelimit: sync tmp file error: %v", err)
+		return
+	}
+	if err := f.Close(); err != nil {
+		log.Printf("ratelimit: close tmp file error: %v", err)
+		return
+	}
+	if err := os.Rename(tmpPath, m.path); err != nil {
+		log.Printf("ratelimit: rename error: %v", err)
 	}
 }
 

@@ -61,8 +61,30 @@ func (r *Map) save() {
 		out[ip] = ids
 	}
 	data, _ := json.MarshalIndent(out, "", "  ")
-	if err := os.WriteFile(r.path, data, 0o644); err != nil {
-		log.Printf("refcount: save error: %v", err)
+
+	tmpPath := r.path + ".tmp"
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		log.Printf("refcount: create tmp file error: %v", err)
+		return
+	}
+
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		log.Printf("refcount: write tmp file error: %v", err)
+		return
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		log.Printf("refcount: sync tmp file error: %v", err)
+		return
+	}
+	if err := f.Close(); err != nil {
+		log.Printf("refcount: close tmp file error: %v", err)
+		return
+	}
+	if err := os.Rename(tmpPath, r.path); err != nil {
+		log.Printf("refcount: rename error: %v", err)
 	}
 }
 

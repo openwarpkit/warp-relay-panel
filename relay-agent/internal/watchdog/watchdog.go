@@ -199,7 +199,30 @@ func (w *Watchdog) saveStatus(s Status) {
 		return
 	}
 	data, _ := json.MarshalIndent(s, "", "  ")
-	os.WriteFile(w.StatusFilePath, data, 0o644)
+
+	tmpPath := w.StatusFilePath + ".tmp"
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		log.Printf("watchdog: create tmp file error: %v", err)
+		return
+	}
+	defer f.Close()
+
+	if _, err := f.Write(data); err != nil {
+		log.Printf("watchdog: write tmp file error: %v", err)
+		return
+	}
+	if err := f.Sync(); err != nil {
+		log.Printf("watchdog: sync tmp file error: %v", err)
+		return
+	}
+	if err := f.Close(); err != nil {
+		log.Printf("watchdog: close tmp file error: %v", err)
+		return
+	}
+	if err := os.Rename(tmpPath, w.StatusFilePath); err != nil {
+		log.Printf("watchdog: rename error: %v", err)
+	}
 }
 
 // LastStatus читает с диска (для /health).
