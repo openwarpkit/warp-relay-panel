@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
+	"syscall"
 
 	"github.com/vishvananda/netlink"
 )
@@ -102,23 +102,21 @@ func isEexist(err error) bool {
 	if err == nil {
 		return false
 	}
-	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "exist") || errors.Is(err, errEEXIST)
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return errno == syscall.EEXIST
+	}
+	return false
 }
 
 func isEnoent(err error) bool {
 	if err == nil {
 		return false
 	}
-	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "not exist") || strings.Contains(s, "no such") ||
-		strings.Contains(s, "enoent") || errors.Is(err, errENOENT)
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return errno == syscall.ENOENT
+	}
+	return false
 }
 
-// errEEXIST/ENOENT — фантомные ошибки для errors.Is fallback.
-// vishvananda/netlink возвращает текстовые ошибки, не syscall.Errno напрямую,
-// поэтому опираемся на text-match.
-var (
-	errEEXIST = errors.New("EEXIST")
-	errENOENT = errors.New("ENOENT")
-)
