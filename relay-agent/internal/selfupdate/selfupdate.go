@@ -150,7 +150,10 @@ func (u *Updater) fetchLatestRelease() (tag, assetURL string, err error) {
 
 // downloadBinary — скачивает свежий бинарь во временный файл рядом с целевым.
 func (u *Updater) downloadBinary(url, tmpPath string) error {
-	req, _ := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return fmt.Errorf("invalid download url: %w", err)
+	}
 	client := &http.Client{Timeout: 120 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
