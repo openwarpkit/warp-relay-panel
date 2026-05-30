@@ -136,7 +136,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		tm.Loop(ctx)
+		tm.Loop(ctx, rc.Count)
 	}()
 
 	wg.Add(1)

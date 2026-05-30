@@ -147,6 +147,17 @@ func (m *Manager) Count() int {
 	return len(m.seen)
 }
 
+// HasIP — проверяет, активен ли IP (для фильтрации traffic).
+// Возвращает 1 если активен, 0 если нет, чтобы соответствовать сигнатуре countFunc.
+func (m *Manager) HasIP(ip string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.seen[ip]; ok {
+		return 1
+	}
+	return 0
+}
+
 // Reset — снять все лимиты и очистить state. Reconcile-loop при
 // следующем тике перенавесит на текущих активных.
 func (m *Manager) Reset() {

@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -105,10 +106,31 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go tm.Loop(ctx)
-	go ms.Loop(ctx)
-	go wd.Loop(ctx, time.Duration(cfg.RulesWatchdogInterval)*time.Second)
-	go sl.Loop(ctx)
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tm.Loop(ctx, sl.HasIP)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ms.Loop(ctx)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		wd.Loop(ctx, time.Duration(cfg.RulesWatchdogInterval)*time.Second)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		sl.Loop(ctx)
+	}()
 
 	addr := fmt.Sprintf(":%d", cfg.AgentPort)
 	log.Printf("WARP Relay Agent MIN v%s starting on %s", Version, addr)
@@ -135,4 +157,7 @@ func main() {
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("HTTP server error: %v", err)
 	}
+
+	wg.Wait()
+	log.Println("All background workers stopped. Exiting.")
 }
