@@ -182,7 +182,7 @@ func (c *Client) listenWorker() {
 	}
 }
 
-func (c *Client) SnapshotUDP(maxAge time.Duration) ([]UDPFlow, error) {
+func (c *Client) SnapshotUDP() ([]UDPFlow, error) {
 	c.flowsMu.RLock()
 	defer c.flowsMu.RUnlock()
 
@@ -211,7 +211,7 @@ func (c *Client) SnapshotUDP(maxAge time.Duration) ([]UDPFlow, error) {
 	return out, nil
 }
 
-func (c *Client) AssuredUDPSrcs(maxAge time.Duration) (map[string]struct{}, error) {
+func (c *Client) AssuredUDPSrcs() (map[string]struct{}, error) {
 	c.flowsMu.RLock()
 	defer c.flowsMu.RUnlock()
 
@@ -254,7 +254,7 @@ func (c *Client) DeleteBySrcUDP(srcIP string) error {
 	return nil
 }
 
-func (c *Client) MarkBySrcsUDP(maxAge time.Duration, srcToMark map[string]uint32) (int, error) {
+func (c *Client) MarkBySrcsUDP(srcToMark map[string]uint32) (int, error) {
 	if len(srcToMark) == 0 {
 		return 0, nil
 	}
@@ -289,7 +289,7 @@ func (c *Client) MarkBySrcsUDP(maxAge time.Duration, srcToMark map[string]uint32
 	return updated, nil
 }
 
-func (c *Client) MarkBySrcUDP(maxAge time.Duration, srcIP string, mark uint32) error {
+func (c *Client) MarkBySrcUDP(srcIP string, mark uint32) error {
 	conn, err := c.ensureConn()
 	if err != nil {
 		return err
@@ -346,7 +346,7 @@ func asErrno(err error, target *syscall.Errno) bool {
 	return false
 }
 
-func (c *Client) ActiveUDPClients(maxAge time.Duration, dstIP string, ports map[uint16]bool) (map[string]struct{}, error) {
+func (c *Client) ActiveUDPClients(dstIP string, ports map[uint16]bool) (map[string]struct{}, error) {
 	c.flowsMu.RLock()
 	defer c.flowsMu.RUnlock()
 
@@ -373,7 +373,7 @@ type UDPStats struct {
 	TopPorts  map[uint16]int // dport → count
 }
 
-func (c *Client) StatsUDP(maxAge time.Duration) (UDPStats, error) {
+func (c *Client) StatsUDP() (UDPStats, error) {
 	c.flowsMu.RLock()
 	defer c.flowsMu.RUnlock()
 

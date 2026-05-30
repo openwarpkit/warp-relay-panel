@@ -260,7 +260,7 @@ func (m *Manager) applyTC(ip string, mbps float64, mark int) error {
 	// Пометить уже существующие conntrack-флоу с этим src — netlink.
 	// maxAge=5s переиспользует snapshot от sharedlimit.reconcile → batch applyTC
 	// (RestoreAll, добавление N новых IP) делает 1 Dump, а не N.
-	if err := m.ct.MarkBySrcUDP(5*time.Second, ip, uint32(mark)); err != nil {
+	if err := m.ct.MarkBySrcUDP(ip, uint32(mark)); err != nil {
 		log.Printf("ratelimit: mark existing flows for %s: %v", ip, err)
 	}
 	return nil
@@ -288,7 +288,7 @@ func (m *Manager) removeTC(ip string, mark int) {
 		5*time.Second)
 	// Сбросить mark на текущих conntrack-флоу — netlink.
 	// maxAge=5s — тот же snapshot, см. applyTC.
-	if err := m.ct.MarkBySrcUDP(5*time.Second, ip, 0); err != nil {
+	if err := m.ct.MarkBySrcUDP(ip, 0); err != nil {
 		log.Printf("ratelimit: reset mark for %s: %v", ip, err)
 	}
 }
@@ -442,7 +442,7 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 	for _, pl := range plans {
 		srcToMark[pl.item.IP] = uint32(pl.mark)
 	}
-	if _, err := m.ct.MarkBySrcsUDP(0, srcToMark); err != nil {
+	if _, err := m.ct.MarkBySrcsUDP(srcToMark); err != nil {
 		log.Printf("ratelimit.SetBatch: conntrack mark update: %v", err)
 	}
 
@@ -546,7 +546,7 @@ func (m *Manager) RemoveBatch(ips []string) []Limit {
 		shell.RunStdin("tc -batch -", tcBuf.String(), 30*time.Second)
 	}
 	// Сбросить mark существующих conntrack-flow'ов одним Dump'ом.
-	if _, err := m.ct.MarkBySrcsUDP(0, srcToMark); err != nil {
+	if _, err := m.ct.MarkBySrcsUDP(srcToMark); err != nil {
 		log.Printf("ratelimit.RemoveBatch: conntrack reset mark: %v", err)
 	}
 
@@ -649,7 +649,7 @@ func (m *Manager) RestoreAll() (applied []string, failed []string) {
 		if rcTc, _, tcErr := shell.RunStdin("tc -batch -", tcBuf.String(), 30*time.Second); rcTc != 0 && !isExistsErr(tcErr) {
 			log.Printf("ratelimit.RestoreAll: tc batch rc=%d: %s", rcTc, tcErr)
 		}
-		if _, err := m.ct.MarkBySrcsUDP(0, srcToMark); err != nil {
+		if _, err := m.ct.MarkBySrcsUDP(srcToMark); err != nil {
 			log.Printf("ratelimit.RestoreAll: conntrack mark update: %v", err)
 		}
 

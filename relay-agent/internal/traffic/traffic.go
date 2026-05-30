@@ -125,7 +125,7 @@ func (m *Monitor) Collect() {
 	// TTL = половина периода: traffic.Loop крутится с m.interval (default 30s),
 	// поэтому 15s кеш позволяет HTTP /traffic-handler'у дёшево переиспользовать
 	// тот же snapshot, не блокируя коллектор.
-	flows, err := m.ct.SnapshotUDP(m.interval / 2)
+	flows, err := m.ct.SnapshotUDP()
 	if err != nil {
 		log.Printf("traffic: conntrack snapshot error: %v", err)
 		return

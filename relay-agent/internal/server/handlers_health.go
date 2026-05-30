@@ -115,7 +115,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) onlineClients() map[string]interface{} {
 	whitelist, _ := ipsetgo.Members(s.Cfg.IpsetName)
 	// 2s кеша — дедуп параллельных /health, /stats, /online от панели.
-	assured, err := s.Conntrack.AssuredUDPSrcs(2 * time.Second)
+	assured, err := s.Conntrack.AssuredUDPSrcs()
 	if err != nil {
 		assured = map[string]struct{}{}
 	}
@@ -145,7 +145,7 @@ func (s *Server) onlineClients() map[string]interface{} {
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	online := s.onlineClients()
 
-	stats, err := s.Conntrack.StatsUDP(2 * time.Second)
+	stats, err := s.Conntrack.StatsUDP()
 	if err != nil {
 		writeError(w, 500, "conntrack stats: "+err.Error())
 		return

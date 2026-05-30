@@ -61,7 +61,7 @@ func New(ct *conntrackgo.Client, rl *ratelimit.Manager, cfg Config) *Manager {
 func (m *Manager) reconcile() {
 	// TTL = половина ScanInterval: при default 10s даёт 5s кеша. /shaped-handler
 	// и параллельные traffic-запросы получат тот же snapshot.
-	active, err := m.ct.ActiveUDPClients(m.cfg.ScanInterval/2, m.cfg.DstIP, m.portsSet)
+	active, err := m.ct.ActiveUDPClients(m.cfg.DstIP, m.portsSet)
 	if err != nil {
 		log.Printf("sharedlimit: scan error: %v", err)
 		return
