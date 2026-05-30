@@ -11,7 +11,15 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/vishvananda/netlink"
+)
+
+var (
+	defaultIfaceCache string
+	defaultIfaceMu    sync.RWMutex
 )
 
 var ipv4Re = regexp.MustCompile(`^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$`)
@@ -99,6 +107,33 @@ func FormatBytes(b int64) string {
 
 // DefaultIface возвращает имя дефолтного интерфейса (например "eth0").
 func DefaultIface() string {
+	defaultIfaceMu.RLock()
+	if defaultIfaceCache != "" {
+		defer defaultIfaceMu.RUnlock()
+		return defaultIfaceCache
+	}
+	defaultIfaceMu.RUnlock()
+
+	defaultIfaceMu.Lock()
+	defer defaultIfaceMu.Unlock()
+	if defaultIfaceCache != "" {
+		return defaultIfaceCache
+	}
+
+	routes, err := netlink.RouteList(nil, netlink.FAMILY_V4)
+	if err == nil {
+		for _, r := range routes {
+			if r.Dst == nil { // default route
+				link, err := netlink.LinkByIndex(r.LinkIndex)
+				if err == nil {
+					defaultIfaceCache = link.Attrs().Name
+					return defaultIfaceCache
+				}
+			}
+		}
+	}
+
 	_, out, _ := Run("ip route | awk '/default/ {print $5; exit}'", 5*time.Second)
+	defaultIfaceCache = out
 	return out
 }
