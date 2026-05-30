@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -184,15 +185,16 @@ func runShell(cmd string, timeout time.Duration) (rc int, out string, errOut str
 	if err := c.Start(); err != nil {
 		return -1, "", err.Error()
 	}
-	done := make(chan struct{})
+	var wg sync.WaitGroup
 	var outB, errB strings.Builder
-	go func() { io.Copy(&outB, stdout); close(done) }()
-	go func() { io.Copy(&errB, stderr) }()
+	wg.Add(2)
+	go func() { defer wg.Done(); io.Copy(&outB, stdout) }()
+	go func() { defer wg.Done(); io.Copy(&errB, stderr) }()
 
 	timer := time.AfterFunc(timeout, func() { _ = c.Process.Kill() })
 	err := c.Wait()
 	timer.Stop()
-	<-done
+	wg.Wait()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return exitErr.ExitCode(), outB.String(), errB.String()
