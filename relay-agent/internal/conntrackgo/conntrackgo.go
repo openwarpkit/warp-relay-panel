@@ -8,6 +8,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"net"
 
 	"github.com/ti-mo/conntrack"
 	"github.com/ti-mo/netfilter"
@@ -285,6 +286,17 @@ func (c *Client) reconcileOnce() {
 	}
 }
 
+func isFilteredIP(src string) bool {
+	if strings.HasPrefix(src, "162.159.") {
+		return true
+	}
+	ip := net.ParseIP(src)
+	if ip == nil {
+		return false
+	}
+	return ip.IsPrivate() || ip.IsLoopback()
+}
+
 func (c *Client) SnapshotUDP() ([]UDPFlow, error) {
 	var out []UDPFlow
 	for i := 0; i < numShards; i++ {
@@ -295,7 +307,7 @@ func (c *Client) SnapshotUDP() ([]UDPFlow, error) {
 			dst := f.TupleOrig.IP.DestinationAddress.String()
 			sport := f.TupleOrig.Proto.SourcePort
 			dport := f.TupleOrig.Proto.DestinationPort
-			if strings.HasPrefix(src, "162.159.") || strings.HasPrefix(src, "172.") {
+			if isFilteredIP(src) {
 				continue
 			}
 			if dport == 22 || sport == 22 {
