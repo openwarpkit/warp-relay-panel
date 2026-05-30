@@ -24,9 +24,11 @@ type ipStats struct {
 }
 
 type fileFmt struct {
-	Month     string             `json:"month"`
-	IPs       map[string]ipStats `json:"ips"`
-	LastReset string             `json:"last_reset,omitempty"`
+	Month      string             `json:"month"`
+	IPs        map[string]ipStats `json:"ips"`
+	OrphanedTX int64              `json:"orphaned_tx"`
+	OrphanedRX int64              `json:"orphaned_rx"`
+	LastReset  string             `json:"last_reset,omitempty"`
 }
 
 type connKey struct {
@@ -128,7 +130,7 @@ func (m *Monitor) checkMonthReset() {
 	}
 }
 
-func (m *Monitor) Collect() {
+func (m *Monitor) Collect(countFunc func(string) int) {
 	// TTL = половина периода: traffic.Loop крутится с m.interval (default 30s),
 	// поэтому 15s кеш позволяет HTTP /traffic-handler'у дёшево переиспользовать
 	// тот же snapshot, не блокируя коллектор.
@@ -161,6 +163,15 @@ func (m *Monitor) Collect() {
 			}
 		}
 		if dtx > 0 || drx > 0 {
+			if countFunc != nil && countFunc(f.SrcIP) == 0 {
+				// Unauthorized / unknown IP — add to orphaned totals but do NOT allocate per-IP entry
+				// to prevent Unbounded Memory Leak DDoS vector.
+				m.state.OrphanedTX += dtx
+				m.state.OrphanedRX += drx
+				changed = true
+				continue
+			}
+
 			s := m.state.IPs[f.SrcIP]
 			s.TX += dtx
 			s.RX += drx
@@ -175,17 +186,22 @@ func (m *Monitor) Collect() {
 	}
 }
 
-func (m *Monitor) Loop(ctx context.Context) {
+func (m *Monitor) Loop(ctx context.Context, countFunc func(string) int) {
+	log.Printf("traffic: started collector every %s", m.interval)
 	t := time.NewTicker(m.interval)
 	defer t.Stop()
-	m.Collect()
+
+	// Первая немедленная сборка при старте
+	m.Collect(countFunc)
+
 	for {
 		select {
 		case <-ctx.Done():
-			m.Collect()
+			log.Println("traffic: shutdown signal received, saving final snapshot...")
+			m.Collect(countFunc)
 			return
 		case <-t.C:
-			m.Collect()
+			m.Collect(countFunc)
 		}
 	}
 }
@@ -244,6 +260,8 @@ func (m *Monitor) GetAll(refCount func(string) int, clients func(string) []int64
 			Updated:     s.Updated,
 		}
 	}
+	totalTX += m.state.OrphanedTX
+	totalRX += m.state.OrphanedRX
 	out.TotalTXBytes = totalTX
 	out.TotalRXBytes = totalRX
 	out.TotalBytes = totalTX + totalRX
