@@ -169,17 +169,28 @@ func (w *Watchdog) heal(c Checks) []string {
 		}
 	}
 
-	// Rate-limit'ы (для full — из API; для min — переприменит sharedlimit на следующем reconcile,
-	// но Verify+RestoreAll работает и для min, т.к. sharedlimit пишет в тот же rate_limits.json).
-	if w.RateLimit != nil {
-		broken := w.RateLimit.Verify()
-		if len(broken) > 0 {
-			applied, _ := w.RateLimit.RestoreAll()
-			actions = append(actions, fmt.Sprintf("restored %d rate-limits", len(applied)))
-		}
-	}
-
 	return actions
+}
+
+// reconcileRateLimits переприменяет лимиты при дрейфе nft-map / tc-классов.
+// Запускается каждый тик независимо от firewall-проверок: пустая map ip2mark
+// при живой таблице firewall-чеками не ловится, а трафик при этом утекает в
+// безлимитный default-класс.
+func (w *Watchdog) reconcileRateLimits() {
+	if w.RateLimit == nil {
+		return
+	}
+	broken := w.RateLimit.Verify()
+	if len(broken) == 0 {
+		return
+	}
+	applied, _ := w.RateLimit.RestoreAll()
+	log.Printf("Self-heal: rate-limit drift (%d missing) -> restored %d", len(broken), len(applied))
+	w.saveStatus(Status{
+		Timestamp: time.Now().In(time.FixedZone("MSK", 3*3600)).Format(time.RFC3339),
+		Broken:    []string{fmt.Sprintf("rate_limit_drift:%d", len(broken))},
+		Actions:   []string{fmt.Sprintf("restored %d rate-limits", len(applied))},
+	})
 }
 
 func (w *Watchdog) saveStatus(s Status) {
@@ -225,6 +236,7 @@ func (w *Watchdog) Loop(ctx context.Context, interval time.Duration) {
 				})
 				log.Printf("Self-heal actions: %v", actions)
 			}
+			w.reconcileRateLimits()
 		}
 	}
 }

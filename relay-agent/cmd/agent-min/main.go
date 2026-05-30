@@ -60,6 +60,9 @@ func main() {
 		cfg.RateLimitMarkMin, cfg.RateLimitMarkMax,
 		ct,
 	)
+	if applied, failed := rl.RestoreAll(); len(applied) > 0 || len(failed) > 0 {
+		log.Printf("Rate-limits restored on startup: %d applied, %d failed", len(applied), len(failed))
+	}
 	ms := metrics.New(time.Duration(cfg.MetricsSampleInterval)*time.Second, cfg.DataDir)
 
 	wd := &watchdog.Watchdog{

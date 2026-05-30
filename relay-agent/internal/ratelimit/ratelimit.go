@@ -378,10 +378,9 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 	m.mu.Lock()
 	// 1. Аллоцировать mark'и для новых IP, переиспользовать для существующих.
 	type plan struct {
-		item     SetItem
-		mark     int
-		isNew    bool
-		oldMark  int // для существующих — старый mark (для tc class del + nft delete element)
+		item  SetItem
+		mark  int
+		isNew bool
 	}
 	plans := make([]plan, 0, len(items))
 	errs := make(map[string]error)
@@ -390,7 +389,6 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 		pl.item = it
 		if existing, ok := m.m[it.IP]; ok {
 			pl.mark = existing.Mark
-			pl.oldMark = existing.Mark
 		} else {
 			mark, err := m.allocateMark()
 			if err != nil {
@@ -404,48 +402,36 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 	}
 	m.mu.Unlock()
 
-	// 2. nft batch: для существующих сначала delete element (mark может быть тот же,
-	// но безопаснее перезаписать), потом add. Для новых — только add.
-	// Если изменился mbps на существующем IP — старый tc class имеет неправильный
-	// rate, надо его удалить и пересоздать (batched через `tc -batch -`).
-	var nftBuf, tcDelBuf, tcAddBuf strings.Builder
+	// 2. nft batch: add element только для новых IP. mark существующего IP не
+	// меняется → его элемент в map уже корректен. delete element в одной
+	// атомарной nft-транзакции с add недопустим: для нового IP delete
+	// отсутствующего элемента возвращает "No such file or directory" и
+	// откатывает всю транзакцию вместе с add → map остаётся пустой.
+	var nftBuf, tcBuf strings.Builder
 	for _, pl := range plans {
-		// nft: delete + add (idempotent)
-		fmt.Fprintf(&nftBuf, "delete element ip warp_shaper ip2mark { %s }\n", pl.item.IP)
-		fmt.Fprintf(&nftBuf, "add element ip warp_shaper ip2mark { %s : 0x%x }\n", pl.item.IP, pl.mark)
-		// tc: всегда переcоздавать класс (rate мог измениться).
-		if !pl.isNew {
-			fmt.Fprintf(&tcDelBuf, "class del dev %s classid 1:%d\n", iface, pl.oldMark)
+		if pl.isNew {
+			fmt.Fprintf(&nftBuf, "add element ip warp_shaper ip2mark { %s : 0x%x }\n", pl.item.IP, pl.mark)
 		}
-		fmt.Fprintf(&tcAddBuf, "class add dev %s parent 1: classid 1:%d htb rate %.2fmbit ceil %.2fmbit burst 16k\n",
+		fmt.Fprintf(&tcBuf, "class replace dev %s parent 1: classid 1:%d htb rate %.2fmbit ceil %.2fmbit burst 16k\n",
 			iface, pl.mark, pl.item.Mbps, pl.item.Mbps)
 	}
 
 	// 3. Применить nft batch одним вызовом.
 	if nftBuf.Len() > 0 {
 		rc, _, errOut := shell.RunStdin("nft -f -", nftBuf.String(), 30*time.Second)
-		// Runtime self-heal: warp_shaper-таблицы нет → создаём + повторяем.
-		// "delete element" в batch при отсутствующем элементе тоже даёт
-		// "No such file or directory", но это не fatal — после ensureBackend
-		// add element всё равно создаст что надо.
 		if rc != 0 && isMissingErr(errOut) {
 			if healErr := m.ensureBackend(); healErr == nil {
 				rc, _, errOut = shell.RunStdin("nft -f -", nftBuf.String(), 30*time.Second)
 			}
 		}
-		if rc != 0 {
-			if !isExistsErr(errOut) && !isMissingErr(errOut) {
-				log.Printf("ratelimit.SetBatch: nft batch returned rc=%d: %s", rc, errOut)
-			}
+		if rc != 0 && !isExistsErr(errOut) && !isMissingErr(errOut) {
+			log.Printf("ratelimit.SetBatch: nft batch returned rc=%d: %s", rc, errOut)
 		}
 	}
 
-	// 4. tc batch: сначала delete (для существующих), потом add.
-	if tcDelBuf.Len() > 0 {
-		shell.RunStdin("tc -batch -", tcDelBuf.String(), 30*time.Second)
-	}
-	if tcAddBuf.Len() > 0 {
-		rc, _, errOut := shell.RunStdin("tc -batch -", tcAddBuf.String(), 30*time.Second)
+	// 4. tc batch: class replace создаёт класс или меняет rate без ошибки.
+	if tcBuf.Len() > 0 {
+		rc, _, errOut := shell.RunStdin("tc -batch -", tcBuf.String(), 30*time.Second)
 		if rc != 0 && !isExistsErr(errOut) {
 			log.Printf("ratelimit.SetBatch: tc batch returned rc=%d: %s", rc, errOut)
 		}
@@ -607,28 +593,70 @@ func (m *Manager) Count() int {
 // RestoreAll переприменяет все лимиты к tc/(nft|iptables). Вызывается на старте
 // агента и watchdog'ом.
 //
-// В nft-режиме использует SetBatch → 2 fork+exec + 1 conntrack Dump на ВСЕ IP.
+// В nft-режиме пересевает map ip2mark целиком (flush + add всех элементов одной
+// транзакцией) и пересоздаёт HTB-классы через tc class replace. SetBatch для
+// этого не годится: все IP из state — "существующие", а add element там бежит
+// только для новых, поэтому пустую map он бы не заполнил.
 // В iptables-режиме — пер-IP applyTC (legacy fallback).
 func (m *Manager) RestoreAll() (applied []string, failed []string) {
 	if m.useNft {
+		iface := shell.DefaultIface()
+		if iface == "" {
+			return nil, []string{"no default interface"}
+		}
+		m.ensureBackend()
+
 		m.mu.Lock()
-		items := make([]SetItem, 0, len(m.m))
+		type ipMark struct {
+			ip   string
+			mark int
+			mbps float64
+		}
+		all := make([]ipMark, 0, len(m.m))
 		for ip, l := range m.m {
-			items = append(items, SetItem{
-				IP:        ip,
-				Mbps:      l.Mbps,
-				ExpiresAt: l.ExpiresAt,
-				ClientID:  l.ClientID,
-			})
+			all = append(all, ipMark{ip, l.Mark, l.Mbps})
 		}
 		m.mu.Unlock()
-		out, errs := m.SetBatch(items)
-		for _, l := range out {
-			applied = append(applied, l.IP)
+
+		if len(all) == 0 {
+			return
 		}
-		for ip, e := range errs {
-			failed = append(failed, fmt.Sprintf("%s: %v", ip, e))
+
+		var nftBuf, tcBuf strings.Builder
+		fmt.Fprintf(&nftBuf, "flush map ip warp_shaper ip2mark\n")
+		srcToMark := make(map[string]uint32, len(all))
+		for _, e := range all {
+			fmt.Fprintf(&nftBuf, "add element ip warp_shaper ip2mark { %s : 0x%x }\n", e.ip, e.mark)
+			fmt.Fprintf(&tcBuf, "class replace dev %s parent 1: classid 1:%d htb rate %.2fmbit ceil %.2fmbit burst 16k\n",
+				iface, e.mark, e.mbps, e.mbps)
+			srcToMark[e.ip] = uint32(e.mark)
 		}
+
+		rc, _, errOut := shell.RunStdin("nft -f -", nftBuf.String(), 30*time.Second)
+		if rc != 0 && isMissingErr(errOut) {
+			if healErr := m.ensureBackend(); healErr == nil {
+				rc, _, errOut = shell.RunStdin("nft -f -", nftBuf.String(), 30*time.Second)
+			}
+		}
+		if rc != 0 && !isExistsErr(errOut) {
+			log.Printf("ratelimit.RestoreAll: nft batch rc=%d: %s", rc, errOut)
+			for _, e := range all {
+				failed = append(failed, e.ip)
+			}
+			return
+		}
+
+		if rcTc, _, tcErr := shell.RunStdin("tc -batch -", tcBuf.String(), 30*time.Second); rcTc != 0 && !isExistsErr(tcErr) {
+			log.Printf("ratelimit.RestoreAll: tc batch rc=%d: %s", rcTc, tcErr)
+		}
+		if _, err := m.ct.MarkBySrcsUDP(0, srcToMark); err != nil {
+			log.Printf("ratelimit.RestoreAll: conntrack mark update: %v", err)
+		}
+
+		for _, e := range all {
+			applied = append(applied, e.ip)
+		}
+		log.Printf("Rate-limit RestoreAll: re-seeded %d IPs (flush+add map, tc replace)", len(applied))
 		return
 	}
 
