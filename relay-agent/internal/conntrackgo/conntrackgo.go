@@ -63,6 +63,7 @@ type Client struct {
 	shards [numShards]*flowShard
 
 	stopListen chan struct{}
+	closeOnce  sync.Once
 	wg         sync.WaitGroup
 }
 
@@ -123,7 +124,9 @@ func (c *Client) reset() {
 }
 
 func (c *Client) Close() error {
-	close(c.stopListen)
+	c.closeOnce.Do(func() {
+		close(c.stopListen)
+	})
 	c.wg.Wait()
 	c.mu.Lock()
 	defer c.mu.Unlock()
