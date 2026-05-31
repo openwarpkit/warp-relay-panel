@@ -9,6 +9,13 @@
 
 TAG="WR_RULE"
 RECIPE="${RECIPE:-/opt/warp-relay-agent/rules_recipe.json}"
+ENV_FILE="${ENV_FILE:-/opt/warp-relay-agent/.env}"
+
+SHARED_LIMIT_MBPS=""
+if [ -f "$ENV_FILE" ]; then
+    SHARED_LIMIT_MBPS=$(grep -E '^SHARED_LIMIT_MBPS=' "$ENV_FILE" | head -1 | cut -d= -f2 | tr -d '[:space:]')
+fi
+SHARED_LIMIT_MBPS="${SHARED_LIMIT_MBPS:-30}"
 
 G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; N='\033[0m'
 
@@ -104,8 +111,12 @@ if [ -n "$IFACE" ]; then
     if ! tc qdisc show dev "$IFACE" 2>/dev/null | grep -q "qdisc htb 1:"; then
         echo -e "${Y}[ensure-min] HTB qdisc на $IFACE не найден — создаём${N}"
         tc qdisc add dev "$IFACE" root handle 1: htb default 999 2>/dev/null
-        tc class add dev "$IFACE" parent 1: classid 1:999 htb rate 1000mbit 2>/dev/null
+        tc class add dev "$IFACE" parent 1: classid 1:999 htb rate "${SHARED_LIMIT_MBPS}mbit" ceil "${SHARED_LIMIT_MBPS}mbit" 2>/dev/null
     fi
+    # Дефолтный класс = лимит на клиента, не безлимит: новые/недетектированные
+    # флоу до conntrack-скана не должны обходить шейп через 1:999.
+    tc class change dev "$IFACE" parent 1: classid 1:999 htb rate "${SHARED_LIMIT_MBPS}mbit" ceil "${SHARED_LIMIT_MBPS}mbit" 2>/dev/null || \
+        tc class add dev "$IFACE" parent 1: classid 1:999 htb rate "${SHARED_LIMIT_MBPS}mbit" ceil "${SHARED_LIMIT_MBPS}mbit" 2>/dev/null
     if ! iptables -t mangle -S POSTROUTING 2>/dev/null | grep -q "CONNMARK --restore-mark"; then
         iptables -t mangle -A POSTROUTING -j CONNMARK --restore-mark 2>/dev/null
     fi
