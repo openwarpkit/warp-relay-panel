@@ -69,7 +69,7 @@ import (
 )
 
 // Version проставляется через -ldflags при сборке.
-var Version = "2.2.7"
+var Version = "2.2.8"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
