@@ -483,9 +483,9 @@ func (c *Client) ActiveUDPClients(dstIP string, ports map[uint16]bool) (map[stri
 				continue
 			}
 			src := f.TupleOrig.IP.SourceAddress.String()
-			if strings.HasPrefix(src, "162.159.") || strings.HasPrefix(src, "172.") {
-				continue
-			}
+            if isFilteredIP(src) {
+                continue
+            }
 			out[src] = struct{}{}
 		}
 		shard.mu.RUnlock()
