@@ -71,10 +71,14 @@ def _is_bot(user_agent: str) -> bool:
     return bool(_BOT_PATTERNS.search(user_agent))
 
 
+_WARP_FIRST_OCTETS = {net.network_address.packed[0] for net in _WARP_NETWORKS if net.version == 4}
+
 def _is_warp_ip(ip: str) -> bool:
     try:
         addr = ipaddress.ip_address(ip)
     except ValueError:
+        return False
+    if addr.version == 4 and addr.packed[0] not in _WARP_FIRST_OCTETS:
         return False
     return any(addr in net for net in _WARP_NETWORKS)
 
