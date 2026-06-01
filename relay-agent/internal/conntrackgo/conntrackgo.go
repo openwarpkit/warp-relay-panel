@@ -1,11 +1,11 @@
 package conntrackgo
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"log"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -150,7 +150,7 @@ func (c *Client) listenWorker() {
 				c.shards[i].mu.Unlock()
 			}
 			for _, f := range flows {
-				if f.TupleOrig.Proto.Protocol == protoUDP {
+				if f.TupleOrig.Proto.Protocol == protoUDP && f.TupleOrig.IP.SourceAddress.Is4() {
 					k := FlowKey{
 						SrcIP:   f.TupleOrig.IP.SourceAddress.String(),
 						DstIP:   f.TupleOrig.IP.DestinationAddress.String(),
@@ -186,7 +186,7 @@ func (c *Client) listenWorker() {
 				if !ok {
 					break loop
 				}
-				if ev.Flow == nil || ev.Flow.TupleOrig.Proto.Protocol != protoUDP {
+				if ev.Flow == nil || ev.Flow.TupleOrig.Proto.Protocol != protoUDP || !ev.Flow.TupleOrig.IP.SourceAddress.Is4() {
 					continue
 				}
 				k := FlowKey{
@@ -473,13 +473,11 @@ func errIsENOENT(err error) bool {
 
 func (c *Client) ActiveUDPClients(dstIP string, ports map[uint16]bool) (map[string]struct{}, error) {
 	out := make(map[string]struct{}, 64)
-	targetDst := net.ParseIP(dstIP)
-	if targetDst == nil {
-		return out, fmt.Errorf("invalid dstIP: %s", dstIP)
+	targetDst, err := netip.ParseAddr(dstIP)
+	if err != nil || !targetDst.Is4() {
+		return out, fmt.Errorf("invalid or non-IPv4 dstIP: %s", dstIP)
 	}
-	if v4 := targetDst.To4(); v4 != nil {
-		targetDst = v4
-	}
+	targetDst4 := targetDst.As4()
 
 	for i := 0; i < NumShards; i++ {
 		shard := c.shards[i]
@@ -489,10 +487,10 @@ func (c *Client) ActiveUDPClients(dstIP string, ports map[uint16]bool) (map[stri
 				continue
 			}
 			
-			replyAddr := f.TupleReply.IP.SourceAddress.As4()
-			replyIP := replyAddr[:] // Satisfy the bytes.Equal requirement
-
-			if !bytes.Equal(replyIP, targetDst) {
+			if !f.TupleReply.IP.SourceAddress.Is4() {
+				continue
+			}
+			if f.TupleReply.IP.SourceAddress.As4() != targetDst4 {
 				continue
 			}
 			src := f.TupleOrig.IP.SourceAddress.String()
