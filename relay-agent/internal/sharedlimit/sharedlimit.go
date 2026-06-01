@@ -10,11 +10,13 @@ package sharedlimit
 import (
 	"context"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/nellimonix/warp-relay-panel/relay-agent/internal/conntrackgo"
 	"github.com/nellimonix/warp-relay-panel/relay-agent/internal/ratelimit"
+	"github.com/ti-mo/conntrack"
 )
 
 type Config struct {
@@ -91,17 +93,7 @@ func (m *Manager) reconcile() {
 	m.mu.Unlock()
 
 	// 3. Batch apply for new IPs (outside m.mu - rl has its own mutex).
-	if len(newIPs) > 0 {
-		items := make([]ratelimit.SetItem, 0, len(newIPs))
-		for _, ip := range newIPs {
-			items = append(items, ratelimit.SetItem{IP: ip, Mbps: m.cfg.LimitMbps})
-		}
-		applied, errs := m.rl.SetBatch(items)
-		log.Printf("sharedlimit: batch +%d @ %.1f Mbps (%d errors)", len(applied), m.cfg.LimitMbps, len(errs))
-		for ip, e := range errs {
-			log.Printf("sharedlimit: apply %s failed: %v", ip, e)
-		}
-	}
+	m.applyBatch(newIPs, "scan")
 
 	// 4. Remove limits for idle - batch.
 	if len(toRemove) > 0 {
@@ -110,19 +102,86 @@ func (m *Manager) reconcile() {
 	}
 }
 
+func (m *Manager) applyBatch(newIPs []string, source string) {
+	if len(newIPs) == 0 {
+		return
+	}
+	items := make([]ratelimit.SetItem, 0, len(newIPs))
+	for _, ip := range newIPs {
+		items = append(items, ratelimit.SetItem{IP: ip, Mbps: m.cfg.LimitMbps})
+	}
+	applied, errs := m.rl.SetBatch(items)
+	log.Printf("sharedlimit: %s batch +%d @ %.1f Mbps (%d errors)", source, len(applied), m.cfg.LimitMbps, len(errs))
+	for ip, e := range errs {
+		log.Printf("sharedlimit: apply %s failed: %v", ip, e)
+	}
+}
+
 func (m *Manager) Loop(ctx context.Context) {
 	log.Printf("sharedlimit: started - limit=%.1f Mbps, dst=%s, ports=%d, scan=%s, idle_grace=%s",
 		m.cfg.LimitMbps, m.cfg.DstIP, len(m.cfg.Ports),
 		m.cfg.ScanInterval, m.cfg.IdleGrace)
+		
+	// Initial full sync
 	m.reconcile()
+
+	evChan := make(chan conntrack.Event, 4096)
+	m.ct.RegisterObserver(evChan)
+
 	t := time.NewTicker(m.cfg.ScanInterval)
 	defer t.Stop()
+
+	pending := make(map[string]struct{})
+	debounceTimer := time.NewTimer(time.Hour)
+	debounceTimer.Stop()
+	timerActive := false
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 			m.reconcile()
+		case ev := <-evChan:
+			if ev.Flow == nil || ev.Type == conntrack.EventDestroy {
+				continue
+			}
+			if ev.Flow.TupleOrig.Proto.Protocol != 17 { // protoUDP
+				continue
+			}
+			if !m.portsSet[ev.Flow.TupleOrig.Proto.DestinationPort] {
+				continue
+			}
+			if ev.Flow.TupleReply.IP.SourceAddress.String() != m.cfg.DstIP {
+				continue
+			}
+			src := ev.Flow.TupleOrig.IP.SourceAddress.String()
+			if strings.HasPrefix(src, "162.159.") || strings.HasPrefix(src, "172.") {
+				continue
+			}
+
+			m.mu.Lock()
+			_, exists := m.seen[src]
+			m.seen[src] = time.Now()
+			m.mu.Unlock()
+
+			if !exists {
+				pending[src] = struct{}{}
+				if !timerActive {
+					debounceTimer.Reset(200 * time.Millisecond)
+					timerActive = true
+				}
+			}
+		case <-debounceTimer.C:
+			timerActive = false
+			if len(pending) > 0 {
+				unique := make([]string, 0, len(pending))
+				for ip := range pending {
+					unique = append(unique, ip)
+				}
+				m.applyBatch(unique, "event")
+				pending = make(map[string]struct{})
+			}
 		}
 	}
 }

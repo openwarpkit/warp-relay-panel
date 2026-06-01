@@ -63,6 +63,9 @@ type Client struct {
 
 	shards [numShards]*flowShard
 
+	obsMu     sync.RWMutex
+	observers []chan<- conntrack.Event
+
 	stopListen chan struct{}
 	closeOnce  sync.Once
 	wg         sync.WaitGroup
@@ -84,6 +87,12 @@ func New() *Client {
 	go c.reconcileWorker()
 	
 	return c
+}
+
+func (c *Client) RegisterObserver(ch chan<- conntrack.Event) {
+	c.obsMu.Lock()
+	defer c.obsMu.Unlock()
+	c.observers = append(c.observers, ch)
 }
 
 func (c *Client) getShard(k FlowKey) *flowShard {
@@ -219,6 +228,15 @@ func (c *Client) listenWorker() {
 					delete(shard.flows, k)
 				}
 				shard.mu.Unlock()
+
+				c.obsMu.RLock()
+				for _, ch := range c.observers {
+					select {
+					case ch <- ev:
+					default:
+					}
+				}
+				c.obsMu.RUnlock()
 
 			case err := <-errChan:
 				log.Printf("conntrack listenWorker: worker error: %v", err)
