@@ -35,14 +35,14 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
 	cfg := config.Load()
-	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
+	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		log.Fatalf("Cannot create data dir %s: %v", cfg.DataDir, err)
 	}
 
 	// Persistent netlink connection for conntrack - opened lazily,
 	// reconnects on ENOBUFS.
 	ct := conntrackgo.New()
-	defer ct.Close()
+	defer func() { _ = ct.Close() }()
 
 	rc := refcount.New(filepath.Join(cfg.DataDir, "refcount.json"))
 	tm := traffic.New(
@@ -143,7 +143,7 @@ func main() {
 		log.Println("Shutting down...")
 		shutdownCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
 		defer c()
-		httpSrv.Shutdown(shutdownCtx)
+		_ = httpSrv.Shutdown(shutdownCtx)
 		cancel()
 	}()
 

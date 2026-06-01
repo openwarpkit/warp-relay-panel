@@ -96,6 +96,7 @@ func (c *Client) enableAccounting() {
 	if err == nil && strings.TrimSpace(string(data)) == "1" {
 		return
 	}
+	// #nosec G306 -- Kernel /proc requires default permissions
 	if err := os.WriteFile(path, []byte("1\n"), 0o644); err == nil {
 		log.Println("conntrack accounting enabled (nf_conntrack_acct=1)")
 	}
@@ -119,7 +120,7 @@ func (c *Client) reset() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.conn != nil {
-		c.conn.Close()
+		_ = c.conn.Close()
 		c.conn = nil
 	}
 }

@@ -14,6 +14,7 @@ import (
 )
 
 func (s *Server) loadStatusFile(path string) interface{} {
+	// #nosec G304 -- Status file path is controlled by config
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
@@ -184,6 +185,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func readSysfsInt(path string) int64 {
+	// #nosec G304 -- Sysfs path is constructed from interface name
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0

@@ -75,42 +75,44 @@ func (u *Updater) binaryName() string {
 }
 
 func (u *Updater) saveStatus(s Status) {
-	if err := os.MkdirAll(filepath.Dir(u.StatusPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(u.StatusPath), 0o750); err != nil {
 		log.Printf("selfupdate: mkdir error: %v", err)
 		return
 	}
 	data, _ := json.MarshalIndent(s, "", "  ")
 	tmpPath := u.StatusPath + ".tmp"
-	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	// #nosec G304 -- Status file path is controlled by config
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		log.Printf("selfupdate: saveStatus error (create tmp): %v", err)
 		return
 	}
 
 	if _, err := f.Write(data); err != nil {
-		f.Close()
-		os.Remove(tmpPath)
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
 		log.Printf("selfupdate: saveStatus error (write tmp): %v", err)
 		return
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(tmpPath)
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
 		log.Printf("selfupdate: saveStatus error (sync tmp): %v", err)
 		return
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		log.Printf("selfupdate: saveStatus error (close tmp): %v", err)
 		return
 	}
 	if err := os.Rename(tmpPath, u.StatusPath); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		log.Printf("selfupdate: saveStatus error (rename): %v", err)
 	}
 }
 
 func (u *Updater) LastStatus() *Status {
+	// #nosec G304 -- Status file path is controlled by config
 	data, err := os.ReadFile(u.StatusPath)
 	if err != nil {
 		return nil
@@ -134,7 +136,7 @@ func (u *Updater) fetchLatestRelease() (tag, assetURL string, err error) {
 	if err != nil {
 		return "", "", fmt.Errorf("github api: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
@@ -166,16 +168,17 @@ func (u *Updater) downloadBinary(url, tmpPath string) error {
 	if err != nil {
 		return fmt.Errorf("download: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("download status %d", resp.StatusCode)
 	}
 
+	// #nosec G302,G304 -- Executable file needs run permissions, path is from config
 	out, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
 	if err != nil {
 		return fmt.Errorf("create tmp: %w", err)
 	}
-	defer out.Close()
+	defer func() { _ = out.Close() }()
 
 	n, err := io.Copy(out, resp.Body)
 	if err != nil {
@@ -189,6 +192,7 @@ func (u *Updater) downloadBinary(url, tmpPath string) error {
 
 // runShell - lightweight wrapper instead of a separate shell package.
 func runShell(cmd string, timeout time.Duration) (rc int, out string, errOut string) {
+	// #nosec G204 -- Intentional shell execution for updates
 	c := exec.Command("bash", "-c", cmd)
 	stdout, _ := c.StdoutPipe()
 	stderr, _ := c.StderrPipe()
@@ -198,8 +202,8 @@ func runShell(cmd string, timeout time.Duration) (rc int, out string, errOut str
 	var wg sync.WaitGroup
 	var outB, errB strings.Builder
 	wg.Add(2)
-	go func() { defer wg.Done(); io.Copy(&outB, stdout) }()
-	go func() { defer wg.Done(); io.Copy(&errB, stderr) }()
+	go func() { defer wg.Done(); _, _ = io.Copy(&outB, stdout) }()
+	go func() { defer wg.Done(); _, _ = io.Copy(&errB, stderr) }()
 
 	timer := time.AfterFunc(timeout, func() { _ = c.Process.Kill() })
 	err := c.Wait()
@@ -221,7 +225,7 @@ func (u *Updater) Run() {
 
 	// 1. git pull (ensure_rules.sh, deploy scripts, README) - even if binary won't update.
 	lock := filepath.Join(u.RepoDir, ".git", "index.lock")
-	os.Remove(lock)
+	_ = os.Remove(lock)
 
 	rc, out, errOut := runShell(
 		fmt.Sprintf("cd %s && git pull --ff-only 2>&1", u.RepoDir),
@@ -280,7 +284,7 @@ func (u *Updater) Run() {
 	dstBin := filepath.Join(u.InstallDir, u.binaryName())
 	tmpBin := dstBin + ".new"
 	if err := u.downloadBinary(assetURL, tmpBin); err != nil {
-		os.Remove(tmpBin)
+		_ = os.Remove(tmpBin)
 		u.saveStatus(Status{
 			OK: false, Error: "download failed",
 			Details:    truncate(err.Error(), 500),
@@ -294,7 +298,7 @@ func (u *Updater) Run() {
 
 	// 5. Atomic swap.
 	if err := os.Rename(tmpBin, dstBin); err != nil {
-		os.Remove(tmpBin)
+		_ = os.Remove(tmpBin)
 		u.saveStatus(Status{
 			OK: false, Error: "binary swap failed",
 			Details:    truncate(err.Error(), 500),
@@ -330,7 +334,7 @@ func (u *Updater) Run() {
 
 	// 7. SIGTERM (delayed, to allow returning a response).
 	time.AfterFunc(2*time.Second, func() {
-		syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 	})
 }
 

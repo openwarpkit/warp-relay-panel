@@ -168,7 +168,7 @@ func (m *Manager) load() {
 }
 
 func (m *Manager) save() {
-	if err := os.MkdirAll(filepath.Dir(m.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(m.path), 0o750); err != nil {
 		log.Printf("ratelimit: mkdir error: %v", err)
 		return
 	}
@@ -180,27 +180,32 @@ func (m *Manager) save() {
 	data, _ := json.MarshalIndent(out, "", "  ")
 
 	tmpPath := m.path + ".tmp"
-	f, err := os.Create(tmpPath)
+	// #nosec G304 -- Tmp file path is constructed from config
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		log.Printf("ratelimit: create tmp file error: %v", err)
 		return
 	}
 
 	if _, err := f.Write(data); err != nil {
-		f.Close()
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
 		log.Printf("ratelimit: write tmp file error: %v", err)
 		return
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
 		log.Printf("ratelimit: sync tmp file error: %v", err)
 		return
 	}
 	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
 		log.Printf("ratelimit: close tmp file error: %v", err)
 		return
 	}
 	if err := os.Rename(tmpPath, m.path); err != nil {
+		_ = os.Remove(tmpPath)
 		log.Printf("ratelimit: rename error: %v", err)
 	}
 }
@@ -281,6 +286,7 @@ func (m *Manager) applyTC(ip string, mbps float64, mark int) error {
 	// Mark already existing conntrack-flows with this src - netlink.
 	// maxAge=5s reuses snapshot from sharedlimit.reconcile -> batch applyTC
 	// (RestoreAll, adding N new IPs) does 1 Dump, not N.
+	// #nosec G115 -- mark is within safe 10..999 range
 	if err := m.ct.MarkBySrcUDP(ip, uint32(mark)); err != nil {
 		log.Printf("ratelimit: mark existing flows for %s: %v", ip, err)
 	}
@@ -481,6 +487,7 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 	// 5. One conntrack Dump -> update mark on existing flows for all new marks.
 	srcToMark := make(map[string]uint32, len(plans))
 	for _, pl := range plans {
+		// #nosec G115 -- mark is within safe 10..999 range
 		srcToMark[pl.item.IP] = uint32(pl.mark)
 	}
 	if _, err := m.ct.MarkBySrcsUDP(srcToMark); err != nil {
@@ -645,7 +652,7 @@ func (m *Manager) RestoreAll() (applied []string, failed []string) {
 		if iface == "" {
 			return nil, []string{"no default interface"}
 		}
-		m.ensureBackend()
+		_ = m.ensureBackend()
 
 		m.mu.Lock()
 		type ipMark struct {
@@ -670,6 +677,7 @@ func (m *Manager) RestoreAll() (applied []string, failed []string) {
 			fmt.Fprintf(&nftBuf, "add element ip warp_shaper ip2mark { %s : 0x%x }\n", e.ip, e.mark)
 			fmt.Fprintf(&tcBuf, "class replace dev %s parent 1: classid 1:%d htb rate %.2fmbit ceil %.2fmbit burst 16k\n",
 				iface, e.mark, e.mbps, e.mbps)
+			// #nosec G115 -- mark is within safe 10..999 range
 			srcToMark[e.ip] = uint32(e.mark)
 		}
 

@@ -24,6 +24,7 @@ func New(path string) *Map {
 }
 
 func (r *Map) load() {
+	// #nosec G304 -- Status file path is controlled by config
 	data, err := os.ReadFile(r.path)
 	if err != nil {
 		return
@@ -44,7 +45,7 @@ func (r *Map) load() {
 }
 
 func (r *Map) save() {
-	if err := os.MkdirAll(filepath.Dir(r.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(r.path), 0o750); err != nil {
 		log.Printf("refcount: mkdir error: %v", err)
 		return
 	}
@@ -63,27 +64,32 @@ func (r *Map) save() {
 	data, _ := json.MarshalIndent(out, "", "  ")
 
 	tmpPath := r.path + ".tmp"
-	f, err := os.Create(tmpPath)
+	// #nosec G304 -- Tmp file path is constructed from config
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		log.Printf("refcount: create tmp file error: %v", err)
 		return
 	}
 
 	if _, err := f.Write(data); err != nil {
-		f.Close()
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
 		log.Printf("refcount: write tmp file error: %v", err)
 		return
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
 		log.Printf("refcount: sync tmp file error: %v", err)
 		return
 	}
 	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
 		log.Printf("refcount: close tmp file error: %v", err)
 		return
 	}
 	if err := os.Rename(tmpPath, r.path); err != nil {
+		_ = os.Remove(tmpPath)
 		log.Printf("refcount: rename error: %v", err)
 	}
 }

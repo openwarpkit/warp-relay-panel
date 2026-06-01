@@ -82,7 +82,7 @@ func writeJSON(w http.ResponseWriter, status int, body interface{}) {
 	w.WriteHeader(status)
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	enc.Encode(body)
+	_ = enc.Encode(body)
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {

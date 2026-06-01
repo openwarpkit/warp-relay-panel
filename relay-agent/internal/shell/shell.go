@@ -31,6 +31,7 @@ func Run(cmd string, timeout time.Duration) (int, string, string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	// #nosec G204 -- Intentional system calls for traffic shaping
 	c := exec.CommandContext(ctx, "/bin/sh", "-c", cmd)
 	stdout, err := c.Output()
 	stderrStr := ""
@@ -56,6 +57,7 @@ func RunStdin(cmd, stdin string, timeout time.Duration) (int, string, string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	// #nosec G204 -- Intentional system calls for traffic shaping
 	c := exec.CommandContext(ctx, "/bin/sh", "-c", cmd)
 	c.Stdin = strings.NewReader(stdin)
 	var stderrBuf strings.Builder

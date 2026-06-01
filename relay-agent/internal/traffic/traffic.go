@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -85,37 +86,38 @@ func (m *Monitor) empty() fileFmt {
 }
 
 func (m *Monitor) save() {
-	if err := os.MkdirAll(filepath.Dir(m.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(m.path), 0o750); err != nil {
 		log.Printf("traffic: mkdir error: %v", err)
 		return
 	}
 	data, _ := json.MarshalIndent(m.state, "", "  ")
 	tmpPath := m.path + ".tmp"
-	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	// #nosec G304 -- Tmp file path is constructed from config
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		log.Printf("traffic: save error (create tmp): %v", err)
 		return
 	}
 
 	if _, err := f.Write(data); err != nil {
-		f.Close()
-		os.Remove(tmpPath)
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
 		log.Printf("traffic: save error (write tmp): %v", err)
 		return
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(tmpPath)
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
 		log.Printf("traffic: save error (sync tmp): %v", err)
 		return
 	}
 	if err := f.Close(); err != nil {
-        os.Remove(tmpPath)
+        _ = os.Remove(tmpPath)
         log.Printf("traffic: save error (close tmp): %v", err)
         return
     }
 	if err := os.Rename(tmpPath, m.path); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		log.Printf("traffic: save error (rename): %v", err)
 	}
 }
@@ -156,10 +158,20 @@ func (m *Monitor) Collect(countFunc func(string) int) {
 		var dtx, drx int64
 		if prev, ok := m.lastConn[k]; ok {
 			if f.BytesOrig >= prev[0] {
-				dtx = int64(f.BytesOrig - prev[0])
+				diff := f.BytesOrig - prev[0]
+				if diff > math.MaxInt64 {
+					dtx = math.MaxInt64
+				} else {
+					dtx = int64(diff)
+				}
 			}
 			if f.BytesReply >= prev[1] {
-				drx = int64(f.BytesReply - prev[1])
+				diff := f.BytesReply - prev[1]
+				if diff > math.MaxInt64 {
+					drx = math.MaxInt64
+				} else {
+					drx = int64(diff)
+				}
 			}
 		}
 		if dtx > 0 || drx > 0 {

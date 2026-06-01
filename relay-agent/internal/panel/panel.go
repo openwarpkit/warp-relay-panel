@@ -56,7 +56,7 @@ func (c *Client) FetchWhitelistPayload() (*Payload, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("panel returned %d: %s", resp.StatusCode, string(body))

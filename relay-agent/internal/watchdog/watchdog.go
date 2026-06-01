@@ -69,6 +69,7 @@ func (w *Watchdog) check() Checks {
 		}
 	}
 
+	// #nosec G304 -- Reading static kernel sysfs path is safe
 	if data, err := os.ReadFile("/proc/sys/net/ipv4/ip_forward"); err == nil {
 		c.IPForward = strings.TrimSpace(string(data)) == "1"
 	}
@@ -191,40 +192,46 @@ func (w *Watchdog) reconcileRateLimits() {
 }
 
 func (w *Watchdog) saveStatus(s Status) {
-	if err := os.MkdirAll(filepath.Dir(w.StatusFilePath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(w.StatusFilePath), 0o750); err != nil {
 		log.Printf("watchdog: mkdir error: %v", err)
 		return
 	}
 	data, _ := json.MarshalIndent(s, "", "  ")
 
 	tmpPath := w.StatusFilePath + ".tmp"
-	f, err := os.Create(tmpPath)
+	// #nosec G304 -- Tmp file path is constructed from config
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		log.Printf("watchdog: create tmp file error: %v", err)
 		return
 	}
 
 	if _, err := f.Write(data); err != nil {
-		f.Close()
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
 		log.Printf("watchdog: write tmp file error: %v", err)
 		return
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
 		log.Printf("watchdog: sync tmp file error: %v", err)
 		return
 	}
 	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
 		log.Printf("watchdog: close tmp file error: %v", err)
 		return
 	}
 	if err := os.Rename(tmpPath, w.StatusFilePath); err != nil {
+		_ = os.Remove(tmpPath)
 		log.Printf("watchdog: rename error: %v", err)
 	}
 }
 
 // LastStatus reads from disk (for /health).
 func (w *Watchdog) LastStatus() *Status {
+	// #nosec G304 -- Status file path is controlled by config
 	data, err := os.ReadFile(w.StatusFilePath)
 	if err != nil {
 		return nil

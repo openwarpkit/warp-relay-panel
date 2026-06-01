@@ -15,6 +15,7 @@ import (
 )
 
 func (s *Server) loadStatusFile(path string) interface{} {
+	// #nosec G304 -- Status file path is controlled by config
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
@@ -28,26 +29,30 @@ func (s *Server) loadStatusFile(path string) interface{} {
 
 func (s *Server) saveSyncStatus(status map[string]interface{}) {
 	path := s.Cfg.DataDir + "/sync_status.json"
-	os.MkdirAll(s.Cfg.DataDir, 0o755)
+	_ = os.MkdirAll(s.Cfg.DataDir, 0o750)
 	data, _ := json.MarshalIndent(status, "", "  ")
 	tmpPath := path + ".tmp"
-	f, err := os.Create(tmpPath)
+	// #nosec G304 -- Tmp file path is constructed from config
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return
 	}
 
 	if _, err := f.Write(data); err != nil {
-		f.Close()
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
 		return
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
 		return
 	}
 	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
 		return
 	}
-	os.Rename(tmpPath, path)
+	_ = os.Rename(tmpPath, path)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -208,6 +213,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func readSysfsInt(path string) int64 {
+	// #nosec G304 -- Sysfs path is constructed from interface name
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0

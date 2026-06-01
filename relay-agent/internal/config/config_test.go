@@ -6,16 +6,16 @@ import (
 )
 
 func TestEnvParsing(t *testing.T) {
-	os.Setenv("TEST_STR", "val")
-	os.Setenv("TEST_INT", "42")
-	os.Setenv("TEST_FLOAT", "3.14")
-	os.Setenv("TEST_INVALID_INT", "abc")
+	_ = os.Setenv("TEST_STR", "val")
+	_ = os.Setenv("TEST_INT", "42")
+	_ = os.Setenv("TEST_FLOAT", "3.14")
+	_ = os.Setenv("TEST_INVALID_INT", "abc")
 	
 	defer func() {
-		os.Unsetenv("TEST_STR")
-		os.Unsetenv("TEST_INT")
-		os.Unsetenv("TEST_FLOAT")
-		os.Unsetenv("TEST_INVALID_INT")
+		_ = os.Unsetenv("TEST_STR")
+		_ = os.Unsetenv("TEST_INT")
+		_ = os.Unsetenv("TEST_FLOAT")
+		_ = os.Unsetenv("TEST_INVALID_INT")
 	}()
 
 	if v := env("TEST_STR", "def"); v != "val" {
@@ -61,8 +61,8 @@ func TestParsePorts(t *testing.T) {
 }
 
 func TestLoad(t *testing.T) {
-	os.Setenv("AGENT_SECRET", "supersecret")
-	defer os.Unsetenv("AGENT_SECRET")
+	_ = os.Setenv("AGENT_SECRET", "supersecret")
+	defer func() { _ = os.Unsetenv("AGENT_SECRET") }()
 	
 	cfg := Load()
 	if cfg.AgentSecret != "supersecret" {
