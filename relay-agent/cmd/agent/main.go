@@ -140,16 +140,20 @@ func main() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
-		log.Println("Shutting down...")
+		log.Println("Received termination signal, shutting down HTTP...")
 		shutdownCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
 		defer c()
-		_ = httpSrv.Shutdown(shutdownCtx)
-		cancel()
+		cancel() // Stop background workers
+		_ = httpSrv.Shutdown(shutdownCtx) // Unblocks ListenAndServe
 	}()
 
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("HTTP server error: %v", err)
 	}
+
+	log.Println("HTTP stopped. Flushing memory state to disk safely...")
+	rl.Close()
+	rc.Close()
 
 	// Wait for background workers to finish their graceful shutdown
 	wg.Wait()
