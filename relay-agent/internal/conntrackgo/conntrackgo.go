@@ -31,19 +31,19 @@ type UDPFlow struct {
 }
 
 type FlowKey struct {
-	SrcIP   string
-	DstIP   string
+	SrcIP   [4]byte
+	DstIP   [4]byte
 	SrcPort uint16
 	DstPort uint16
 }
 
 func (k FlowKey) Hash() uint32 {
 	hash := uint32(2166136261)
-	for i := 0; i < len(k.SrcIP); i++ {
+	for i := 0; i < 4; i++ {
 		hash ^= uint32(k.SrcIP[i])
 		hash *= 16777619
 	}
-	for i := 0; i < len(k.DstIP); i++ {
+	for i := 0; i < 4; i++ {
 		hash ^= uint32(k.DstIP[i])
 		hash *= 16777619
 	}
@@ -152,8 +152,8 @@ func (c *Client) listenWorker() {
 			for _, f := range flows {
 				if f.TupleOrig.Proto.Protocol == protoUDP && f.TupleOrig.IP.SourceAddress.Is4() {
 					k := FlowKey{
-						SrcIP:   f.TupleOrig.IP.SourceAddress.String(),
-						DstIP:   f.TupleOrig.IP.DestinationAddress.String(),
+						SrcIP:   f.TupleOrig.IP.SourceAddress.As4(),
+						DstIP:   f.TupleOrig.IP.DestinationAddress.As4(),
 						SrcPort: f.TupleOrig.Proto.SourcePort,
 						DstPort: f.TupleOrig.Proto.DestinationPort,
 					}
@@ -190,8 +190,8 @@ func (c *Client) listenWorker() {
 					continue
 				}
 				k := FlowKey{
-					SrcIP:   ev.Flow.TupleOrig.IP.SourceAddress.String(),
-					DstIP:   ev.Flow.TupleOrig.IP.DestinationAddress.String(),
+					SrcIP:   ev.Flow.TupleOrig.IP.SourceAddress.As4(),
+					DstIP:   ev.Flow.TupleOrig.IP.DestinationAddress.As4(),
 					SrcPort: ev.Flow.TupleOrig.Proto.SourcePort,
 					DstPort: ev.Flow.TupleOrig.Proto.DestinationPort,
 				}
@@ -260,8 +260,8 @@ func (c *Client) reconcileOnce() {
 	for _, f := range flows {
 		if f.TupleOrig.Proto.Protocol == protoUDP {
 			k := FlowKey{
-				SrcIP:   f.TupleOrig.IP.SourceAddress.String(),
-				DstIP:   f.TupleOrig.IP.DestinationAddress.String(),
+				SrcIP:   f.TupleOrig.IP.SourceAddress.As4(),
+				DstIP:   f.TupleOrig.IP.DestinationAddress.As4(),
 				SrcPort: f.TupleOrig.Proto.SourcePort,
 				DstPort: f.TupleOrig.Proto.DestinationPort,
 			}
