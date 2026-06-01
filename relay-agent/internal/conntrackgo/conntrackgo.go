@@ -1,14 +1,15 @@
 package conntrackgo
 
 import (
+	"bytes"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
-	"net"
 
 	"github.com/ti-mo/conntrack"
 	"github.com/ti-mo/netfilter"
@@ -472,6 +473,14 @@ func asErrno(err error, target *syscall.Errno) bool {
 
 func (c *Client) ActiveUDPClients(dstIP string, ports map[uint16]bool) (map[string]struct{}, error) {
 	out := make(map[string]struct{}, 64)
+	targetDst := net.ParseIP(dstIP)
+	if targetDst == nil {
+		return out, fmt.Errorf("invalid dstIP: %s", dstIP)
+	}
+	if v4 := targetDst.To4(); v4 != nil {
+		targetDst = v4
+	}
+
 	for i := 0; i < numShards; i++ {
 		shard := c.shards[i]
 		shard.mu.RLock()
@@ -479,7 +488,11 @@ func (c *Client) ActiveUDPClients(dstIP string, ports map[uint16]bool) (map[stri
 			if !ports[f.TupleOrig.Proto.DestinationPort] {
 				continue
 			}
-			if f.TupleReply.IP.SourceAddress.String() != dstIP {
+			
+			replyAddr := f.TupleReply.IP.SourceAddress.As4()
+			replyIP := replyAddr[:] // Satisfy the bytes.Equal requirement
+
+			if !bytes.Equal(replyIP, targetDst) {
 				continue
 			}
 			src := f.TupleOrig.IP.SourceAddress.String()
