@@ -112,8 +112,15 @@ func (m *Manager) applyBatch(newIPs []string, source string) {
 	}
 	applied, errs := m.rl.SetBatch(items)
 	log.Printf("sharedlimit: %s batch +%d @ %.1f Mbps (%d errors)", source, len(applied), m.cfg.LimitMbps, len(errs))
+	printed := 0
 	for ip, e := range errs {
-		log.Printf("sharedlimit: apply %s failed: %v", ip, e)
+		if printed < 10 {
+			log.Printf("sharedlimit: apply %s failed: %v", ip, e)
+			printed++
+		}
+	}
+	if len(errs) > 10 {
+		log.Printf("sharedlimit: ... and %d more errors omitted", len(errs)-10)
 	}
 }
 
@@ -170,6 +177,17 @@ func (m *Manager) Loop(ctx context.Context) {
 				if !timerActive {
 					debounceTimer.Reset(200 * time.Millisecond)
 					timerActive = true
+				}
+				if len(pending) >= 10000 {
+					// Emergency Flush: Drop batch immediately to avoid OOM or dropped IPs
+					debounceTimer.Stop()
+					timerActive = false
+					unique := make([]string, 0, len(pending))
+					for ip := range pending {
+						unique = append(unique, ip)
+					}
+					m.applyBatch(unique, "event_emergency")
+					pending = make(map[string]struct{})
 				}
 			}
 		case <-debounceTimer.C:
