@@ -137,7 +137,7 @@ func (c *Client) listenWorker() {
 		// under high UDP connection storms. If ENOBUFS still occurs, listenWorker will catch it
 		// from errChan, close the private socket, and self-heal by reconnecting and re-dumping state.
 		if err := conn.SetReadBuffer(4 * 1024 * 1024); err != nil {
-			log.Printf("conntrack: warning: failed to set 4MB read buffer (sysctl net.core.rmem_max too small?): %v", err)
+			log.Fatalf("conntrack: FATAL: failed to set 4MB read buffer (sysctl net.core.rmem_max too small?): %v", err)
 		}
 
 		// Initial sync
@@ -245,7 +245,11 @@ func (c *Client) reconcileOnce() {
 	if err != nil {
 		return
 	}
-	defer conn.Close()
+	defer func() {
+		if err := conn.Close(); err != nil {
+			log.Printf("conntrack close: %v", err)
+		}
+	}()
 	flows, err := conn.Dump(nil)
 	if err != nil {
 		return
@@ -349,7 +353,11 @@ func (c *Client) DeleteBySrcUDP(srcIP string) error {
 	if err != nil {
 		return fmt.Errorf("conntrack.Dial: %w", err)
 	}
-	defer conn.Close()
+	defer func() {
+		if err := conn.Close(); err != nil {
+			log.Printf("conntrack close: %v", err)
+		}
+	}()
 
 	var toDelete []conntrack.Flow
 	for i := 0; i < numShards; i++ {
@@ -381,7 +389,11 @@ func (c *Client) MarkBySrcsUDP(srcToMark map[string]uint32) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("conntrack.Dial: %w", err)
 	}
-	defer conn.Close()
+	defer func() {
+		if err := conn.Close(); err != nil {
+			log.Printf("conntrack close: %v", err)
+		}
+	}()
 
 	var toUpdate []conntrack.Flow
 	for i := 0; i < numShards; i++ {
@@ -417,7 +429,11 @@ func (c *Client) MarkBySrcUDP(srcIP string, mark uint32) error {
 	if err != nil {
 		return fmt.Errorf("conntrack.Dial: %w", err)
 	}
-	defer conn.Close()
+	defer func() {
+		if err := conn.Close(); err != nil {
+			log.Printf("conntrack close: %v", err)
+		}
+	}()
 
 	var toUpdate []conntrack.Flow
 	for i := 0; i < numShards; i++ {
