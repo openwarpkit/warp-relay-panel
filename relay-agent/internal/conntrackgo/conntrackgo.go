@@ -58,9 +58,6 @@ type flowShard struct {
 }
 
 type Client struct {
-	mu   sync.Mutex
-	conn *conntrack.Conn
-
 	shards [numShards]*flowShard
 
 	obsMu     sync.RWMutex
@@ -111,41 +108,11 @@ func (c *Client) enableAccounting() {
 	}
 }
 
-func (c *Client) ensureConn() (*conntrack.Conn, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.conn != nil {
-		return c.conn, nil
-	}
-	conn, err := conntrack.Dial(nil)
-	if err != nil {
-		return nil, fmt.Errorf("conntrack.Dial: %w", err)
-	}
-	c.conn = conn
-	return c.conn, nil
-}
-
-func (c *Client) reset() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.conn != nil {
-		_ = c.conn.Close()
-		c.conn = nil
-	}
-}
-
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
 		close(c.stopListen)
 	})
 	c.wg.Wait()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.conn != nil {
-		err := c.conn.Close()
-		c.conn = nil
-		return err
-	}
 	return nil
 }
 
@@ -158,11 +125,18 @@ func (c *Client) listenWorker() {
 		default:
 		}
 
-		conn, err := c.ensureConn()
+		conn, err := conntrack.Dial(nil)
 		if err != nil {
 			log.Printf("conntrack listenWorker: dial failed: %v", err)
 			time.Sleep(5 * time.Second)
 			continue
+		}
+
+		// Increase netlink socket receive buffer to 4MB to prevent ENOBUFS (No buffer space available)
+		// under high UDP connection storms. If ENOBUFS still occurs, listenWorker will catch it
+		// from errChan, close the private socket, and self-heal by reconnecting and re-dumping state.
+		if err := conn.SetReadBuffer(4 * 1024 * 1024); err != nil {
+			log.Printf("conntrack: warning: failed to set 4MB read buffer (sysctl net.core.rmem_max too small?): %v", err)
 		}
 
 		// Initial sync
@@ -192,10 +166,10 @@ func (c *Client) listenWorker() {
 		}
 
 		evChan := make(chan conntrack.Event, 4096)
-		errChan, err := conn.Listen(evChan, 4, netfilter.GroupsCT)
-		if err != nil {
-			log.Printf("conntrack listenWorker: listen failed: %v", err)
-			c.reset()
+		errChan, listenErr := conn.Listen(evChan, 4, netfilter.GroupsCT)
+		if listenErr != nil {
+			log.Printf("conntrack listenWorker: listen failed: %v", listenErr)
+			_ = conn.Close()
 			time.Sleep(5 * time.Second)
 			continue
 		}
@@ -204,6 +178,7 @@ func (c *Client) listenWorker() {
 		for {
 			select {
 			case <-c.stopListen:
+				_ = conn.Close()
 				return
 			case ev, ok := <-evChan:
 				if !ok {
@@ -244,7 +219,7 @@ func (c *Client) listenWorker() {
 			}
 		}
 
-		c.reset()
+		_ = conn.Close()
 		time.Sleep(1 * time.Second)
 	}
 }
@@ -265,10 +240,11 @@ func (c *Client) reconcileWorker() {
 }
 
 func (c *Client) reconcileOnce() {
-	conn, err := c.ensureConn()
+	conn, err := conntrack.Dial(nil)
 	if err != nil {
 		return
 	}
+	defer conn.Close()
 	flows, err := conn.Dump(nil)
 	if err != nil {
 		return
@@ -368,10 +344,11 @@ func (c *Client) AssuredUDPSrcs() (map[string]struct{}, error) {
 }
 
 func (c *Client) DeleteBySrcUDP(srcIP string) error {
-	conn, err := c.ensureConn()
+	conn, err := conntrack.Dial(nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("conntrack.Dial: %w", err)
 	}
+	defer conn.Close()
 
 	var toDelete []conntrack.Flow
 	for i := 0; i < numShards; i++ {
@@ -399,10 +376,11 @@ func (c *Client) MarkBySrcsUDP(srcToMark map[string]uint32) (int, error) {
 	if len(srcToMark) == 0 {
 		return 0, nil
 	}
-	conn, err := c.ensureConn()
+	conn, err := conntrack.Dial(nil)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("conntrack.Dial: %w", err)
 	}
+	defer conn.Close()
 
 	var toUpdate []conntrack.Flow
 	for i := 0; i < numShards; i++ {
@@ -434,10 +412,11 @@ func (c *Client) MarkBySrcsUDP(srcToMark map[string]uint32) (int, error) {
 }
 
 func (c *Client) MarkBySrcUDP(srcIP string, mark uint32) error {
-	conn, err := c.ensureConn()
+	conn, err := conntrack.Dial(nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("conntrack.Dial: %w", err)
 	}
+	defer conn.Close()
 
 	var toUpdate []conntrack.Flow
 	for i := 0; i < numShards; i++ {
@@ -544,10 +523,11 @@ func (c *Client) StatsUDP() (UDPStats, error) {
 }
 
 func (c *Client) PingDeadline(d time.Duration) error {
-	conn, err := c.ensureConn()
+	conn, err := conntrack.Dial(nil)
 	if err != nil {
 		return err
 	}
+	defer conn.Close()
 	done := make(chan error, 1)
 	go func() { _, e := conn.StatsGlobal(); done <- e }()
 	select {
