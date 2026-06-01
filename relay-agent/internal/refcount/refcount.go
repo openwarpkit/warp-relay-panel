@@ -19,6 +19,7 @@ type Map struct {
 	dirty  bool
 	notify chan struct{}
 	stop   chan struct{}
+	wg     sync.WaitGroup
 }
 
 func New(path string) *Map {
@@ -29,6 +30,7 @@ func New(path string) *Map {
 		stop:   make(chan struct{}),
 	}
 	r.load()
+	r.wg.Add(1)
 	go r.saveWorker()
 	return r
 }
@@ -63,6 +65,7 @@ func (r *Map) triggerSave() {
 }
 
 func (r *Map) saveWorker() {
+	defer r.wg.Done()
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -101,6 +104,7 @@ func (r *Map) saveWorker() {
 // Close gracefully stops the background worker and forces a final save.
 func (r *Map) Close() {
 	close(r.stop)
+	r.wg.Wait()
 	r.ForceSave()
 }
 
