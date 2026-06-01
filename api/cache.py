@@ -25,6 +25,13 @@ def get(key: str) -> Any | None:
 
 def set(key: str, value: Any, ttl: float = _DEFAULT_TTL) -> None:
     _store[key] = (time.time() + ttl, value)
+    
+    # Occasional cleanup to prevent unbounded memory leak
+    if len(_store) > 1000:
+        now = time.time()
+        expired = [k for k, (exp, _) in _store.items() if now >= exp]
+        for k in expired:
+            _store.pop(k, None)
 
 
 def invalidate(prefix: str) -> int:
