@@ -2,6 +2,7 @@
 package panel
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -47,7 +48,9 @@ func (c *Client) Configured() bool {
 // FetchWhitelistPayload - GET /api/relays/{id}/whitelist-payload.
 func (c *Client) FetchWhitelistPayload() (*Payload, error) {
 	url := fmt.Sprintf("%s/api/relays/%s/whitelist-payload", c.URL, c.RelayID)
-	req, err := http.NewRequest("GET", url, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
