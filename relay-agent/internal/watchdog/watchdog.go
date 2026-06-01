@@ -1,5 +1,5 @@
-// Package watchdog проверяет целостность правил firewall + tc
-// и восстанавливает их при пропаже.
+// Package watchdog checks firewall + tc rules integrity
+// and restores them if missing.
 package watchdog
 
 import (
@@ -28,10 +28,10 @@ type Watchdog struct {
 	IpsetName        string
 	EnsureScriptPath string
 	StatusFilePath   string
-	Refcount         *refcount.Map      // может быть nil (min-agent)
-	RateLimit        *ratelimit.Manager // может быть nil
-	SkipIpset        bool               // true для min-agent (нет whitelist)
-	ForwardTags      []string           // какие comment-теги ждать в FORWARD ("WR_WHITELIST_OUT" для full, "WR_FORWARD_OUT" для min)
+	Refcount         *refcount.Map      // can be nil (min-agent)
+	RateLimit        *ratelimit.Manager // can be nil
+	SkipIpset        bool               // true for min-agent (no whitelist)
+	ForwardTags      []string           // comment tags to expect in FORWARD ("WR_WHITELIST_OUT" for full, "WR_FORWARD_OUT" for min)
 }
 
 type Checks struct {
@@ -80,8 +80,8 @@ func (w *Watchdog) check() Checks {
 		c.HTB = rc == 0 && strings.Contains(out, "qdisc htb 1:")
 	}
 
-	// nftables warp_shaper + tc flow filter — только если backend не отключён.
-	// Если бинарь nft отсутствует — пропускаем (legacy iptables-режим).
+	// nftables warp_shaper + tc flow filter - only if backend is not disabled.
+	// Skip if nft binary is missing (legacy iptables mode).
 	useNft := os.Getenv("RATELIMIT_BACKEND") != "iptables"
 	if useNft {
 		rcNft, _, _ := shell.Run("nft list table ip warp_shaper >/dev/null 2>&1", 5*time.Second)
@@ -89,12 +89,11 @@ func (w *Watchdog) check() Checks {
 		c.FlowFilter = true
 		if iface != "" {
 			rc, out, _ := shell.Run(fmt.Sprintf("tc filter show dev %s parent 1:0 2>/dev/null", iface), 5*time.Second)
-			// Реальный вывод iproute2 6.x: "filter ... flow chain 0 handle 0x1 map keys mark ..."
-			// Старый grep "flow map" не матчит — между "flow" и "map" есть "chain N handle 0xN".
+			// Real output in iproute2 6.x: "filter ... flow chain 0 handle 0x1 map keys mark ..."
 			c.FlowFilter = rc == 0 && strings.Contains(out, "flow chain")
 		}
 	} else {
-		// в iptables-режиме эти чеки не релевантны — отдаём true чтобы не триггерить heal
+		// in iptables mode these checks are not relevant - return true to avoid heal
 		c.NftShaper = true
 		c.FlowFilter = true
 	}
@@ -142,8 +141,8 @@ func (w *Watchdog) heal(c Checks) []string {
 		actions = append(actions, "enabled ip_forward")
 	}
 
-	// После ensure_rules.sh — пересобрать ipset из refcount, если надо
-	// (только для full-агента; min не имеет ipset/refcount)
+	// After ensure_rules.sh - rebuild ipset from refcount if necessary
+	// (only for full-agent; min doesn't have ipset/refcount)
 	if !w.SkipIpset && w.Refcount != nil {
 		after := w.check()
 		if after.Ipset {
@@ -172,10 +171,8 @@ func (w *Watchdog) heal(c Checks) []string {
 	return actions
 }
 
-// reconcileRateLimits переприменяет лимиты при дрейфе nft-map / tc-классов.
-// Запускается каждый тик независимо от firewall-проверок: пустая map ip2mark
-// при живой таблице firewall-чеками не ловится, а трафик при этом утекает в
-// безлимитный default-класс.
+// reconcileRateLimits reapplies limits on nft-map / tc-classes drift.
+// Runs every tick independently of firewall checks.
 func (w *Watchdog) reconcileRateLimits() {
 	if w.RateLimit == nil {
 		return
@@ -225,7 +222,7 @@ func (w *Watchdog) saveStatus(s Status) {
 	}
 }
 
-// LastStatus читает с диска (для /health).
+// LastStatus reads from disk (for /health).
 func (w *Watchdog) LastStatus() *Status {
 	data, err := os.ReadFile(w.StatusFilePath)
 	if err != nil {

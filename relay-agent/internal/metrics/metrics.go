@@ -1,4 +1,4 @@
-// Package metrics — фоновый sampler CPU/network/process через gopsutil.
+// Package metrics is a background sampler for CPU/network/process via gopsutil.
 package metrics
 
 import (
@@ -106,7 +106,7 @@ func round2(f float64) float64 {
 }
 
 func (s *Sampler) Loop(ctx context.Context) {
-	// Прогрев
+	// Warmup
 	cpu.Percent(0, false)
 	cpu.Percent(0, true)
 	if s.proc != nil {

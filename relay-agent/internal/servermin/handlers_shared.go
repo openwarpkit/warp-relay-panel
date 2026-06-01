@@ -2,7 +2,7 @@ package servermin
 
 import "net/http"
 
-// /shaped — список IP под лимитом + classid + lastSeen.
+// /shaped - list of IPs under limit + classid + lastSeen.
 func (s *Server) handleShaped(w http.ResponseWriter, r *http.Request) {
 	cfg := s.SharedLimit.Cfg()
 	writeJSON(w, 200, map[string]interface{}{
@@ -14,7 +14,7 @@ func (s *Server) handleShaped(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// /shaped/reset — снять все лимиты, reconcile-loop переналожит на следующем тике.
+// /shaped/reset - remove all limits, reconcile-loop will reapply on next tick.
 func (s *Server) handleShapedReset(w http.ResponseWriter, r *http.Request) {
 	count := s.SharedLimit.Count()
 	s.SharedLimit.Reset()

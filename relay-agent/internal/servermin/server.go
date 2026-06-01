@@ -1,9 +1,9 @@
-// Package servermin — chi router и handlers для min-агента (без whitelist).
+// Package servermin is a chi router and handlers for min-agent (no whitelist).
 //
-// Эндпоинты, которые делают реальную работу: /health, /stats, /traffic*,
+// Endpoints that do real work: /health, /stats, /traffic*,
 // /shaped, /shaped/reset, /update.
-// Эндпоинты от full-агента (whitelist/*, rate-limit*, refcount) присутствуют
-// как 200-OK stub'ы, чтобы случайные вызовы от панели не падали.
+// Endpoints from full-agent (whitelist/*, rate-limit*, refcount) are present
+// as 200-OK stubs, so accidental calls from panel do not fail.
 package servermin
 
 import (
@@ -51,7 +51,7 @@ func (s *Server) Routes() http.Handler {
 
 	r.Post("/update", s.handleSelfUpdate)
 
-	// pprof — под тем же authMiddleware (X-Agent-Key). Использовать так:
+	// pprof - under the same authMiddleware (X-Agent-Key). Use like this:
 	//   curl -H "X-Agent-Key: $SECRET" http://relay:7580/debug/pprof/profile?seconds=60 > cpu.prof
 	//   go tool pprof -http=:8081 cpu.prof
 	r.Route("/debug/pprof", func(r chi.Router) {
@@ -67,11 +67,11 @@ func (s *Server) Routes() http.Handler {
 		}
 	})
 
-	// /refcount → пустой объект (для совместимости с панелью)
+	// /refcount -> empty object (for panel compatibility)
 	r.Get("/refcount", s.handleNoopJSON(map[string]interface{}{}))
 
-	// Stubs для full-эндпоинтов: 200-OK noop. Панель ОБЯЗАНА их не звать
-	// (db.get_active_relays(agent_type='full')), но защищаемся на случай ошибки.
+	// Stubs for full endpoints: 200-OK noop. Panel MUST NOT call them
+	// (db.get_active_relays(agent_type='full')), but we protect just in case.
 	stub := s.handleStub
 	r.Post("/whitelist/update", stub)
 	r.Post("/whitelist/remove", stub)
@@ -113,7 +113,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// handleStub — 200 OK с {agent_type:"min", skipped:true}
+// handleStub - 200 OK with {agent_type:"min", skipped:true}
 func (s *Server) handleStub(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"agent_type": "min",
@@ -122,7 +122,7 @@ func (s *Server) handleStub(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleNoopJSON — отдаёт фиксированный JSON-объект.
+// handleNoopJSON - returns fixed JSON object.
 func (s *Server) handleNoopJSON(body interface{}) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, body)

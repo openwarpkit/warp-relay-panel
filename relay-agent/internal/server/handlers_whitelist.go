@@ -35,8 +35,8 @@ type syncRateLimitEntry struct {
 
 type syncReq struct {
 	Clients []syncEntry `json:"clients"`
-	// pointer: nil = поле отсутствует (старая panel) — лимиты не трогаем.
-	// pointer to [] = явный пустой массив — снять все локальные.
+	// pointer: nil = missing field (old panel) - don't touch limits.
+	// pointer to [] = explicit empty array - remove all local.
 	RateLimits *[]syncRateLimitEntry `json:"rate_limits,omitempty"`
 }
 
@@ -83,7 +83,7 @@ func (s *Server) handleWhitelistUpdate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// deleteIP — атомарное удаление: ipset del + conntrack flush для UDP-флоу.
+// deleteIP - atomic removal: ipset del + conntrack flush for UDP flow.
 func (s *Server) deleteIP(ip string) {
 	if err := ipsetgo.Del(s.Cfg.IpsetName, ip); err != nil {
 		log.Printf("ipset del %s: %v", ip, err)
@@ -119,7 +119,7 @@ func (s *Server) handleWhitelistRemove(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleWhitelistSync — fire-and-forget, тяжёлая работа в горутине.
+// handleWhitelistSync - fire-and-forget, heavy lifting in goroutine.
 func (s *Server) handleWhitelistSync(w http.ResponseWriter, r *http.Request) {
 	var req syncReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -127,7 +127,7 @@ func (s *Server) handleWhitelistSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	total := len(req.Clients)
-	totalRL := -1 // -1 = поле отсутствует, лимиты не трогаем
+	totalRL := -1 // -1 = missing field, don't touch limits
 	if req.RateLimits != nil {
 		totalRL = len(*req.RateLimits)
 	}
@@ -141,10 +141,10 @@ func (s *Server) handleWhitelistSync(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// doSync — фоновая обработка sync payload.
-// rlEntries == nil — поле "rate_limits" отсутствует в payload (старая panel
-// или manual curl) → шейпинг не трогаем (чтобы случайно не снести лимиты).
-// rlEntries != nil — даже если пустой → diff-replace (полная синхронизация).
+// doSync - background processing of sync payload.
+// rlEntries == nil - missing "rate_limits" field in payload (old panel
+// or manual curl) -> don't touch shaping (to not accidentally remove limits).
+// rlEntries != nil - even if empty -> diff-replace (full synchronization).
 func (s *Server) doSync(entries []syncEntry, rlEntries *[]syncRateLimitEntry) {
 	startedAt := time.Now().In(time.FixedZone("MSK", 3*3600)).Format(time.RFC3339)
 	statusInit := map[string]interface{}{
@@ -194,9 +194,9 @@ func (s *Server) doSync(entries []syncEntry, rlEntries *[]syncRateLimitEntry) {
 	s.Refcount.SetAll(rcEntries)
 	shell.Run("ipset save > /etc/ipset.rules 2>/dev/null", 10*time.Second)
 
-	// Rate-limits: применить пришедшие batch'ем + удалить stale (которых нет в payload).
-	// Это даёт «полную пересинхронизацию» — после Sync шейпинг 1-в-1 соответствует БД.
-	// rlEntries == nil → старая panel или manual curl без поля → шейпинг не трогаем.
+	// Rate-limits: apply incoming batch + remove stale (not in payload).
+	// This gives "full resync" - after Sync shaping 1-to-1 matches DB.
+	// rlEntries == nil -> old panel or manual curl without field -> don't touch shaping.
 	statusFin := map[string]interface{}{
 		"ok": true, "in_progress": false,
 		"synced":      len(uniqueIPs),
@@ -219,8 +219,8 @@ func (s *Server) doSync(entries []syncEntry, rlEntries *[]syncRateLimitEntry) {
 	s.saveSyncStatus(statusFin)
 }
 
-// syncRateLimits применяет batch + удаляет stale (которых нет в payload).
-// Вызывается только когда rate_limits явно есть в payload (даже пустой []).
+// syncRateLimits applies batch + removes stale (not in payload).
+// Called only when rate_limits is explicitly in payload (even if empty []).
 func (s *Server) syncRateLimits(entries []syncRateLimitEntry) (applied, removed, invalid int) {
 	if s.RateLimit == nil {
 		return 0, 0, 0
@@ -247,7 +247,7 @@ func (s *Server) syncRateLimits(entries []syncRateLimitEntry) (applied, removed,
 		invalid += len(errs)
 	}
 
-	// Diff: всё что есть в локальном state, но нет в payload — снимаем.
+	// Diff: anything in local state but not in payload - remove.
 	var stale []string
 	for _, l := range s.RateLimit.All() {
 		if _, ok := incoming[l.IP]; !ok {

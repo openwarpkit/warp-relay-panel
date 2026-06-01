@@ -1,4 +1,4 @@
-// Package server — chi router, middleware и хендлеры HTTP API агента.
+// Package server is a chi router, middleware and handlers for agent's HTTP API.
 package server
 
 import (
@@ -58,7 +58,7 @@ func (s *Server) Routes() http.Handler {
 
 	r.Post("/update", s.handleSelfUpdate)
 
-	// pprof — под тем же authMiddleware (X-Agent-Key). Использовать так:
+	// pprof - under the same authMiddleware (X-Agent-Key). Use like this:
 	//   curl -H "X-Agent-Key: $SECRET" http://relay:7580/debug/pprof/profile?seconds=60 > cpu.prof
 	//   go tool pprof -http=:8081 cpu.prof
 	r.Route("/debug/pprof", func(r chi.Router) {

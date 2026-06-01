@@ -17,7 +17,7 @@ import (
 const protoUDP = 17
 const numShards = 256
 
-// UDPFlow — минимальный набор для traffic accounting.
+// UDPFlow is the minimal set for traffic accounting.
 type UDPFlow struct {
 	SrcIP      string
 	DstIP      string
@@ -498,7 +498,7 @@ func (c *Client) ActiveUDPClients(dstIP string, ports map[uint16]bool) (map[stri
 type UDPStats struct {
 	Assured   int
 	Unreplied int
-	TopPorts  map[uint16]int // dport → count
+	TopPorts  map[uint16]int // dport -> count
 }
 
 func (c *Client) StatsUDP() (UDPStats, error) {

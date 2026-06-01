@@ -1,10 +1,10 @@
-// Package sharedlimit реализует автоматический CONNMARK+HTB rate-limit
-// для min-агента: сканирует conntrack, навешивает per-IP лимит
-// заданного значения (по умолчанию 25 Mbps) на каждый активный клиентский IP,
-// снимает при простое > IdleGrace.
+// Package sharedlimit implements automatic CONNMARK+HTB rate-limit
+// for the min-agent: scans conntrack, assigns a per-IP limit
+// of the given value (default 25 Mbps) to each active client IP,
+// and removes it when idle > IdleGrace.
 //
-// Принципиальное отличие от bash-прототипа: один Dump netlink-conntrack
-// вместо `conntrack -L | awk` каждые N секунд (~5x по CPU).
+// Key difference from the bash prototype: a single netlink-conntrack Dump
+// instead of `conntrack -L | awk` every N seconds (~5x CPU improvement).
 package sharedlimit
 
 import (
@@ -36,7 +36,7 @@ type Manager struct {
 	ct       *conntrackgo.Client
 	rl       *ratelimit.Manager
 	mu       sync.Mutex
-	seen     map[string]time.Time // ip → lastSeen
+	seen     map[string]time.Time // ip -> lastSeen
 	portsSet map[uint16]bool
 }
 
@@ -54,13 +54,13 @@ func New(ct *conntrackgo.Client, rl *ratelimit.Manager, cfg Config) *Manager {
 	}
 }
 
-// reconcile делает один проход:
-//   - снимает snapshot активных клиентов из conntrack
-//   - новым IP — apply rate-limit (batch одним вызовом nft+tc)
-//   - idle (> IdleGrace) — remove
+// reconcile performs one pass:
+//   - takes a snapshot of active clients from conntrack
+//   - applies rate-limit to new IPs (batch in a single nft+tc call)
+//   - removes idle (> IdleGrace) IPs
 func (m *Manager) reconcile() {
-	// TTL = половина ScanInterval: при default 10s даёт 5s кеша. /shaped-handler
-	// и параллельные traffic-запросы получат тот же snapshot.
+	// TTL = half of ScanInterval: with default 10s gives 5s cache.
+	// /shaped-handler and concurrent traffic requests will get the same snapshot.
 	active, err := m.ct.ActiveUDPClients(m.cfg.DstIP, m.portsSet)
 	if err != nil {
 		log.Printf("sharedlimit: scan error: %v", err)
@@ -69,7 +69,7 @@ func (m *Manager) reconcile() {
 	now := time.Now()
 
 	m.mu.Lock()
-	// 1. Собрать список новых IP под одним lock'ом (без обращений к rl).
+	// 1. Collect list of new IPs under one lock (without accessing rl).
 	newIPs := make([]string, 0)
 	for ip := range active {
 		if _, ok := m.seen[ip]; !ok {
@@ -77,7 +77,7 @@ func (m *Manager) reconcile() {
 		}
 		m.seen[ip] = now
 	}
-	// 2. Удалить idle IP (только из seen — limit снимаем после unlock).
+	// 2. Remove idle IPs (only from seen - limit is removed after unlock).
 	toRemove := make([]string, 0)
 	for ip, lastSeen := range m.seen {
 		if _, stillActive := active[ip]; stillActive {
@@ -90,7 +90,7 @@ func (m *Manager) reconcile() {
 	}
 	m.mu.Unlock()
 
-	// 3. Batch apply для новых (за пределами m.mu — внутри rl свой mutex).
+	// 3. Batch apply for new IPs (outside m.mu - rl has its own mutex).
 	if len(newIPs) > 0 {
 		items := make([]ratelimit.SetItem, 0, len(newIPs))
 		for _, ip := range newIPs {
@@ -103,7 +103,7 @@ func (m *Manager) reconcile() {
 		}
 	}
 
-	// 4. Удалить лимиты для idle — batch.
+	// 4. Remove limits for idle - batch.
 	if len(toRemove) > 0 {
 		removed := m.rl.RemoveBatch(toRemove)
 		log.Printf("sharedlimit: batch -%d (idle)", len(removed))
@@ -111,7 +111,7 @@ func (m *Manager) reconcile() {
 }
 
 func (m *Manager) Loop(ctx context.Context) {
-	log.Printf("sharedlimit: started — limit=%.1f Mbps, dst=%s, ports=%d, scan=%s, idle_grace=%s",
+	log.Printf("sharedlimit: started - limit=%.1f Mbps, dst=%s, ports=%d, scan=%s, idle_grace=%s",
 		m.cfg.LimitMbps, m.cfg.DstIP, len(m.cfg.Ports),
 		m.cfg.ScanInterval, m.cfg.IdleGrace)
 	m.reconcile()
@@ -127,7 +127,7 @@ func (m *Manager) Loop(ctx context.Context) {
 	}
 }
 
-// Shaped возвращает текущий список IP под лимитом + classid + lastSeen.
+// Shaped returns the current list of shaped IPs + classid + lastSeen.
 func (m *Manager) Shaped() []Entry {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -140,15 +140,15 @@ func (m *Manager) Shaped() []Entry {
 	return out
 }
 
-// Count — кол-во IP под лимитом.
+// Count returns the number of IPs under limit.
 func (m *Manager) Count() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.seen)
 }
 
-// HasIP — проверяет, активен ли IP (для фильтрации traffic).
-// Возвращает 1 если активен, 0 если нет, чтобы соответствовать сигнатуре countFunc.
+// HasIP checks if IP is active (for traffic filtering).
+// Returns 1 if active, 0 if not, to match countFunc signature.
 func (m *Manager) HasIP(ip string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -158,8 +158,8 @@ func (m *Manager) HasIP(ip string) int {
 	return 0
 }
 
-// Reset — снять все лимиты и очистить state. Reconcile-loop при
-// следующем тике перенавесит на текущих активных.
+// Reset removes all limits and clears state. The Reconcile-loop will
+// re-apply limits to current active IPs on the next tick.
 func (m *Manager) Reset() {
 	m.mu.Lock()
 	ips := make([]string, 0, len(m.seen))
@@ -175,5 +175,5 @@ func (m *Manager) Reset() {
 	log.Printf("sharedlimit: reset (%d removed)", len(ips))
 }
 
-// Config — для эндпоинтов /health и /shaped (readonly view).
+// Config for /health and /shaped endpoints (readonly view).
 func (m *Manager) Cfg() Config { return m.cfg }

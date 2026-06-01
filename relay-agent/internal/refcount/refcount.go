@@ -1,5 +1,5 @@
-// Package refcount хранит, сколько клиентов сидят за одним IP.
-// Persistent JSON на диске + thread-safe in-memory map.
+// Package refcount stores how many clients are on a single IP.
+// Persistent JSON on disk + thread-safe in-memory map.
 package refcount
 
 import (
@@ -88,7 +88,7 @@ func (r *Map) save() {
 	}
 }
 
-// Add возвращает true, если для oldIP refcount упал до 0 (можно удалять из ipset).
+// Add returns true if the refcount for oldIP dropped to 0 (can be removed from ipset).
 func (r *Map) Add(ip string, clientID int64, oldIP string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -110,8 +110,8 @@ func (r *Map) Add(ip string, clientID int64, oldIP string) bool {
 	return canRemoveOld
 }
 
-// RemoveClient удаляет клиента (или всех, если clientID==0).
-// Возвращает true, если для IP больше нет клиентов.
+// RemoveClient removes a client (or all, if clientID==0).
+// Returns true if there are no more clients for this IP.
 func (r *Map) RemoveClient(ip string, clientID int64) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -137,7 +137,7 @@ func (r *Map) RemoveClient(ip string, clientID int64) bool {
 	return false
 }
 
-// SetAll полностью заменяет содержимое.
+// SetAll completely replaces the contents.
 func (r *Map) SetAll(entries map[string][]int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -170,7 +170,7 @@ func (r *Map) ClientsFor(ip string) []int64 {
 	return out
 }
 
-// All возвращает копию всей карты для эндпоинта /refcount.
+// All returns a copy of the entire map for the /refcount endpoint.
 func (r *Map) All() map[string][]int64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -189,7 +189,7 @@ func (r *Map) All() map[string][]int64 {
 	return out
 }
 
-// IPs возвращает список всех IP (для пересборки ipset из refcount).
+// IPs returns a list of all IPs (for rebuilding ipset from refcount).
 func (r *Map) IPs() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()

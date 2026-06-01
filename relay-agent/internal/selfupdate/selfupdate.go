@@ -1,6 +1,6 @@
-// Package selfupdate — git pull репозитория для обновления конфигов/скриптов,
-// скачивание свежего бинаря из GitHub Releases (slim VPS — без `make build`),
-// атомарная замена и рестарт через systemd.
+// Package selfupdate - git pull repository to update configs/scripts,
+// download fresh binary from GitHub Releases (slim VPS - no `make build`),
+// atomic swap and restart via systemd.
 package selfupdate
 
 import (
@@ -18,8 +18,8 @@ import (
 	"time"
 )
 
-// DefaultReleaseRepo — owner/repo на GitHub, откуда тянем бинари.
-// Override через env AGENT_RELEASE_REPO=user/repo.
+// DefaultReleaseRepo - owner/repo on GitHub, from where we pull binaries.
+// Override via env AGENT_RELEASE_REPO=user/repo.
 const DefaultReleaseRepo = "nellimonix/warp-relay-panel"
 
 type Status struct {
@@ -37,12 +37,12 @@ type Status struct {
 }
 
 type Updater struct {
-	RepoDir     string // /opt/warp-relay-panel — нужен только для git pull скриптов
+	RepoDir     string // /opt/warp-relay-panel - only needed for git pull of scripts
 	InstallDir  string // /opt/warp-relay-agent
 	StatusPath  string
 	Version     string
-	BinaryName  string // "warp-relay-agent" или "warp-relay-agent-min"
-	ReleaseRepo string // owner/repo, по умолчанию DefaultReleaseRepo
+	BinaryName  string // "warp-relay-agent" or "warp-relay-agent-min"
+	ReleaseRepo string // owner/repo, defaults to DefaultReleaseRepo
 }
 
 type ghRelease struct {
@@ -115,8 +115,8 @@ func (u *Updater) LastStatus() *Status {
 	return &s
 }
 
-// fetchLatestRelease — тянет latest release с GitHub API,
-// возвращает asset URL для нашего бинаря.
+// fetchLatestRelease - pulls the latest release from GitHub API,
+// returns asset URL for our binary.
 func (u *Updater) fetchLatestRelease() (tag, assetURL string, err error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", u.repo())
 	req, _ := http.NewRequest("GET", url, nil)
@@ -148,7 +148,7 @@ func (u *Updater) fetchLatestRelease() (tag, assetURL string, err error) {
 	return rel.TagName, "", fmt.Errorf("asset %q not found in release %s", binName, rel.TagName)
 }
 
-// downloadBinary — скачивает свежий бинарь во временный файл рядом с целевым.
+// downloadBinary - downloads fresh binary to a temp file next to the target.
 func (u *Updater) downloadBinary(url, tmpPath string) error {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -174,13 +174,13 @@ func (u *Updater) downloadBinary(url, tmpPath string) error {
 	if err != nil {
 		return fmt.Errorf("write tmp: %w", err)
 	}
-	if n < 1024*1024 { // <1 MB — заведомо битый бинарь
+	if n < 1024*1024 { // <1 MB - certainly a corrupted binary
 		return fmt.Errorf("downloaded binary too small: %d bytes", n)
 	}
 	return nil
 }
 
-// runShell — лёгкий wrapper вместо отдельного shell пакета.
+// runShell - lightweight wrapper instead of a separate shell package.
 func runShell(cmd string, timeout time.Duration) (rc int, out string, errOut string) {
 	c := exec.Command("bash", "-c", cmd)
 	stdout, _ := c.StdoutPipe()
@@ -207,12 +207,12 @@ func runShell(cmd string, timeout time.Duration) (rc int, out string, errOut str
 	return 0, outB.String(), errB.String()
 }
 
-// Run — git pull (для скриптов/конфигов) → проверить latest release →
-// скачать бинарь → atomic swap → restart.
+// Run - git pull (for scripts/configs) -> check latest release ->
+// download binary -> atomic swap -> restart.
 func (u *Updater) Run() {
 	startedAt := nowISO()
 
-	// 1. git pull (ensure_rules.sh, deploy-скрипты, README) — даже если бинарь не обновится.
+	// 1. git pull (ensure_rules.sh, deploy scripts, README) - even if binary won't update.
 	lock := filepath.Join(u.RepoDir, ".git", "index.lock")
 	os.Remove(lock)
 
@@ -254,7 +254,7 @@ func (u *Updater) Run() {
 		return
 	}
 
-	// 3. Если tag совпадает с текущей версией — пропустить скачивание.
+	// 3. If tag matches current version - skip download.
 	tagVersion := strings.TrimPrefix(tag, "agent-v")
 	if tagVersion == u.Version {
 		u.saveStatus(Status{
@@ -269,7 +269,7 @@ func (u *Updater) Run() {
 		return
 	}
 
-	// 4. Скачать бинарь.
+	// 4. Download binary.
 	dstBin := filepath.Join(u.InstallDir, u.binaryName())
 	tmpBin := dstBin + ".new"
 	if err := u.downloadBinary(assetURL, tmpBin); err != nil {
@@ -299,7 +299,7 @@ func (u *Updater) Run() {
 		return
 	}
 
-	// 6. ensure_rules.sh из свежего git pull.
+	// 6. ensure_rules.sh from fresh git pull.
 	src := filepath.Join(u.RepoDir, "relay-agent", "deploy", "ensure_rules.sh")
 	if u.binaryName() == "warp-relay-agent-min" {
 		src = filepath.Join(u.RepoDir, "relay-agent", "deploy", "ensure_rules_min.sh")
@@ -319,9 +319,9 @@ func (u *Updater) Run() {
 		StartedAt:  startedAt,
 		FinishedAt: nowISO(),
 	})
-	log.Printf("Update complete: %s → %s, restarting via SIGTERM...", u.Version, tag)
+	log.Printf("Update complete: %s -> %s, restarting via SIGTERM...", u.Version, tag)
 
-	// 7. SIGTERM (отложенный, чтобы успеть отдать ответ).
+	// 7. SIGTERM (delayed, to allow returning a response).
 	time.AfterFunc(2*time.Second, func() {
 		syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 	})

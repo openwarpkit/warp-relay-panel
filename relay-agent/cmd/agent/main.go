@@ -1,45 +1,5 @@
-// WARP Relay Agent v2.2.1 — Go-rewrite Python-агента (relay-agent/agent.py).
-// Single binary, low-memory, тот же API 1:1.
-//
-// v2.1.0: горячие операции (conntrack snapshot/delete/mark, ipset add/del/list)
-// переведены на native netlink (ti-mo/conntrack, vishvananda/netlink).
-// iptables/tc остаются через shell — редкие операции, ROI от netlink невелик.
-//
-// v2.2.0: в /traffic и /traffic/{ip} добавлено поле "client_ids"
-// (clientID, привязанные к IP в refcount.json).
-//
-// v2.2.1: per-IP CONNMARK переведены с N iptables-mangle правил на один
-// nft map @ip2mark (O(1) lookup), per-IP tc fw filter'ы заменены одним
-// root tc flow filter — снимает softirq-нагрузку при 100+ rate-limit'ах.
-// Откат: RATELIMIT_BACKEND=iptables. Кешируемый conntrack-snapshot, pprof endpoint.
-//
-// v2.2.2: фикс синтаксиса root flow filter ("flow map key mark addend
-// 0xffffffff baseclass 1:1" — для iproute2 6.x), миграционные grep'ы в
-// ensure_rules.sh теперь ловят iptables --set-xmark и tc fw chain handle.
-// MarkBySrcUDP использует cachedDump → при N новых IP за один reconcile
-// один Dump вместо N (снимает CPU-burst при applyTC).
-// Watchdog: grep "flow chain" вместо "flow map". nft add element без 2>&1,
-// чтобы isExistsErr ловил дубль-add (idempotency).
-//
-// v2.2.3: SetBatch / MarkBySrcsUDP — N applyTC за 2 fork+exec (nft -f - + tc
-// -batch -) + 1 conntrack Dump. RestoreAll и sharedlimit.reconcile используют
-// batch — startup-burst 222 IP падает с 30%×12s до 7%×1s.
-//
-// v2.2.4: RemoveBatch для idle-cleanup в sharedlimit. Default
-// SHARED_SCAN_INTERVAL поднят 10s -> 30s (реже reconcile, ниже пиковая
-// нагрузка от applyTC; компромисс — клиенты получают лимит до 30s медленнее).
-//
-// v2.2.5: /whitelist/sync теперь принимает поле "rate_limits" и применяет
-// шейпинг батчем сразу после whitelist (panel шлёт rate_limits в payload —
-// см. api/relay_client.full_sync). Diff-remove: лимиты, которых нет в payload,
-// снимаются — agent state 1-в-1 совпадает с БД после Sync.
-// startupResync тоже переведён на SetBatch — N×fork+exec → 2 fork+exec.
-//
-// v2.2.6: self-heal nft warp_shaper. ratelimit.New() при старте создаёт
-// table+map+rule если их нет (ExecStartPre с ensure_rules.sh мог не
-// отработать). При runtime-ошибке "No such file or directory" в nft add/
-// /SetBatch — inline-init таблицы и повторение операции. Снимает кейс
-// «обновили бинарь без systemctl restart → /rate-limit падает с 500».
+// WARP Relay Agent v2.2.1 - Go-rewrite of Python agent (relay-agent/agent.py).
+// Single binary, low-memory, same API 1:1.
 package main
 
 import (
@@ -68,7 +28,7 @@ import (
 	"github.com/nellimonix/warp-relay-panel/relay-agent/internal/watchdog"
 )
 
-// Version проставляется через -ldflags при сборке.
+// Version is set via -ldflags during build.
 var Version = "2.2.8"
 
 func main() {
@@ -79,8 +39,8 @@ func main() {
 		log.Fatalf("Cannot create data dir %s: %v", cfg.DataDir, err)
 	}
 
-	// Persistent netlink connection для conntrack — открывается лениво,
-	// переподключается при ENOBUFS.
+	// Persistent netlink connection for conntrack - opened lazily,
+	// reconnects on ENOBUFS.
 	ct := conntrackgo.New()
 	defer ct.Close()
 
@@ -151,17 +111,17 @@ func main() {
 		wd.Loop(ctx, time.Duration(cfg.RulesWatchdogInterval)*time.Second)
 	}()
 
-	// Restore rate-limits сразу
+	// Restore rate-limits immediately
 	if applied, failed := rl.RestoreAll(); len(applied) > 0 || len(failed) > 0 {
 		log.Printf("Rate-limits: restored=%d failed=%d", len(applied), len(failed))
 	}
 
-	// Опциональный startup-resync с панели
+	// Optional startup-resync with panel
 	pc := panel.New(cfg.PanelURL, cfg.PanelAPIKey, cfg.RelayID)
 	if pc.Configured() {
 		go startupResync(pc, rc, rl, cfg)
 	} else {
-		log.Println("Startup-resync пропущен (PANEL_URL/PANEL_API_KEY/RELAY_ID не заданы)")
+		log.Println("Startup-resync skipped (PANEL_URL/PANEL_API_KEY/RELAY_ID not set)")
 	}
 
 	addr := fmt.Sprintf(":%d", cfg.AgentPort)
@@ -196,9 +156,9 @@ func main() {
 	log.Println("All background workers stopped. Exiting.")
 }
 
-// makeDebouncedPersist возвращает функцию, которая откладывает
-// `ipset save > /etc/ipset.rules` на debounce; при повторных вызовах
-// внутри окна — таймер сбрасывается, save выполняется один раз.
+// makeDebouncedPersist returns a function that defers
+// `ipset save > /etc/ipset.rules` via debounce; repeated calls
+// within the window reset the timer, saving runs once.
 func makeDebouncedPersist(debounce time.Duration) func() {
 	var (
 		mu    sync.Mutex
@@ -233,7 +193,7 @@ func startupResync(
 		return
 	}
 
-	// Пересобрать ipset из payload — netlink.
+	// Rebuild ipset from payload - netlink.
 	if err := ipsetgo.Create(cfg.IpsetName, 1000000); err != nil {
 		log.Printf("startup-resync: ipset create: %v", err)
 	}
@@ -258,8 +218,8 @@ func startupResync(
 	rc.SetAll(rcEntries)
 	shell.Run("ipset save > /etc/ipset.rules 2>/dev/null", 10*time.Second)
 
-	// Rate-limits batch'ем — 1 nft + 1 tc + 1 conntrack Dump на все 200+ IP
-	// вместо N×fork+exec в цикле (см. ratelimit.SetBatch).
+	// Rate-limits in batch - 1 nft + 1 tc + 1 conntrack Dump for all 200+ IPs
+	// instead of Nx fork+exec in loop (see ratelimit.SetBatch).
 	items := make([]ratelimit.SetItem, 0, len(payload.RateLimits))
 	for _, r := range payload.RateLimits {
 		if !shell.ValidIPv4(r.IP) {

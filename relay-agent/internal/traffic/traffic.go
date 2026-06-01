@@ -1,5 +1,5 @@
-// Package traffic собирает per-IP трафик через netlink-conntrack
-// и хранит месячный агрегат на диске (MSK-таймзона).
+// Package traffic collects per-IP traffic via netlink-conntrack
+// and stores a monthly aggregate on disk (MSK timezone).
 package traffic
 
 import (
@@ -131,9 +131,9 @@ func (m *Monitor) checkMonthReset() {
 }
 
 func (m *Monitor) Collect(countFunc func(string) int) {
-	// TTL = половина периода: traffic.Loop крутится с m.interval (default 30s),
-	// поэтому 15s кеш позволяет HTTP /traffic-handler'у дёшево переиспользовать
-	// тот же snapshot, не блокируя коллектор.
+	// TTL = half period: traffic.Loop runs with m.interval (default 30s),
+	// so a 15s cache allows the HTTP /traffic handler to cheaply reuse
+	// the same snapshot without blocking the collector.
 	flows, err := m.ct.SnapshotUDP()
 	if err != nil {
 		log.Printf("traffic: conntrack snapshot error: %v", err)
@@ -164,7 +164,7 @@ func (m *Monitor) Collect(countFunc func(string) int) {
 		}
 		if dtx > 0 || drx > 0 {
 			if countFunc != nil && countFunc(f.SrcIP) == 0 {
-				// Unauthorized / unknown IP — add to orphaned totals but do NOT allocate per-IP entry
+				// Unauthorized / unknown IP - add to orphaned totals but do NOT allocate per-IP entry
 				// to prevent Unbounded Memory Leak DDoS vector.
 				m.state.OrphanedTX += dtx
 				m.state.OrphanedRX += drx
@@ -191,7 +191,7 @@ func (m *Monitor) Loop(ctx context.Context, countFunc func(string) int) {
 	t := time.NewTicker(m.interval)
 	defer t.Stop()
 
-	// Первая немедленная сборка при старте
+	// First immediate collection on start
 	m.Collect(countFunc)
 
 	for {
@@ -206,7 +206,7 @@ func (m *Monitor) Loop(ctx context.Context, countFunc func(string) int) {
 	}
 }
 
-// PerIP — публичная структура для эндпоинтов.
+// PerIP is the public struct for endpoints.
 type PerIP struct {
 	IP          string  `json:"ip,omitempty"`
 	TXBytes     int64   `json:"tx_bytes"`

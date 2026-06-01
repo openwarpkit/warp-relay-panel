@@ -1,11 +1,8 @@
 // WARP Relay Agent (MIN) v2.1.0-min
 //
-// Тип агента: пропускает ВСЕХ клиентов (без whitelist),
-// каждый активный клиентский IP получает индивидуальный лимит SHARED_LIMIT_MBPS
-// (по умолчанию 25 Mbps) симметрично через CONNMARK + HTB на egress eth0.
-//
-// Дизайн один и тот же что у full-agent ratelimit, но активные IP получаются
-// автоматически из conntrack (а не из API-команд панели).
+// Agent type: allows ALL clients (no whitelist),
+// each active client IP gets an individual limit SHARED_LIMIT_MBPS
+// symmetrically via CONNMARK + HTB on egress eth0.
 package main
 
 import (
@@ -41,7 +38,7 @@ func main() {
 		log.Fatalf("Cannot create data dir %s: %v", cfg.DataDir, err)
 	}
 
-	// DST_IP для conntrack-фильтра (auto-detect через DNS если не задан)
+	// DST_IP for conntrack-filter (auto-detect via DNS if not set)
 	dstIP, err := cfg.ResolveDstIP()
 	if err != nil {
 		log.Fatalf("Cannot resolve WARP DST_IP: %v (set WARP_DST_IP env explicitly)", err)
@@ -70,7 +67,7 @@ func main() {
 		IpsetName:        cfg.IpsetName,
 		EnsureScriptPath: filepath.Join(cfg.DataDir, "ensure_rules.sh"),
 		StatusFilePath:   filepath.Join(cfg.DataDir, "self_heal_status.json"),
-		Refcount:         nil, // не нужен min-агенту
+		Refcount:         nil, // not needed for min-agent
 		RateLimit:        rl,
 		SkipIpset:        true,
 		ForwardTags:      []string{"WR_FORWARD_OUT", "WR_FORWARD_IN"},

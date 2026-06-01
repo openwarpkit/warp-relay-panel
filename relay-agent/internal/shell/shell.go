@@ -1,7 +1,7 @@
-// Package shell — тонкий wrapper для выполнения внешних команд.
-// Все операции с iptables/ipset/tc/conntrack пока через shell. Под нагрузкой
-// узкие места (traffic collector, online clients) можно потом перевести
-// на netlink (ti-mo/conntrack, vishvananda/netlink), сохранив тот же API.
+// Package shell is a thin wrapper for executing external commands.
+// All ops with iptables/ipset/tc/conntrack are currently via shell. Under load,
+// bottlenecks (traffic collector, online clients) can be migrated
+// to netlink (ti-mo/conntrack, vishvananda/netlink), keeping the same API.
 package shell
 
 import (
@@ -49,7 +49,7 @@ func Run(cmd string, timeout time.Duration) (int, string, string) {
 
 // RunStdin executes `cmd` with the given string piped to stdin. Used for batch
 // operations: `nft -f -`, `tc -batch -`, `iptables-restore`. One fork+exec per
-// batch instead of N — снимает burst CPU при applyTC десятков IP сразу.
+// batch instead of N - removes CPU burst when applying TC to dozens of IPs at once.
 func RunStdin(cmd, stdin string, timeout time.Duration) (int, string, string) {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
@@ -73,7 +73,7 @@ func RunStdin(cmd, stdin string, timeout time.Duration) (int, string, string) {
 	return rc, strings.TrimSpace(string(stdout)), strings.TrimSpace(stderrBuf.String())
 }
 
-// ValidIPv4 — быстрая проверка по regex (полная валидация — net.ParseIP).
+// ValidIPv4 - fast regex check (full validation - net.ParseIP).
 func ValidIPv4(ip string) bool {
 	if !ipv4Re.MatchString(ip) {
 		return false
@@ -82,7 +82,7 @@ func ValidIPv4(ip string) bool {
 	return addr != nil && addr.To4() != nil
 }
 
-// FormatBytes форматирует байты в человекочитаемый вид (4.2 GB и т.п.).
+// FormatBytes formats bytes into human-readable form (4.2 GB etc).
 func FormatBytes(b int64) string {
 	const k = 1024.0
 	units := []string{"B", "KB", "MB", "GB", "TB", "PB"}
@@ -105,7 +105,7 @@ func FormatBytes(b int64) string {
 	return fmt.Sprintf("%s%.1f %s", sign, v, units[i])
 }
 
-// DefaultIface возвращает имя дефолтного интерфейса (например "eth0").
+// DefaultIface returns the name of the default interface (e.g. "eth0").
 func DefaultIface() string {
 	defaultIfaceMu.RLock()
 	if defaultIfaceCache != "" {

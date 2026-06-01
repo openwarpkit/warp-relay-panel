@@ -1,8 +1,8 @@
 #!/bin/bash
 # ═══════════════════════════════════════
-# WARP Relay — восстановление правил
-# Вызывается перед стартом агента (ExecStartPre)
-# и периодически из watchdog'а агента.
+# WARP Relay - rules restoration
+# Called before agent start (ExecStartPre)
+# and periodically from agent watchdog.
 # ═══════════════════════════════════════
 
 IPSET_NAME="${IPSET_NAME:-warp_whitelist}"
@@ -11,34 +11,34 @@ RECIPE="${RECIPE:-/opt/warp-relay-agent/rules_recipe.json}"
 
 G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; N='\033[0m'
 
-# ── ipset ──
+# -- ipset --
 if ! ipset list "$IPSET_NAME" &>/dev/null; then
-    echo -e "${Y}[ensure] ipset '$IPSET_NAME' не найден${N}"
+    echo -e "${Y}[ensure] ipset '$IPSET_NAME' not found${N}"
     if [ -f /etc/ipset.rules ]; then
-        echo -e "${Y}[ensure] Восстанавливаем из /etc/ipset.rules...${N}"
+        echo -e "${Y}[ensure] Restoring from /etc/ipset.rules...${N}"
         ipset restore -f /etc/ipset.rules 2>/dev/null
         if ipset list "$IPSET_NAME" &>/dev/null; then
-            echo -e "${G}[ensure] ipset восстановлен${N}"
+            echo -e "${G}[ensure] ipset restored${N}"
         else
-            echo -e "${R}[ensure] Не удалось восстановить, создаём пустой${N}"
+            echo -e "${R}[ensure] Failed to restore, creating empty${N}"
             ipset create "$IPSET_NAME" hash:ip maxelem 1000000 2>/dev/null
         fi
     else
-        echo -e "${Y}[ensure] /etc/ipset.rules не найден, создаём пустой ipset${N}"
+        echo -e "${Y}[ensure] /etc/ipset.rules not found, creating empty ipset${N}"
         ipset create "$IPSET_NAME" hash:ip maxelem 1000000 2>/dev/null
     fi
 else
     echo "[ensure] ipset '$IPSET_NAME' OK"
 fi
 
-# ── iptables NAT (WR_RULE) ──
+# -- iptables NAT (WR_RULE) --
 rebuild_from_recipe() {
     if [ ! -f "$RECIPE" ]; then
-        echo -e "${R}[ensure] Recipe $RECIPE не найден — пересобрать NAT нечем${N}"
+        echo -e "${R}[ensure] Recipe $RECIPE not found - nothing to rebuild NAT from${N}"
         return 1
     fi
     if ! command -v jq &>/dev/null; then
-        echo -e "${R}[ensure] jq не установлен — recipe прочитать нечем${N}"
+        echo -e "${R}[ensure] jq is not installed - nothing to read recipe${N}"
         return 1
     fi
 
@@ -48,13 +48,13 @@ rebuild_from_recipe() {
     IFACE=$(jq -r '.iface // empty' "$RECIPE")
 
     if [ -z "$SRC_IP" ] || [ -z "$DST_IP" ] || [ -z "$PORTS" ]; then
-        echo -e "${R}[ensure] Recipe неполный (src/dst/ports)${N}"
+        echo -e "${R}[ensure] Recipe incomplete (src/dst/ports)${N}"
         return 1
     fi
 
-    echo -e "${Y}[ensure] Пересобираем NAT из recipe: src=$SRC_IP dst=$DST_IP${N}"
+    echo -e "${Y}[ensure] Rebuilding NAT from recipe: src=$SRC_IP dst=$DST_IP${N}"
 
-    # Чистим возможные обрывки правил с тэгом
+    # Clean up possible dangling rules with tag
     iptables -t nat -S 2>/dev/null | grep "$TAG" | sed 's/^-A/-D/' | while read rule; do
         iptables -t nat $rule 2>/dev/null || true
     done
@@ -62,7 +62,7 @@ rebuild_from_recipe() {
         iptables $rule 2>/dev/null || true
     done
 
-    # PREROUTING/POSTROUTING чанками по 15 портов (ограничение multiport)
+    # PREROUTING/POSTROUTING in chunks of 15 ports (multiport limit)
     IFS=',' read -ra PORT_ARR <<< "$PORTS"
     CHUNK_SIZE=15
     for ((i=0; i<${#PORT_ARR[@]}; i+=CHUNK_SIZE)); do
@@ -92,68 +92,68 @@ rebuild_from_recipe() {
         -m comment --comment "WR_WHITELIST_DROP" 2>/dev/null
 
     netfilter-persistent save 2>/dev/null || true
-    echo -e "${G}[ensure] NAT пересобран из recipe${N}"
+    echo -e "${G}[ensure] NAT rebuilt from recipe${N}"
     return 0
 }
 
 if ! iptables -t nat -S 2>/dev/null | grep -q "$TAG"; then
-    echo -e "${Y}[ensure] iptables NAT правила не найдены${N}"
+    echo -e "${Y}[ensure] iptables NAT rules not found${N}"
     if command -v netfilter-persistent &>/dev/null; then
-        echo -e "${Y}[ensure] Восстанавливаем через netfilter-persistent...${N}"
+        echo -e "${Y}[ensure] Restoring via netfilter-persistent...${N}"
         netfilter-persistent reload 2>/dev/null
     fi
     if ! iptables -t nat -S 2>/dev/null | grep -q "$TAG"; then
-        echo -e "${Y}[ensure] netfilter-persistent не помог — пробуем recipe${N}"
+        echo -e "${Y}[ensure] netfilter-persistent did not help - trying recipe${N}"
         rebuild_from_recipe || \
-          echo -e "${R}[ensure] Запустите setup_relay.sh для полной настройки${N}"
+          echo -e "${R}[ensure] Run setup.sh for full setup${N}"
     else
-        echo -e "${G}[ensure] iptables восстановлены${N}"
+        echo -e "${G}[ensure] iptables restored${N}"
     fi
 else
     echo "[ensure] iptables NAT rules OK"
 fi
 
-# ── iptables FORWARD whitelist (WR_WHITELIST_OUT/IN) ──
+# -- iptables FORWARD whitelist (WR_WHITELIST_OUT/IN) --
 if ! iptables -S FORWARD 2>/dev/null | grep -q "WR_WHITELIST_OUT"; then
-    echo -e "${Y}[ensure] FORWARD whitelist правила потеряны — пересобираем${N}"
+    echo -e "${Y}[ensure] FORWARD whitelist rules lost - rebuilding${N}"
     rebuild_from_recipe || true
 fi
 
-# ── ip_forward ──
+# -- ip_forward --
 FWD=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)
 if [ "$FWD" != "1" ]; then
-    echo -e "${Y}[ensure] ip_forward выключен, включаем...${N}"
+    echo -e "${Y}[ensure] ip_forward is off, enabling...${N}"
     sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
 fi
 
-# ── tc HTB root qdisc для rate-limit'ов ──
+# -- tc HTB root qdisc for rate-limits --
 IFACE=$(ip route | awk '/default/ {print $5; exit}')
 if [ -n "$IFACE" ]; then
     if ! tc qdisc show dev "$IFACE" 2>/dev/null | grep -q "qdisc htb 1:"; then
-        echo -e "${Y}[ensure] HTB qdisc на $IFACE не найден — создаём${N}"
+        echo -e "${Y}[ensure] HTB qdisc on $IFACE not found - creating${N}"
         tc qdisc add dev "$IFACE" root handle 1: htb default 999 2>/dev/null
         tc class add dev "$IFACE" parent 1: classid 1:999 htb rate 1000mbit 2>/dev/null
     fi
-    # CONNMARK restore на egress (для rate-limit'ов)
+    # CONNMARK restore on egress (for rate-limits)
     if ! iptables -t mangle -S POSTROUTING 2>/dev/null | grep -q "CONNMARK --restore-mark"; then
         iptables -t mangle -A POSTROUTING -j CONNMARK --restore-mark 2>/dev/null
     fi
 fi
 
-# ── nftables warp_shaper (per-IP CONNMARK через O(1) map lookup) ──
-# Заменяет N штук "iptables -t mangle PREROUTING ... CONNMARK --set-mark" одной
-# конструкцией с hash-map. Снимает softirq-нагрузку с netfilter при 100+ rate-limit'ах.
-# Переключатель: RATELIMIT_BACKEND=iptables в systemd unit → пропустить.
+# -- nftables warp_shaper (per-IP CONNMARK via O(1) map lookup) --
+# Replaces N "iptables -t mangle PREROUTING ... CONNMARK --set-mark" rules with one
+# hash-map construct. Removes softirq load from netfilter with 100+ rate-limits.
+# Switch: RATELIMIT_BACKEND=iptables in systemd unit -> skip.
 if [ "${RATELIMIT_BACKEND:-nftables}" != "iptables" ] && ! command -v nft &>/dev/null; then
-    # На существующих relay'ях после self-update nft может отсутствовать —
-    # ставим один раз без интерактива. Если apt недоступен — graceful fallback ниже.
-    echo -e "${Y}[ensure] nft не установлен, ставим apt-пакет nftables...${N}"
+    # On existing relays after self-update nft may be missing -
+    # install once non-interactively. If apt is unavailable - graceful fallback below.
+    echo -e "${Y}[ensure] nft not installed, installing apt package nftables...${N}"
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nftables 2>/dev/null || \
-        echo -e "${R}[ensure] apt install nftables не удался — продолжаем в legacy iptables-режиме${N}"
+        echo -e "${R}[ensure] apt install nftables failed - continuing in legacy iptables mode${N}"
 fi
 if [ "${RATELIMIT_BACKEND:-nftables}" != "iptables" ] && command -v nft &>/dev/null; then
     if ! nft list table ip warp_shaper >/dev/null 2>&1; then
-        echo -e "${Y}[ensure] nft: создаём table ip warp_shaper${N}"
+        echo -e "${Y}[ensure] nft: creating table ip warp_shaper${N}"
         nft add table ip warp_shaper
         nft add chain ip warp_shaper prerouting \
             "{ type filter hook prerouting priority -150 ; }"
@@ -163,10 +163,10 @@ if [ "${RATELIMIT_BACKEND:-nftables}" != "iptables" ] && command -v nft &>/dev/n
             ct mark set ip saddr map @ip2mark
     fi
 
-    # Миграция iptables → nft. ДО создания flow filter, иначе он не вставится
-    # из-за конфликта prio с осиротевшими fw-фильтрами.
-    # iptables может печатать "--set-xmark 0xM/0xffffffff" (новый формат iptables-nft);
-    # старый "--set-mark" тоже ловим.
+    # Migration iptables -> nft. BEFORE creating flow filter, otherwise it won't be inserted
+    # due to prio conflict with orphaned fw-filters.
+    # iptables may print "--set-xmark 0xM/0xffffffff" (new iptables-nft format);
+    # old "--set-mark" is also caught.
     REMOVED=0
     while IFS= read -r rule; do
         if [ -n "$rule" ]; then
@@ -180,7 +180,7 @@ if [ "${RATELIMIT_BACKEND:-nftables}" != "iptables" ] && command -v nft &>/dev/n
     fi
 
     if [ -n "$IFACE" ]; then
-        # Миграция fw-filter'ов ДО flow-filter'а.
+        # Migration of fw-filters BEFORE flow-filter.
         REMOVED_FW=0
         while IFS= read -r handle; do
             if [ -n "$handle" ]; then
@@ -193,17 +193,17 @@ if [ "${RATELIMIT_BACKEND:-nftables}" != "iptables" ] && command -v nft &>/dev/n
             echo -e "${G}[ensure] migrated $REMOVED_FW tc fw-filter(s) to flow-map${N}"
         fi
 
-        # Один root tc flow filter — заменяет per-IP fw filter'ы.
-        # Синтаксис подробно — см. ensure_rules_min.sh.
+        # One root tc flow filter - replaces per-IP fw filters.
+        # Syntax details - see ensure_rules_min.sh.
         if ! tc filter show dev "$IFACE" parent 1:0 2>/dev/null | grep -q "flow map"; then
-            echo -e "${Y}[ensure] tc: создаём root flow filter на $IFACE${N}"
+            echo -e "${Y}[ensure] tc: creating root flow filter on $IFACE${N}"
             tc filter add dev "$IFACE" parent 1:0 protocol ip prio 1 \
                 handle 1 flow map key mark addend 0xffffffff baseclass 1:1 2>&1 || \
-                echo -e "${R}[ensure] tc flow filter не создан${N}"
+                echo -e "${R}[ensure] tc flow filter not created${N}"
         fi
     fi
 elif [ "${RATELIMIT_BACKEND:-nftables}" != "iptables" ]; then
-    echo -e "${Y}[ensure] nft не установлен — выполняется в legacy iptables-режиме${N}"
+    echo -e "${Y}[ensure] nft not installed - running in legacy iptables mode${N}"
 fi
 
 echo "[ensure] Done"

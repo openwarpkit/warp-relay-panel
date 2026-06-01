@@ -130,7 +130,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) onlineClients() map[string]interface{} {
 	whitelist, _ := ipsetgo.Members(s.Cfg.IpsetName)
-	// 2s кеша — дедуп параллельных /health, /stats, /online от панели.
+	// 2s cache - deduplicate parallel /health, /stats, /online from panel.
 	assured, err := s.Conntrack.AssuredUDPSrcs()
 	if err != nil {
 		assured = map[string]struct{}{}

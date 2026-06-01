@@ -1,5 +1,5 @@
 """
-HTTP-клиент для relay-агентов.
+HTTP client for relay agents.
 """
 
 import asyncio
@@ -11,7 +11,7 @@ from . import database as db
 logger = logging.getLogger("relay_client")
 
 AGENT_TIMEOUT = 10.0
-SYNC_TIMEOUT = 30.0  # Для /whitelist/sync (большой payload)
+SYNC_TIMEOUT = 30.0  # For /whitelist/sync (large payload)
 
 
 def _validate_ipv4(ip: str) -> str:
@@ -59,9 +59,6 @@ async def _agent_request(relay: dict, method: str, path: str,
         return False, {"error": msg}
 
 
-# ═══════════════════════════════════════
-# WHITELIST OPERATIONS
-# ═══════════════════════════════════════
 
 async def add_ip(new_ip: str, old_ip: str | None = None,
                  client_id: int | None = None) -> dict:
@@ -115,13 +112,9 @@ async def remove_ip(ip: str) -> dict:
 
 async def full_sync(relay_id: int | None = None) -> dict:
     """
-    Отправляет whitelist + rate-limits на relay-агенты. Агент принимает данные
-    и обрабатывает их в фоне (fire-and-forget), чтобы не упираться в Vercel timeout.
-    Реальный результат проверяется через /health → last_sync.
-
-    Включает rate_limits в payload, чтобы после Sync на свежий relay шейпинг
-    был навешан сразу, а не «whitelist есть, но клиент с лимитом получает
-    безлимит до ручного POST /rate-limit».
+    Sends whitelist + rate-limits to relay agents. The agent processes data
+    in the background (fire-and-forget) to avoid Vercel timeouts.
+    The real result is checked via /health -> last_sync.
     """
     clients = db.list_clients(include_blocked=False)
 
@@ -142,9 +135,8 @@ async def full_sync(relay_id: int | None = None) -> dict:
             except ValueError:
                 logger.warning("Skipping non-IPv4: %s", ip)
 
-    # Rate-limits: все актуальные записи из БД. Агент применит их батчем
-    # после ipset.SetAll. Для забаненных IP не отправляем — лимит не нужен,
-    # клиент всё равно не пройдёт через whitelist.
+    # Rate-limits: all current DB records. Agent applies them in batch
+    # after ipset.SetAll. Not sent for banned IPs.
     rate_limit_entries = []
     for rl in db.list_rate_limits():
         ip = rl.get("ip")
@@ -180,8 +172,8 @@ async def full_sync(relay_id: int | None = None) -> dict:
             },
             timeout=SYNC_TIMEOUT,
         )
-        # Пометка synced=True если агент принял payload.
-        # Фактический результат (успешно ли закомиттился ipset) придёт через /health.
+        # Mark synced=True if agent accepted payload.
+        # Actual result will come through /health.
         db.mark_relay_synced(relay["id"], ok)
         results[relay["name"]] = {
             "ok": ok,
@@ -200,9 +192,6 @@ async def full_sync(relay_id: int | None = None) -> dict:
     }
 
 
-# ═══════════════════════════════════════
-# HEALTH & STATS & TRAFFIC
-# ═══════════════════════════════════════
 
 async def check_relay(relay: dict) -> dict:
     ok, data = await _agent_request(relay, "GET", "/health")
@@ -223,8 +212,8 @@ async def get_relay_traffic(
     top: int | None = None,
 ) -> dict:
     """
-    summary=True → вернуть только totals без ips dict
-    top=N → вернуть только N топ-IP по total_bytes
+    summary=True -> return only totals without ips dict
+    top=N -> return only N top-IP by total_bytes
     """
     path = f"/traffic/{client_ip}" if client_ip else "/traffic"
     ok, data = await _agent_request(relay, "GET", path)
@@ -232,7 +221,7 @@ async def get_relay_traffic(
     if not ok or client_ip:
         return {"ok": ok, "relay": relay["name"], **data}
 
-    # Серверная фильтрация (на стороне API, т.к. агент пока не принимает params)
+    # Server-side filtering (API side, since agent does not accept params yet)
     if summary:
         data.pop("ips", None)
     elif top is not None and "ips" in data:
@@ -272,9 +261,6 @@ async def health_check_all() -> dict:
     return results
 
 
-# ═══════════════════════════════════════
-# UPDATE
-# ═══════════════════════════════════════
 
 async def update_relay(relay: dict) -> dict:
     ok, data = await _agent_request(relay, "POST", "/update")
@@ -296,15 +282,12 @@ async def update_all_relays() -> dict:
     return results
 
 
-# ═══════════════════════════════════════
-# RATE LIMITS
-# ═══════════════════════════════════════
 
 async def set_rate_limit(ip: str, mbps: float,
                          expires_at: str | None = None,
                          client_id: int | None = None) -> dict:
-    """Применить rate-limit на ВСЕХ активных full-relay'ях.
-    Min-relay'и игнорируются — у них общий лимит, не per-IP."""
+    """Apply rate-limit to ALL active full-relays.
+    Min-relays are ignored - they have a global limit, not per-IP."""
     try:
         ip = _validate_ipv4(ip)
     except ValueError as e:
@@ -330,7 +313,7 @@ async def set_rate_limit(ip: str, mbps: float,
 
 
 async def remove_rate_limit(ip: str) -> dict:
-    """Снять rate-limit на всех full-relay'ях."""
+    """Remove rate-limit on all full-relays."""
     try:
         ip = _validate_ipv4(ip)
     except ValueError as e:
@@ -348,6 +331,6 @@ async def remove_rate_limit(ip: str) -> dict:
 
 
 async def list_rate_limits_on_relay(relay: dict) -> dict:
-    """Получить текущий список rate-limit'ов с конкретного relay'я."""
+    """Get current list of rate-limits from a specific relay."""
     ok, data = await _agent_request(relay, "GET", "/rate-limits")
     return {"ok": ok, **data}

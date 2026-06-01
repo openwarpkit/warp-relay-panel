@@ -1,9 +1,9 @@
 """
 Supabase database operations.
-Все IP адреса хранятся зашифрованными (Fernet AES).
-Для поиска по IP используется SHA-256 хэш.
+All IP addresses are stored encrypted (Fernet AES).
+SHA-256 hash is used for IP search.
 
-Hot-path операции — атомарные RPC (см. supabase_schema.sql):
+Hot-path operations - atomic RPCs (see supabase_schema.sql):
 activate_client_atomic, block_client_atomic, delete_client_atomic,
 get_client_full_with_bans, add_ip_ban_idempotent, get_sync_payload,
 find_clients_by_ip, count_clients_on_ip, dashboard_stats.
@@ -55,9 +55,6 @@ def _safe_decrypt(enc: Optional[str]) -> Optional[str]:
         return "decrypt_error"
 
 
-# ═══════════════════════════════════════
-# DASHBOARD STATS
-# ═══════════════════════════════════════
 
 def get_dashboard_stats() -> dict:
     try:
@@ -72,9 +69,6 @@ def get_dashboard_stats() -> dict:
     }
 
 
-# ═══════════════════════════════════════
-# CLIENTS
-# ═══════════════════════════════════════
 
 def create_client_record(label: str = "") -> dict:
     token = uuid.uuid4().hex[:16]
@@ -98,7 +92,7 @@ def get_client_by_id(client_id: int) -> Optional[dict]:
 
 
 def get_client_labels(ids: list[int]) -> dict[int, str]:
-    """Batch-резолв client_id → label. Через RPC: массив идёт в JSON-body, без URL-лимита."""
+    """Batch-resolve client_id → label. Via RPC: array sent in JSON-body, no URL-limit."""
     if not ids:
         return {}
     unique_ids = list({int(i) for i in ids})
@@ -132,10 +126,9 @@ def count_clients_on_ip(ip: str, exclude_client_id: int | None = None) -> int:
         return 0
 
 
-# ── activate ──
 
 def activate_client(token: str, new_ip: str) -> dict:
-    """Активация по token. Атомарный RPC: 5 round-trip'ов → 1."""
+    """Activation by token. Atomic RPC: 5 round-trips -> 1."""
     result = _db().rpc("activate_client_atomic", {
         "p_token": token,
         "p_new_ip_enc": encrypt_ip(new_ip),
@@ -145,7 +138,7 @@ def activate_client(token: str, new_ip: str) -> dict:
 
 
 def activate_client_by_id(client_id: int, new_ip: str) -> dict:
-    """Ручная активация по client_id и IP."""
+    """Manual activation by client_id and IP."""
     result = _db().rpc("activate_client_by_id_atomic", {
         "p_client_id": client_id,
         "p_new_ip_enc": encrypt_ip(new_ip),
@@ -155,7 +148,7 @@ def activate_client_by_id(client_id: int, new_ip: str) -> dict:
 
 
 def _wrap_activation_response(data: dict, new_ip: str) -> dict:
-    """Адаптирует JSONB-ответ RPC к форме, ожидаемой index.py."""
+    """Adapts RPC JSONB response to the format expected by index.py."""
     if not data or "error" in (data or {}):
         return data or {"error": "rpc_no_data"}
 
@@ -177,10 +170,9 @@ def _wrap_activation_response(data: dict, new_ip: str) -> dict:
     }
 
 
-# ── block / delete / full ──
 
 def block_client(client_id: int, blocked: bool = True) -> Optional[dict]:
-    """Возвращает обновлённый клиент с current_ip_banned/previous_ip_banned/current_ip_shared."""
+    """Returns updated client with current_ip_banned/previous_ip_banned/current_ip_shared."""
     result = _db().rpc("block_client_atomic", {
         "p_client_id": client_id, "p_blocked": blocked,
     }).execute()
@@ -191,7 +183,7 @@ def block_client(client_id: int, blocked: bool = True) -> Optional[dict]:
 
 
 def delete_client(client_id: int) -> Optional[dict]:
-    """Возвращает {id, current_ip, current_ip_shared} либо None."""
+    """Returns {id, current_ip, current_ip_shared} or None."""
     result = _db().rpc("delete_client_atomic", {
         "p_client_id": client_id,
     }).execute()
@@ -206,7 +198,7 @@ def delete_client(client_id: int) -> Optional[dict]:
 
 
 def get_client_full(client_id: int) -> Optional[dict]:
-    """Клиент + флаги бана + текущий rate-limit. 3 запроса → 1."""
+    """Client + ban flags + current rate-limit. 3 requests -> 1."""
     result = _db().rpc("get_client_full_with_bans", {
         "p_client_id": client_id,
     }).execute()
@@ -217,7 +209,7 @@ def get_client_full(client_id: int) -> Optional[dict]:
 
 
 def _decrypt_jsonb_client(data: dict) -> dict:
-    """JSONB из RPC → обычный словарь клиента с расшифрованными IP."""
+    """JSONB from RPC -> normal client dict with decrypted IPs."""
     return {
         "id": data["id"],
         "token": data.get("token"),
@@ -234,7 +226,6 @@ def _decrypt_jsonb_client(data: dict) -> dict:
     }
 
 
-# ── activation log ──
 
 def delete_activation_logs(client_id: int) -> int:
     result = (
@@ -278,7 +269,6 @@ def get_all_active_ips() -> list[str]:
     return ips
 
 
-# ── decrypt + search ──
 
 def _decrypt_client(row: dict) -> dict:
     return {
@@ -314,12 +304,9 @@ def search_clients_by_ip(ip: str, include_log_history: bool = True) -> list[dict
     return clients
 
 
-# ═══════════════════════════════════════
-# IP BLACKLIST
-# ═══════════════════════════════════════
 
 def add_ip_ban(ip: str, reason: str = "") -> dict:
-    """Идемпотентный INSERT через RPC (без race-condition)."""
+    """Idempotent INSERT via RPC (no race-condition)."""
     ip_h = hash_ip(ip)
     result = _db().rpc("add_ip_ban_idempotent", {
         "p_ip_hash": ip_h,
@@ -425,9 +412,7 @@ def list_ip_bans_paginated(page: int = 0, per_page: int = 20,
     }
 
 
-# ═══════════════════════════════════════
-# RELAYS (с TTL-кэшем)
-# ═══════════════════════════════════════
+# RELAYS (with TTL cache)
 
 _RELAYS_CACHE_TTL = float(os.environ.get("RELAYS_CACHE_TTL", "15"))
 
@@ -447,7 +432,7 @@ def add_relay(name: str, host: str, agent_port: int = 7580,
 
 
 def list_relays(fields: str = "full") -> list[dict]:
-    """fields='full' | 'basic'. Кэшируется на RELAYS_CACHE_TTL секунд."""
+    """fields='full' | 'basic'. Cached for RELAYS_CACHE_TTL seconds."""
     key = f"relays:{fields}"
     cached_value = cache.get(key)
     if cached_value is not None:
@@ -464,9 +449,9 @@ def list_relays(fields: str = "full") -> list[dict]:
 
 def get_active_relays(agent_type: str | None = None) -> list[dict]:
     """
-    agent_type=None  → все активные (для health-check, traffic, update_all)
-    agent_type='full' → только full (для whitelist/rate-limit fan-out)
-    agent_type='min'  → только min (если когда-то нужно)
+    agent_type=None   -> all active (for health-check, traffic, update_all)
+    agent_type='full' -> only full (for whitelist/rate-limit fan-out)
+    agent_type='min'  -> only min (if needed in the future)
     """
     key = f"relays:active:{agent_type or 'all'}"
     cached_value = cache.get(key)
@@ -506,15 +491,12 @@ def update_relay_health(relay_id: int, health_data: dict):
     cache.invalidate("relays:")
 
 
-# ═══════════════════════════════════════
-# RATE LIMITS
-# ═══════════════════════════════════════
 
 def add_rate_limit(ip: str, mbps: float,
                    expires_at: Optional[str] = None,
                    reason: str = "",
                    client_id: Optional[int] = None) -> dict:
-    """UPSERT в rate_limits. Возвращает финальную запись."""
+    """UPSERT in rate_limits. Returns the final record."""
     ip_h = hash_ip(ip)
     payload = {
         "ip_hash": ip_h,
@@ -584,7 +566,7 @@ def list_rate_limits() -> list[dict]:
 
 
 def list_expired_rate_limits() -> list[dict]:
-    """Для внешнего шедулера юзера: всё, что пора снять."""
+    """For user's external scheduler: everything to remove."""
     try:
         result = _db().rpc("get_expired_rate_limits", {}).execute()
     except Exception as e:
@@ -600,13 +582,11 @@ def list_expired_rate_limits() -> list[dict]:
     } for r in rows]
 
 
-# ═══════════════════════════════════════
-# SYNC PAYLOAD (для startup-resync агента)
-# ═══════════════════════════════════════
+# SYNC PAYLOAD (for startup-resync agent)
 
 def get_sync_payload() -> dict:
-    """Полный payload для агента: clients + rate_limits.
-    IP расшифровываются на стороне Python."""
+    """Full payload for the agent: clients + rate_limits.
+    IPs are decrypted on the Python side."""
     try:
         result = _db().rpc("get_sync_payload", {}).execute()
     except Exception as e:

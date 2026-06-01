@@ -1,4 +1,4 @@
-// Package panel — клиент для startup-resync со стороны панели.
+// Package panel is a client for startup-resync from the panel.
 package panel
 
 import (
@@ -44,7 +44,7 @@ func (c *Client) Configured() bool {
 	return c.URL != "" && c.APIKey != "" && c.RelayID != ""
 }
 
-// FetchWhitelistPayload — GET /api/relays/{id}/whitelist-payload.
+// FetchWhitelistPayload - GET /api/relays/{id}/whitelist-payload.
 func (c *Client) FetchWhitelistPayload() (*Payload, error) {
 	url := fmt.Sprintf("%s/api/relays/%s/whitelist-payload", c.URL, c.RelayID)
 	req, err := http.NewRequest("GET", url, nil)

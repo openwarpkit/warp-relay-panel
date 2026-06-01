@@ -1,14 +1,13 @@
 """
-Простой TTL in-memory кэш — на инстанс serverless-контейнера.
-На Vercel cold-start обнуляет кэш, что приемлемо: цель — снять нагрузку
-с горячих эндпоинтов внутри одного инстанса (list_relays вызывается
-из десятка хендлеров).
+Simple TTL in-memory cache per serverless container instance.
+Vercel cold-starts reset the cache, which is acceptable since the goal
+is to reduce load on hot endpoints within a single instance.
 """
 
 import time
 from typing import Any, Callable
 
-_DEFAULT_TTL = 15.0  # сек
+_DEFAULT_TTL = 15.0  # seconds
 
 _store: dict[str, tuple[float, Any]] = {}
 
@@ -29,7 +28,7 @@ def set(key: str, value: Any, ttl: float = _DEFAULT_TTL) -> None:
 
 
 def invalidate(prefix: str) -> int:
-    """Удаляет все ключи, начинающиеся с prefix. Возвращает количество."""
+    """Removes all keys starting with prefix. Returns the count."""
     keys = [k for k in _store if k.startswith(prefix)]
     for k in keys:
         _store.pop(k, None)
@@ -37,7 +36,7 @@ def invalidate(prefix: str) -> int:
 
 
 def cached(key: str, ttl: float = _DEFAULT_TTL):
-    """Декоратор: кэширует возврат функции под ключом."""
+    """Decorator: caches function return value under key."""
     def decorator(fn: Callable):
         def wrapper(*args, **kwargs):
             cached_value = get(key)

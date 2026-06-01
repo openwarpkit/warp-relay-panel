@@ -106,14 +106,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, resp)
 }
 
-// noRefcount — у min-агента нет refcount, но Traffic ждёт callback.
-// Возвращает 0 для всех IP (поле "clients_on_ip" в /traffic будет 0).
+// noRefcount - min-agent has no refcount, but Traffic expects a callback.
+// Returns 0 for all IPs ("clients_on_ip" field in /traffic will be 0).
 func noRefcount(ip string) int { return 0 }
 
 func noClients(ip string) []int64 { return nil }
 
 func (s *Server) onlineClients() map[string]interface{} {
-	// 2s кеша — дедуп для параллельных /health и /stats вызовов от панели.
+	// 2s cache - deduplicate parallel /health and /stats from panel.
 	assured, err := s.Conntrack.AssuredUDPSrcs()
 	if err != nil {
 		assured = map[string]struct{}{}

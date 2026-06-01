@@ -1,25 +1,25 @@
-// Package ratelimit управляет per-IP rate-limit'ами через CONNMARK + HTB.
+// Package ratelimit manages per-IP rate-limits via CONNMARK + HTB.
 //
-// Дизайн:
-//   - на каждый IP — уникальный fwmark M ∈ [10..998]
-//   - nftables map ip2mark: { IP : M } (один общий rule в PREROUTING делает
-//     O(1) lookup и ct mark set вместо N линейных iptables-правил)
+// Design:
+//   - unique fwmark M in [10..998] per IP
+//   - nftables map ip2mark: { IP : M } (one shared PREROUTING rule does
+//     O(1) lookup and ct mark set instead of N linear iptables rules)
 //   - tc class add dev IFACE parent 1: classid 1:M htb rate Nmbit ceil Nmbit burst 16k
-//   - один root tc filter "flow map keys nfmark baseclass 1:0" направляет
-//     каждый пакет в class 1:<nfmark> за O(1) — заменяет N per-IP fw-фильтров
+//   - one root tc filter "flow map keys nfmark baseclass 1:0" directs
+//     each packet to class 1:<nfmark> in O(1) - replaces N per-IP fw filters
 //
-// POSTROUTING --restore-mark уже стоит (см. ensure_rules.sh) — он переносит
-// mark из conntrack на исходящий пакет; tc flow на egress матчит nfmark и шейпит.
-// Симметрия: одна conntrack-запись несёт оба направления.
+// POSTROUTING --restore-mark is already set (see ensure_rules.sh) - it copies
+// mark from conntrack to outgoing packet; tc flow on egress matches nfmark and shapes.
+// Symmetry: one conntrack entry carries both directions.
 //
-// Инициализация nftables-таблицы и tc flow filter — в ensure_rules.sh
-// (ExecStartPre + watchdog). Здесь только per-IP элементы map'ы и HTB-классы.
+// Initialization of nftables table and tc flow filter is in ensure_rules.sh
+// (ExecStartPre + watchdog). Here we only manage per-IP map elements and HTB classes.
 //
-// nftables/tc операции — через shell (редкие, экономия от netlink невелика).
-// conntrack -U (mark на существующих флоу) — через netlink (горячий путь).
+// nftables/tc ops - via shell (rare, netlink savings are small).
+// conntrack -U (mark on existing flows) - via netlink (hot path).
 //
-// Переключатель backend'а: RATELIMIT_BACKEND=iptables откатывает на старый
-// per-IP iptables + fw-filter режим (на случай отсутствия nft / отката).
+// Backend switch: RATELIMIT_BACKEND=iptables falls back to legacy
+// per-IP iptables + fw-filter mode (if nft is missing / rollback).
 package ratelimit
 
 import (
@@ -52,10 +52,10 @@ type Manager struct {
 	path     string
 	markMin  int
 	markMax  int
-	m        map[string]Limit // ip → Limit
+	m        map[string]Limit // ip -> Limit
 	used     map[int]bool     // mark → in-use
 	ct       *conntrackgo.Client
-	useNft   bool // false → старый путь (iptables PREROUTING + tc fw-filter per IP)
+	useNft   bool // false -> legacy path
 }
 
 func New(path string, markMin, markMax int, ct *conntrackgo.Client) *Manager {
@@ -69,30 +69,29 @@ func New(path string, markMin, markMax int, ct *conntrackgo.Client) *Manager {
 		useNft:  os.Getenv("RATELIMIT_BACKEND") != "iptables",
 	}
 	mgr.load()
-	// Startup-init: создать nft warp_shaper + tc flow filter если их нет.
-	// Защищает от сценария «бинарь обновили, но ExecStartPre с ensure_rules.sh
-	// не отработал» — без этого первый /rate-limit / SetBatch падал бы с
-	// "No such file or directory".
+	// Startup-init: create nft warp_shaper + tc flow filter if missing.
+	// Protects against "binary updated but ExecStartPre ensure_rules.sh
+	// did not run" - otherwise the first /rate-limit or SetBatch would fail.
 	if err := mgr.ensureBackend(); err != nil {
 		log.Printf("ratelimit: ensureBackend on startup: %v (watchdog will retry)", err)
 	}
 	return mgr
 }
 
-// ensureBackend идемпотентно создаёт nft warp_shaper-table + map + rule в
-// PREROUTING + root tc flow filter. Если всё уже на месте — возвращает nil
-// без shell-вызовов после быстрой проверки.
+// ensureBackend idempotently creates nft warp_shaper table + map + rule in
+// PREROUTING + root tc flow filter. If already present, returns nil
+// with no shell calls after a fast check.
 //
-// Вызывается:
-//   - в New() при старте агента
-//   - из applyTC/SetBatch если получили "No such file or directory" от nft
-//     (runtime self-heal — кто-то снёс таблицу руками или после ребута)
+// Called:
+//   - in New() on agent start
+//   - from applyTC/SetBatch if "No such file or directory" from nft
+//     (runtime self-heal if table was manually deleted or after reboot)
 func (m *Manager) ensureBackend() error {
 	if !m.useNft {
 		return nil
 	}
 
-	// Быстрая проверка — если оба компонента на месте, ничего не делаем.
+	// Fast check - if both components are in place, do nothing.
 	tableOk := false
 	rcT, _, _ := shell.Run("nft list table ip warp_shaper >/dev/null 2>&1", 5*time.Second)
 	if rcT == 0 {
@@ -110,7 +109,7 @@ func (m *Manager) ensureBackend() error {
 		return nil
 	}
 
-	// nft часть — таблица, chain в PREROUTING, map ip2mark, rule ct mark set.
+	// nft part - table, PREROUTING chain, map ip2mark, rule ct mark set.
 	if !tableOk {
 		nftInit := "add table ip warp_shaper\n" +
 			"add chain ip warp_shaper prerouting { type filter hook prerouting priority -150 ; }\n" +
@@ -123,8 +122,8 @@ func (m *Manager) ensureBackend() error {
 		log.Println("ratelimit: nft warp_shaper table created")
 	}
 
-	// tc flow filter — нужен HTB qdisc, который ставит ensure_rules.sh.
-	// Если qdisc нет — пропускаем; watchdog запустит ensure_rules.sh.
+	// tc flow filter - needs HTB qdisc, which is set by ensure_rules.sh.
+	// If qdisc is missing, skip; watchdog will run ensure_rules.sh.
 	if !flowOk && iface != "" {
 		_, qOut, _ := shell.Run(fmt.Sprintf("tc qdisc show dev %s 2>/dev/null", iface), 5*time.Second)
 		if strings.Contains(qOut, "qdisc htb 1:") {
@@ -141,8 +140,8 @@ func (m *Manager) ensureBackend() error {
 	return nil
 }
 
-// isMissingErr — nft / tc возвращают это сообщение когда таблица/map/класс
-// отсутствует. Триггер для runtime self-heal.
+// isMissingErr - nft/tc return this when table/map/class is missing.
+// Trigger for runtime self-heal.
 func isMissingErr(stderr string) bool {
 	s := strings.ToLower(stderr)
 	return strings.Contains(s, "no such file or directory") ||
@@ -218,21 +217,21 @@ func (m *Manager) allocateMark() (int, error) {
 
 func (m *Manager) releaseMark(mark int) { delete(m.used, mark) }
 
-// applyTC применяет tc/(nft|iptables) правила — атомарно по best-effort.
+// applyTC applies tc/(nft|iptables) rules - atomically best-effort.
 func (m *Manager) applyTC(ip string, mbps float64, mark int) error {
 	iface := shell.DefaultIface()
 	if iface == "" {
 		return fmt.Errorf("no default interface")
 	}
 
-	// PREROUTING: проставить ct mark.
+	// PREROUTING: set ct mark.
 	if m.useNft {
-		// idempotent: nft при дубликате возвращает rc=1 + stderr "File exists".
-		// БЕЗ 2>&1 — иначе stderr перенаправится в stdout и isExistsErr не сработает.
+		// idempotent: nft on duplicate returns rc=1 + stderr "File exists".
+		// NO 2>&1 - otherwise stderr is redirected to stdout and isExistsErr won't work.
 		cmd := fmt.Sprintf("nft add element ip warp_shaper ip2mark '{ %s : 0x%x }'", ip, mark)
 		rc, _, err := shell.Run(cmd, 5*time.Second)
-		// Runtime self-heal: таблица могла исчезнуть (ребут без сохранения,
-		// `nft flush ruleset`, и т.п.) — создаём её inline и повторяем.
+		// Runtime self-heal: table might have disappeared (reboot without save,
+		// nft flush ruleset, etc.) - recreate it inline and retry.
 		if rc != 0 && !isExistsErr(err) && isMissingErr(err) {
 			if healErr := m.ensureBackend(); healErr == nil {
 				rc, _, err = shell.Run(cmd, 5*time.Second)
@@ -257,7 +256,7 @@ func (m *Manager) applyTC(ip string, mbps float64, mark int) error {
 		}
 	}
 
-	// HTB-класс per IP — нужен в обоих backend'ах для индивидуальной ставки.
+	// HTB-class per IP - needed in both backends for individual rate.
 	rc, _, err := shell.Run(
 		fmt.Sprintf("tc class add dev %s parent 1: classid 1:%d htb rate %.2fmbit ceil %.2fmbit burst 16k 2>&1", iface, mark, mbps, mbps),
 		5*time.Second,
@@ -266,9 +265,9 @@ func (m *Manager) applyTC(ip string, mbps float64, mark int) error {
 		return fmt.Errorf("tc class failed: %s", err)
 	}
 
-	// tc-фильтр: в nft-режиме один root flow filter в ensure_rules.sh маршрутизирует
-	// по nfmark в class 1:M за O(1) — per-IP fw filter не нужен. В iptables-режиме
-	// нужны per-IP fw filter'ы (старый дизайн).
+	// tc-filter: in nft-mode one root flow filter in ensure_rules.sh routes
+	// by nfmark to class 1:M in O(1) - per-IP fw filter not needed. In iptables-mode
+	// per-IP fw filters are needed (legacy design).
 	if !m.useNft {
 		rc, _, err := shell.Run(
 			fmt.Sprintf("tc filter add dev %s protocol ip parent 1:0 prio 1 handle %d fw flowid 1:%d 2>&1", iface, mark, mark),
@@ -279,9 +278,9 @@ func (m *Manager) applyTC(ip string, mbps float64, mark int) error {
 		}
 	}
 
-	// Пометить уже существующие conntrack-флоу с этим src — netlink.
-	// maxAge=5s переиспользует snapshot от sharedlimit.reconcile → batch applyTC
-	// (RestoreAll, добавление N новых IP) делает 1 Dump, а не N.
+	// Mark already existing conntrack-flows with this src - netlink.
+	// maxAge=5s reuses snapshot from sharedlimit.reconcile -> batch applyTC
+	// (RestoreAll, adding N new IPs) does 1 Dump, not N.
 	if err := m.ct.MarkBySrcUDP(ip, uint32(mark)); err != nil {
 		log.Printf("ratelimit: mark existing flows for %s: %v", ip, err)
 	}
@@ -308,8 +307,8 @@ func (m *Manager) removeTC(ip string, mark int) {
 	shell.Run(
 		fmt.Sprintf("tc class del dev %s classid 1:%d 2>/dev/null", iface, mark),
 		5*time.Second)
-	// Сбросить mark на текущих conntrack-флоу — netlink.
-	// maxAge=5s — тот же snapshot, см. applyTC.
+	// Reset mark on current conntrack-flows - netlink.
+	// maxAge=5s - same snapshot, see applyTC.
 	if err := m.ct.MarkBySrcUDP(ip, 0); err != nil {
 		log.Printf("ratelimit: reset mark for %s: %v", ip, err)
 	}
@@ -320,7 +319,7 @@ func isExistsErr(stderr string) bool {
 	return strings.Contains(s, "exists") || strings.Contains(s, "file exists")
 }
 
-// Set — создать или обновить лимит. Атомарность: при обновлении сохраняем mark.
+// Set creates or updates a limit. Atomicity: on update preserve mark.
 func (m *Manager) Set(ip string, mbps float64, expiresAt string, clientID *int64) (Limit, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -359,7 +358,7 @@ func (m *Manager) Set(ip string, mbps float64, expiresAt string, clientID *int64
 	return out, nil
 }
 
-// SetItem — один элемент для batch-применения.
+// SetItem - single item for batch application.
 type SetItem struct {
 	IP        string
 	Mbps      float64
@@ -367,17 +366,17 @@ type SetItem struct {
 	ClientID  *int64
 }
 
-// SetBatch применяет N лимитов за 2 shell-вызова (nft и tc -batch) + 1 conntrack-Dump.
-// Снимает burst-CPU при RestoreAll (200+ IP) и sharedlimit.reconcile с большим числом
-// новых клиентов. В iptables-режиме откатывается на пер-IP Set (сохраняет совместимость).
+// SetBatch applies N limits in 2 shell calls (nft and tc -batch) + 1 conntrack Dump.
+// Removes CPU burst on RestoreAll (200+ IPs) and sharedlimit.reconcile.
+// In iptables mode, falls back to per-IP Set (preserves compatibility).
 //
-// Возвращает примененные лимиты и map ip→error для упавших.
+// Returns applied limits and map ip->error for failed ones.
 func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 	if len(items) == 0 {
 		return nil, nil
 	}
 
-	// В iptables-режиме нет batch-семантики, fallback на per-IP.
+	// No batch semantics in iptables-mode, fallback to per-IP.
 	if !m.useNft {
 		applied := make([]Limit, 0, len(items))
 		errs := make(map[string]error)
@@ -398,7 +397,7 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 	}
 
 	m.mu.Lock()
-	// 1. Аллоцировать mark'и для новых IP, переиспользовать для существующих.
+	// 1. Allocate marks for new IPs, reuse for existing ones.
 	type plan struct {
 		item  SetItem
 		mark  int
@@ -444,11 +443,11 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 	}
 	m.mu.Unlock()
 
-	// 2. nft batch: add element только для новых IP. mark существующего IP не
-	// меняется → его элемент в map уже корректен. delete element в одной
-	// атомарной nft-транзакции с add недопустим: для нового IP delete
-	// отсутствующего элемента возвращает "No such file or directory" и
-	// откатывает всю транзакцию вместе с add → map остаётся пустой.
+	// 2. nft batch: add element only for new IPs. mark of existing IP doesn't
+	// change -> its element in map is already correct. delete element in one
+	// atomic nft-transaction with add is not allowed: for a new IP delete
+	// of missing element returns "No such file" and
+	// rolls back the whole transaction with add -> map remains empty.
 	var nftBuf, tcBuf strings.Builder
 	for _, pl := range plans {
 		if pl.isNew {
@@ -458,7 +457,7 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 			iface, pl.mark, pl.item.Mbps, pl.item.Mbps)
 	}
 
-	// 3. Применить nft batch одним вызовом.
+	// 3. Apply nft batch in one call.
 	if nftBuf.Len() > 0 {
 		rc, _, errOut := shell.RunStdin("nft -f -", nftBuf.String(), 30*time.Second)
 		if rc != 0 && isMissingErr(errOut) {
@@ -471,7 +470,7 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 		}
 	}
 
-	// 4. tc batch: class replace создаёт класс или меняет rate без ошибки.
+	// 4. tc batch: class replace creates class or changes rate without error.
 	if tcBuf.Len() > 0 {
 		rc, _, errOut := shell.RunStdin("tc -batch -", tcBuf.String(), 30*time.Second)
 		if rc != 0 && !isExistsErr(errOut) {
@@ -479,7 +478,7 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 		}
 	}
 
-	// 5. Один conntrack Dump → обновить mark на существующих flow'ах для всех new mark'ов.
+	// 5. One conntrack Dump -> update mark on existing flows for all new marks.
 	srcToMark := make(map[string]uint32, len(plans))
 	for _, pl := range plans {
 		srcToMark[pl.item.IP] = uint32(pl.mark)
@@ -488,7 +487,7 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 		log.Printf("ratelimit.SetBatch: conntrack mark update: %v", err)
 	}
 
-	// 6. Записать в state + save один раз.
+	// 6. Write to state + save once.
 	now := time.Now().In(time.FixedZone("MSK", 3*3600)).Format(time.RFC3339)
 	m.mu.Lock()
 	applied := make([]Limit, 0, len(plans))
@@ -529,10 +528,10 @@ func (m *Manager) Remove(ip string) (Limit, bool) {
 	return out, true
 }
 
-// RemoveBatch снимает лимиты для N IP одним nft + одним tc batch'ем.
-// Симметрично SetBatch: снимает burst при idle-cleanup в sharedlimit.reconcile.
-// В iptables-режиме — fallback на per-IP Remove.
-// Возвращает список реально снятых IP (тех, что были в state).
+// RemoveBatch removes limits for N IPs in one nft + one tc batch.
+// Symmetrical to SetBatch: removes burst during idle-cleanup in sharedlimit.reconcile.
+// In iptables-mode - fallback to per-IP Remove.
+// Returns list of actually removed IPs (those that were in state).
 func (m *Manager) RemoveBatch(ips []string) []Limit {
 	if len(ips) == 0 {
 		return nil
@@ -577,17 +576,17 @@ func (m *Manager) RemoveBatch(ips []string) []Limit {
 	for _, pl := range plans {
 		fmt.Fprintf(&nftBuf, "delete element ip warp_shaper ip2mark { %s }\n", pl.ip)
 		fmt.Fprintf(&tcBuf, "class del dev %s classid 1:%d\n", iface, pl.mark)
-		srcToMark[pl.ip] = 0 // сбросить mark на conntrack-флоу
+		srcToMark[pl.ip] = 0 // reset mark on conntrack flow
 	}
 
 	if nftBuf.Len() > 0 {
-		// Дубликат-delete вернёт "No such file or directory" — игнорируем.
+		// Duplicate-delete returns "No such file" - ignore.
 		shell.RunStdin("nft -f -", nftBuf.String(), 30*time.Second)
 	}
 	if tcBuf.Len() > 0 {
 		shell.RunStdin("tc -batch -", tcBuf.String(), 30*time.Second)
 	}
-	// Сбросить mark существующих conntrack-flow'ов одним Dump'ом.
+	// Reset mark of existing conntrack flows with one Dump.
 	if _, err := m.ct.MarkBySrcsUDP(srcToMark); err != nil {
 		log.Printf("ratelimit.RemoveBatch: conntrack reset mark: %v", err)
 	}
@@ -632,14 +631,14 @@ func (m *Manager) Count() int {
 	return len(m.m)
 }
 
-// RestoreAll переприменяет все лимиты к tc/(nft|iptables). Вызывается на старте
-// агента и watchdog'ом.
+// RestoreAll reapplies all limits to tc/(nft|iptables). Called on agent start
+// and by watchdog.
 //
-// В nft-режиме пересевает map ip2mark целиком (flush + add всех элементов одной
-// транзакцией) и пересоздаёт HTB-классы через tc class replace. SetBatch для
-// этого не годится: все IP из state — "существующие", а add element там бежит
-// только для новых, поэтому пустую map он бы не заполнил.
-// В iptables-режиме — пер-IP applyTC (legacy fallback).
+// In nft-mode, re-seeds map ip2mark entirely (flush + add all elements in one
+// transaction) and recreates HTB classes via tc class replace. SetBatch
+// isn't suitable: all IPs from state are "existing", and add element there runs
+// only for new ones, so it wouldn't fill an empty map.
+// In iptables-mode - per-IP applyTC (legacy fallback).
 func (m *Manager) RestoreAll() (applied []string, failed []string) {
 	if m.useNft {
 		iface := shell.DefaultIface()
@@ -702,7 +701,7 @@ func (m *Manager) RestoreAll() (applied []string, failed []string) {
 		return
 	}
 
-	// iptables-режим — legacy путь, не оптимизирован.
+	// iptables-mode - legacy path, unoptimized.
 	m.mu.Lock()
 	limits := make([]struct {
 		IP   string
@@ -730,11 +729,11 @@ func (m *Manager) RestoreAll() (applied []string, failed []string) {
 
 var classRe = regexp.MustCompile(`class htb 1:(\d+)`)
 
-// nftIPRe — IPv4 в выводе `nft list map ip warp_shaper ip2mark`.
-// Формат: `elements = { 1.2.3.4 : 0x0000000a, ... }` (опционально с timeouts).
+// nftIPRe - IPv4 in `nft list map ip warp_shaper ip2mark` output.
+// Format: `elements = { 1.2.3.4 : 0x0000000a, ... }` (optional with timeouts).
 var nftIPRe = regexp.MustCompile(`(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s*:`)
 
-// Verify возвращает список IP, для которых отсутствует tc-класс или nft-элемент.
+// Verify returns a list of IPs for which a tc-class or nft-element is missing.
 func (m *Manager) Verify() []string {
 	iface := shell.DefaultIface()
 	if iface == "" {
@@ -760,9 +759,9 @@ func (m *Manager) Verify() []string {
 		}
 	}
 
-	// Для nft-backend проверяем что IP есть в map @ip2mark. Если таблицы нет
-	// (ensure_rules.sh не отработал) — Verify заставит RestoreAll переапплаить,
-	// что попытается воссоздать элементы (ошибка nft пробросится в applyTC).
+	// For nft-backend check that IP is in map @ip2mark. If table is missing
+	// (ensure_rules.sh did not run) - Verify forces RestoreAll to reapply,
+	// which will attempt to recreate elements (nft error is passed to applyTC).
 	nftIPs := map[string]bool{}
 	if m.useNft {
 		rc, nftOut, _ := shell.Run("nft list map ip warp_shaper ip2mark 2>/dev/null", 5*time.Second)
