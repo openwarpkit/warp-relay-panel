@@ -534,19 +534,3 @@ func (c *Client) StatsUDP() (UDPStats, error) {
 	}
 	return out, nil
 }
-
-func (c *Client) PingDeadline(d time.Duration) error {
-	conn, err := conntrack.Dial(nil)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	done := make(chan error, 1)
-	go func() { _, e := conn.StatsGlobal(); done <- e }()
-	select {
-	case e := <-done:
-		return e
-	case <-time.After(d):
-		return fmt.Errorf("conntrack ping timeout")
-	}
-}

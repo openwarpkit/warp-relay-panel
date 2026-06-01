@@ -339,9 +339,3 @@ func (m *Monitor) Reset() string {
 	log.Println("Traffic data manually reset")
 	return cp.Month
 }
-
-func (m *Monitor) Month() string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.state.Month
-}
