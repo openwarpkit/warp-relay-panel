@@ -131,6 +131,12 @@ func (s *Server) handleWhitelistSync(w http.ResponseWriter, r *http.Request) {
 	if req.RateLimits != nil {
 		totalRL = len(*req.RateLimits)
 	}
+
+	if !s.SyncInProgress.CompareAndSwap(false, true) {
+		writeError(w, http.StatusTooManyRequests, "Sync is already in progress")
+		return
+	}
+
 	go s.doSync(req.Clients, req.RateLimits)
 	writeJSON(w, 200, map[string]interface{}{
 		"accepted":             true,
@@ -146,6 +152,13 @@ func (s *Server) handleWhitelistSync(w http.ResponseWriter, r *http.Request) {
 // or manual curl) -> don't touch shaping (to not accidentally remove limits).
 // rlEntries != nil - even if empty -> diff-replace (full synchronization).
 func (s *Server) doSync(entries []syncEntry, rlEntries *[]syncRateLimitEntry) {
+	defer s.SyncInProgress.Store(false)
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("CRITICAL: Panic in doSync recovered: %v", r)
+		}
+	}()
+
 	startedAt := time.Now().In(time.FixedZone("MSK", 3*3600)).Format(time.RFC3339)
 	statusInit := map[string]interface{}{
 		"ok": nil, "in_progress": true,

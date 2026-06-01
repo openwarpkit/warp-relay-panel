@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/pprof"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -31,6 +32,7 @@ type Server struct {
 	Version        string
 	StartTime      time.Time
 	PersistTrigger func()
+	SyncInProgress atomic.Bool
 }
 
 func (s *Server) Routes() http.Handler {
