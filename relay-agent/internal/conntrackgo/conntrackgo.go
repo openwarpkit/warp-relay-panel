@@ -2,6 +2,7 @@ package conntrackgo
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -16,7 +17,7 @@ import (
 )
 
 const protoUDP = 17
-const numShards = 256
+const NumShards = 256
 
 // UDPFlow is the minimal set for traffic accounting.
 type UDPFlow struct {
@@ -59,7 +60,7 @@ type flowShard struct {
 }
 
 type Client struct {
-	shards [numShards]*flowShard
+	shards [NumShards]*flowShard
 
 	obsMu     sync.RWMutex
 	observers []chan<- conntrack.Event
@@ -73,7 +74,7 @@ func New() *Client {
 	c := &Client{
 		stopListen: make(chan struct{}),
 	}
-	for i := 0; i < numShards; i++ {
+	for i := 0; i < NumShards; i++ {
 		c.shards[i] = &flowShard{
 			flows: make(map[FlowKey]conntrack.Flow, 64),
 		}
@@ -94,7 +95,7 @@ func (c *Client) RegisterObserver(ch chan<- conntrack.Event) {
 }
 
 func (c *Client) getShard(k FlowKey) *flowShard {
-	return c.shards[k.Hash()%numShards]
+	return c.shards[k.Hash()%NumShards]
 }
 
 func (c *Client) enableAccounting() {
@@ -143,9 +144,9 @@ func (c *Client) listenWorker() {
 		// Initial sync
 		flows, err := conn.Dump(nil)
 		if err == nil {
-			for i := 0; i < numShards; i++ {
+			for i := 0; i < NumShards; i++ {
 				c.shards[i].mu.Lock()
-				c.shards[i].flows = make(map[FlowKey]conntrack.Flow, len(flows)/numShards+1)
+				c.shards[i].flows = make(map[FlowKey]conntrack.Flow, len(flows)/NumShards+1)
 				c.shards[i].mu.Unlock()
 			}
 			for _, f := range flows {
@@ -268,15 +269,15 @@ func (c *Client) reconcileOnce() {
 		}
 	}
 
-	for i := 0; i < numShards; i++ {
+	for i := 0; i < NumShards; i++ {
 		shard := c.shards[i]
 		shard.mu.Lock()
 		for k := range shard.flows {
-			if kf, ok := activeKernel[k]; ok {
+			if kFlow, ok := activeKernel[k]; ok {
 				flow := shard.flows[k]
-				flow.CountersOrig = kf.CountersOrig
-				flow.CountersReply = kf.CountersReply
-				flow.Status = kf.Status
+				flow.CountersOrig = kFlow.CountersOrig
+				flow.CountersReply = kFlow.CountersReply
+				flow.Status = kFlow.Status
 				shard.flows[k] = flow
 			} else {
 				delete(shard.flows, k)
@@ -286,8 +287,10 @@ func (c *Client) reconcileOnce() {
 	}
 }
 
+const CloudflarePrefix = "162.159."
+
 func isFilteredIP(src string) bool {
-	if strings.HasPrefix(src, "162.159.") {
+	if strings.HasPrefix(src, CloudflarePrefix) {
 		return true
 	}
 	ip := net.ParseIP(src)
@@ -299,7 +302,7 @@ func isFilteredIP(src string) bool {
 
 func (c *Client) SnapshotUDP() ([]UDPFlow, error) {
 	var out []UDPFlow
-	for i := 0; i < numShards; i++ {
+	for i := 0; i < NumShards; i++ {
 		shard := c.shards[i]
 		shard.mu.RLock()
 		for _, f := range shard.flows {
@@ -330,7 +333,7 @@ func (c *Client) SnapshotUDP() ([]UDPFlow, error) {
 
 func (c *Client) AssuredUDPSrcs() (map[string]struct{}, error) {
 	out := make(map[string]struct{}, 256)
-	for i := 0; i < numShards; i++ {
+	for i := 0; i < NumShards; i++ {
 		shard := c.shards[i]
 		shard.mu.RLock()
 		for _, f := range shard.flows {
@@ -360,7 +363,7 @@ func (c *Client) DeleteBySrcUDP(srcIP string) error {
 	}()
 
 	var toDelete []conntrack.Flow
-	for i := 0; i < numShards; i++ {
+	for i := 0; i < NumShards; i++ {
 		shard := c.shards[i]
 		shard.mu.RLock()
 		for _, f := range shard.flows {
@@ -396,7 +399,7 @@ func (c *Client) MarkBySrcsUDP(srcToMark map[string]uint32) (int, error) {
 	}()
 
 	var toUpdate []conntrack.Flow
-	for i := 0; i < numShards; i++ {
+	for i := 0; i < NumShards; i++ {
 		shard := c.shards[i]
 		shard.mu.RLock()
 		for _, f := range shard.flows {
@@ -436,7 +439,7 @@ func (c *Client) MarkBySrcUDP(srcIP string, mark uint32) error {
 	}()
 
 	var toUpdate []conntrack.Flow
-	for i := 0; i < numShards; i++ {
+	for i := 0; i < NumShards; i++ {
 		shard := c.shards[i]
 		shard.mu.RLock()
 		for _, f := range shard.flows {
@@ -461,28 +464,9 @@ func (c *Client) MarkBySrcUDP(srcIP string, mark uint32) error {
 }
 
 func errIsENOENT(err error) bool {
-	if err == nil {
-		return false
-	}
 	var errno syscall.Errno
-	if asErrno(err, &errno) {
+	if errors.As(err, &errno) {
 		return errno == syscall.ENOENT
-	}
-	return false
-}
-
-func asErrno(err error, target *syscall.Errno) bool {
-	for err != nil {
-		if e, ok := err.(syscall.Errno); ok {
-			*target = e
-			return true
-		}
-		type unwrapper interface{ Unwrap() error }
-		u, ok := err.(unwrapper)
-		if !ok {
-			return false
-		}
-		err = u.Unwrap()
 	}
 	return false
 }
@@ -497,7 +481,7 @@ func (c *Client) ActiveUDPClients(dstIP string, ports map[uint16]bool) (map[stri
 		targetDst = v4
 	}
 
-	for i := 0; i < numShards; i++ {
+	for i := 0; i < NumShards; i++ {
 		shard := c.shards[i]
 		shard.mu.RLock()
 		for _, f := range shard.flows {
@@ -530,7 +514,7 @@ type UDPStats struct {
 
 func (c *Client) StatsUDP() (UDPStats, error) {
 	out := UDPStats{TopPorts: make(map[uint16]int, 64)}
-	for i := 0; i < numShards; i++ {
+	for i := 0; i < NumShards; i++ {
 		shard := c.shards[i]
 		shard.mu.RLock()
 		for _, f := range shard.flows {
