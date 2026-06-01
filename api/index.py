@@ -48,7 +48,8 @@ app = FastAPI(title="WARP Relay Panel", version=API_VERSION)
 
 
 def require_api_key(x_api_key: str = Header(...)):
-    if x_api_key != os.environ.get("API_KEY", ""):
+    expected_key = os.environ.get("API_KEY", "")
+    if not expected_key or x_api_key != expected_key:
         raise HTTPException(403, "Invalid API key")
 
 
@@ -460,6 +461,7 @@ class RelayCreate(BaseModel):
     host: str
     agent_port: int = 7580
     agent_secret: str = ""
+    agent_type: str = "full"
 
 class RelayToggle(BaseModel):
     active: bool
@@ -868,6 +870,7 @@ async def api_add_relay(data: RelayCreate):
     return add_relay(
         name=data.name, host=data.host,
         agent_port=data.agent_port, agent_secret=data.agent_secret,
+        agent_type=data.agent_type,
     )
 
 @app.get("/api/relays", dependencies=[Depends(require_api_key)])

@@ -13,6 +13,10 @@ logger = logging.getLogger("relay_client")
 AGENT_TIMEOUT = 10.0
 SYNC_TIMEOUT = 30.0  # For /whitelist/sync (large payload)
 
+_http_client = httpx.AsyncClient(
+    limits=httpx.Limits(max_keepalive_connections=20, max_connections=100)
+)
+
 
 def _validate_ipv4(ip: str) -> str:
     addr = ipaddress.ip_address(ip)
@@ -37,18 +41,18 @@ async def _agent_request(relay: dict, method: str, path: str,
                          timeout: float = AGENT_TIMEOUT) -> tuple[bool, dict]:
     url = f"{_agent_url(relay)}{path}"
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.request(
-                method, url,
-                headers=_agent_headers(relay),
-                json=json_data,
-            )
-            data = resp.json()
-            if resp.status_code >= 400:
-                logger.warning("[%s] %s %s → %d: %s",
-                               relay["name"], method, path, resp.status_code, data)
-                return False, data
-            return True, data
+        resp = await _http_client.request(
+            method, url,
+            headers=_agent_headers(relay),
+            json=json_data,
+            timeout=timeout,
+        )
+        data = resp.json()
+        if resp.status_code >= 400:
+            logger.warning("[%s] %s %s → %d: %s",
+                           relay["name"], method, path, resp.status_code, data)
+            return False, data
+        return True, data
     except httpx.TimeoutException:
         msg = f"[{relay['name']}] timeout: {method} {path}"
         logger.error(msg)

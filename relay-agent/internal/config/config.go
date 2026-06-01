@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"log"
 	"net"
 	"os"
 	"strconv"
@@ -62,7 +63,7 @@ type Config struct {
 }
 
 func Load() Config {
-	return Config{
+	cfg := Config{
 		AgentSecret:           env("AGENT_SECRET", "change-me"),
 		AgentPort:             envInt("AGENT_PORT", 7580),
 		IpsetName:             env("IPSET_NAME", "warp_whitelist"),
@@ -87,6 +88,10 @@ func Load() Config {
 		WarpDstHostname:    env("WARP_DST_HOSTNAME", "engage.cloudflareclient.com"),
 		WarpPorts:          parsePorts(env("WARP_PORTS", "")),
 	}
+	if cfg.AgentSecret == "change-me" {
+		log.Println("WARNING: Using default AGENT_SECRET ('change-me'). This is insecure!")
+	}
+	return cfg
 }
 
 // DefaultWarpPorts - list of UDP ports for WARP, same as setup_relay.sh.

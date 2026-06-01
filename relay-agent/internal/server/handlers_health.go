@@ -35,12 +35,13 @@ func (s *Server) saveSyncStatus(status map[string]interface{}) {
 	if err != nil {
 		return
 	}
-	defer f.Close()
 
 	if _, err := f.Write(data); err != nil {
+		f.Close()
 		return
 	}
 	if err := f.Sync(); err != nil {
+		f.Close()
 		return
 	}
 	if err := f.Close(); err != nil {

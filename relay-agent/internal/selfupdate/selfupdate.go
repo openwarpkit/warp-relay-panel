@@ -86,15 +86,22 @@ func (u *Updater) saveStatus(s Status) {
 		log.Printf("selfupdate: saveStatus error (create tmp): %v", err)
 		return
 	}
-	defer f.Close()
+
 	if _, err := f.Write(data); err != nil {
+		f.Close()
 		os.Remove(tmpPath)
 		log.Printf("selfupdate: saveStatus error (write tmp): %v", err)
 		return
 	}
 	if err := f.Sync(); err != nil {
+		f.Close()
 		os.Remove(tmpPath)
 		log.Printf("selfupdate: saveStatus error (sync tmp): %v", err)
+		return
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmpPath)
+		log.Printf("selfupdate: saveStatus error (close tmp): %v", err)
 		return
 	}
 	if err := os.Rename(tmpPath, u.StatusPath); err != nil {

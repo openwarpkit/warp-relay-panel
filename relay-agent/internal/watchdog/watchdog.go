@@ -203,13 +203,14 @@ func (w *Watchdog) saveStatus(s Status) {
 		log.Printf("watchdog: create tmp file error: %v", err)
 		return
 	}
-	defer f.Close()
 
 	if _, err := f.Write(data); err != nil {
+		f.Close()
 		log.Printf("watchdog: write tmp file error: %v", err)
 		return
 	}
 	if err := f.Sync(); err != nil {
+		f.Close()
 		log.Printf("watchdog: sync tmp file error: %v", err)
 		return
 	}
