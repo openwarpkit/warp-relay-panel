@@ -297,6 +297,40 @@ ufw deny 7580
 
 Эндпоинты `/whitelist/*` и `/rate-limit*` на min-агенте возвращают `200 OK stub` (`{agent_type:"min", skipped:true}`) — панель их сама не дёргает (фильтр по `agent_type='full'`), но stub защищает от ошибок.
 
+## Тестирование (Fuzzing, Benchmarks, API)
+
+В проекте настроено несколько уровней автоматизированного тестирования для обеспечения производительности и безопасности.
+
+### Go-агент (Unit, Fuzzing, Benchmarks)
+
+Тесты агента лежат в директории `relay-agent`.
+
+```bash
+cd relay-agent
+
+# Запуск обычных unit-тестов
+make test
+
+# Запуск Fuzz-тестов (проверка устойчивости к повреждению файлов состояния на диске)
+# Будут запущены FuzzRefcountLoad, FuzzRatelimitLoad и FuzzTrafficLoad
+# Можно менять FUZZTIME (по умолчанию 10s)
+make test-fuzz FUZZTIME=5s
+
+# Запуск Benchmarks (проверка производительности и отсутствия аллокаций в hot paths)
+make test-bench
+```
+
+### Панель FastAPI (Интеграционные тесты)
+
+"Зародыш" интеграционных тестов для API-панели использует `TestClient` и mock-заглушки базы данных (без необходимости поднимать реальный PostgreSQL).
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt pytest respx pytest-asyncio
+pytest api/tests/
+```
+
 ---
 
 ## Интеграция с Telegram-ботом

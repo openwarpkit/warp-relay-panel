@@ -297,6 +297,40 @@ Same `/health`, `/stats`, `/traffic*`, `/update` + specific ones:
 
 Endpoints `/whitelist/*` and `/rate-limit*` on the min-agent return `200 OK stub` (`{agent_type:"min", skipped:true}`) — the panel doesn't call them itself (filter by `agent_type='full'`), but the stub protects against errors.
 
+## Testing (Fuzzing, Benchmarks, API)
+
+The project includes several levels of automated testing to ensure performance and security.
+
+### Go-agent (Unit, Fuzzing, Benchmarks)
+
+Agent tests are located in the `relay-agent` directory.
+
+```bash
+cd relay-agent
+
+# Run standard unit tests
+make test
+
+# Run Fuzz tests (validating robustness against corrupted state files on disk)
+# Runs FuzzRefcountLoad, FuzzRatelimitLoad, and FuzzTrafficLoad
+# You can change FUZZTIME (default is 10s)
+make test-fuzz FUZZTIME=5s
+
+# Run Benchmarks (checking high performance and zero-allocations in hot paths)
+make test-bench
+```
+
+### FastAPI Panel (Integration Tests)
+
+The foundation of integration tests for the API panel uses `TestClient` and mock database stubs (no need to spin up a real PostgreSQL instance).
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt pytest respx pytest-asyncio
+pytest api/tests/
+```
+
 ---
 
 ## Telegram Bot Integration
