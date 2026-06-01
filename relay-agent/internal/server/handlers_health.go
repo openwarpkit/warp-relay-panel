@@ -1,11 +1,12 @@
 package server
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -30,7 +31,6 @@ func (s *Server) loadStatusFile(path string) interface{} {
 func (s *Server) saveSyncStatus(status map[string]interface{}) {
 	path := s.Cfg.DataDir + "/sync_status.json"
 	_ = os.MkdirAll(s.Cfg.DataDir, 0o750)
-	data, _ := json.MarshalIndent(status, "", "  ")
 	tmpPath := path + ".tmp"
 	// #nosec G304 -- Tmp file path is constructed from config
 	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
@@ -38,7 +38,9 @@ func (s *Server) saveSyncStatus(status map[string]interface{}) {
 		return
 	}
 
-	if _, err := f.Write(data); err != nil {
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(status); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmpPath)
 		return
@@ -147,7 +149,7 @@ func (s *Server) onlineClients() map[string]interface{} {
 			onlineIPs = append(onlineIPs, ip)
 		}
 	}
-	sort.Strings(onlineIPs)
+	slices.Sort(onlineIPs)
 	clients := []map[string]interface{}{}
 	for _, ip := range onlineIPs {
 		clients = append(clients, map[string]interface{}{
@@ -182,7 +184,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	for p, c := range stats.TopPorts {
 		pc = append(pc, portCount{p, c})
 	}
-	sort.Slice(pc, func(i, j int) bool { return pc[i].Count > pc[j].Count })
+	slices.SortFunc(pc, func(a, b portCount) int { return cmp.Compare(b.Count, a.Count) })
 	if len(pc) > 10 {
 		pc = pc[:10]
 	}

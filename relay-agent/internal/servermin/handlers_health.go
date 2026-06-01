@@ -1,11 +1,12 @@
 package servermin
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -123,7 +124,7 @@ func (s *Server) onlineClients() map[string]interface{} {
 	for ip := range assured {
 		online = append(online, ip)
 	}
-	sort.Strings(online)
+	slices.Sort(online)
 	clients := make([]map[string]interface{}, 0, len(online))
 	for _, ip := range online {
 		clients = append(clients, map[string]interface{}{"ip": ip})
@@ -153,7 +154,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	for p, c := range stats.TopPorts {
 		pc = append(pc, portCount{p, c})
 	}
-	sort.Slice(pc, func(i, j int) bool { return pc[i].Count > pc[j].Count })
+	slices.SortFunc(pc, func(a, b portCount) int { return cmp.Compare(b.Count, a.Count) })
 	if len(pc) > 10 {
 		pc = pc[:10]
 	}

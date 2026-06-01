@@ -196,7 +196,6 @@ func (w *Watchdog) saveStatus(s Status) {
 		log.Printf("watchdog: mkdir error: %v", err)
 		return
 	}
-	data, _ := json.MarshalIndent(s, "", "  ")
 
 	tmpPath := w.StatusFilePath + ".tmp"
 	// #nosec G304 -- Tmp file path is constructed from config
@@ -206,7 +205,9 @@ func (w *Watchdog) saveStatus(s Status) {
 		return
 	}
 
-	if _, err := f.Write(data); err != nil {
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(s); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmpPath)
 		log.Printf("watchdog: write tmp file error: %v", err)

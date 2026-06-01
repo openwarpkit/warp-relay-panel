@@ -90,7 +90,6 @@ func (m *Monitor) save(state fileFmt) {
 		log.Printf("traffic: mkdir error: %v", err)
 		return
 	}
-	data, _ := json.MarshalIndent(state, "", "  ")
 	tmpPath := m.path + ".tmp"
 	// #nosec G304 -- Tmp file path is constructed from config
 	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
@@ -99,7 +98,9 @@ func (m *Monitor) save(state fileFmt) {
 		return
 	}
 
-	if _, err := f.Write(data); err != nil {
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(state); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmpPath)
 		log.Printf("traffic: save error (write tmp): %v", err)

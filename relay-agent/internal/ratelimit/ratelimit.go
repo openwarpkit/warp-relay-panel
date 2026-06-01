@@ -239,7 +239,6 @@ func (m *Manager) writeToDisk(out map[string]Limit) {
 		log.Printf("ratelimit: mkdir error: %v", err)
 		return
 	}
-	data, _ := json.MarshalIndent(out, "", "  ")
 
 	tmpPath := m.path + ".tmp"
 	// #nosec G304 -- Tmp file path is constructed from config
@@ -249,7 +248,9 @@ func (m *Manager) writeToDisk(out map[string]Limit) {
 		return
 	}
 
-	if _, err := f.Write(data); err != nil {
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(out); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmpPath)
 		log.Printf("ratelimit: write tmp file error: %v", err)

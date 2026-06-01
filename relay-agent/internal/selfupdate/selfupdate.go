@@ -79,7 +79,6 @@ func (u *Updater) saveStatus(s Status) {
 		log.Printf("selfupdate: mkdir error: %v", err)
 		return
 	}
-	data, _ := json.MarshalIndent(s, "", "  ")
 	tmpPath := u.StatusPath + ".tmp"
 	// #nosec G304 -- Status file path is controlled by config
 	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
@@ -88,7 +87,9 @@ func (u *Updater) saveStatus(s Status) {
 		return
 	}
 
-	if _, err := f.Write(data); err != nil {
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(s); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmpPath)
 		log.Printf("selfupdate: saveStatus error (write tmp): %v", err)

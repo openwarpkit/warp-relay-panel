@@ -7,7 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 )
@@ -88,7 +88,7 @@ func (r *Map) saveWorker() {
 			for id := range set {
 				ids = append(ids, id)
 			}
-			sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+			slices.Sort(ids)
 			out[ip] = ids
 		}
 		r.dirty = false
@@ -109,7 +109,6 @@ func (r *Map) writeToDisk(out map[string][]int64) {
 		log.Printf("refcount: mkdir error: %v", err)
 		return
 	}
-	data, _ := json.MarshalIndent(out, "", "  ")
 
 	tmpPath := r.path + ".tmp"
 	// #nosec G304 -- Tmp file path is constructed from config
@@ -119,7 +118,9 @@ func (r *Map) writeToDisk(out map[string][]int64) {
 		return
 	}
 
-	if _, err := f.Write(data); err != nil {
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(out); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmpPath)
 		log.Printf("refcount: write tmp file error: %v", err)
@@ -158,7 +159,7 @@ func (r *Map) ForceSave() {
 		for id := range set {
 			ids = append(ids, id)
 		}
-		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+		slices.Sort(ids)
 		out[ip] = ids
 	}
 	r.dirty = false
@@ -245,7 +246,7 @@ func (r *Map) ClientsFor(ip string) []int64 {
 	for k := range set {
 		out = append(out, k)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	slices.Sort(out)
 	return out
 }
 
@@ -262,7 +263,7 @@ func (r *Map) All() map[string][]int64 {
 		for id := range set {
 			ids = append(ids, id)
 		}
-		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+		slices.Sort(ids)
 		out[ip] = ids
 	}
 	return out
@@ -278,6 +279,6 @@ func (r *Map) IPs() []string {
 			out = append(out, ip)
 		}
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
