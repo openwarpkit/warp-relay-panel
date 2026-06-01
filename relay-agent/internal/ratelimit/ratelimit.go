@@ -59,6 +59,8 @@ type Manager struct {
 	dirty    bool
 	notify   chan struct{}
 	stop     chan struct{}
+	wg       sync.WaitGroup
+	shellMu  sync.Mutex
 }
 
 func New(path string, markMin, markMax int, ct *conntrackgo.Client) *Manager {
@@ -74,6 +76,7 @@ func New(path string, markMin, markMax int, ct *conntrackgo.Client) *Manager {
 		stop:    make(chan struct{}),
 	}
 	mgr.load()
+	mgr.wg.Add(1)
 	go mgr.saveWorker()
 	// Startup-init: create nft warp_shaper + tc flow filter if missing.
 	// Protects against "binary updated but ExecStartPre ensure_rules.sh
@@ -182,6 +185,7 @@ func (m *Manager) triggerSave() {
 }
 
 func (m *Manager) saveWorker() {
+	defer m.wg.Done()
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -213,6 +217,7 @@ func (m *Manager) saveWorker() {
 // Close gracefully stops the background worker and forces a final save.
 func (m *Manager) Close() {
 	close(m.stop)
+	m.wg.Wait()
 	m.ForceSave()
 }
 
@@ -526,7 +531,31 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 			iface, pl.mark, pl.item.Mbps, pl.item.Mbps)
 	}
 
+	rollback := func() {
+		m.mu.Lock()
+		for _, pl := range plans {
+			if pl.isNew {
+				m.used[pl.mark] = false
+			}
+		}
+		m.mu.Unlock()
+		var rNftBuf, rTcBuf strings.Builder
+		for _, pl := range plans {
+			if pl.isNew {
+				fmt.Fprintf(&rNftBuf, "delete element ip warp_shaper ip2mark { %s }\n", pl.item.IP)
+			}
+			fmt.Fprintf(&rTcBuf, "class del dev %s classid 1:%d\n", iface, pl.mark)
+		}
+		if rTcBuf.Len() > 0 {
+			shell.RunStdin("tc -batch -", rTcBuf.String(), 10*time.Second)
+		}
+		if rNftBuf.Len() > 0 {
+			shell.RunStdin("nft -f -", rNftBuf.String(), 10*time.Second)
+		}
+	}
+
 	// 3. Apply nft batch in one call.
+	m.shellMu.Lock()
 	if nftBuf.Len() > 0 {
 		rc, _, errOut := shell.RunStdin("nft -f -", nftBuf.String(), 30*time.Second)
 		if rc != 0 && isMissingErr(errOut) {
@@ -536,6 +565,12 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 		}
 		if rc != 0 && !isExistsErr(errOut) && !isMissingErr(errOut) {
 			log.Printf("ratelimit.SetBatch: nft batch returned rc=%d: %s", rc, errOut)
+			rollback()
+			m.shellMu.Unlock()
+			for _, pl := range plans {
+				errs[pl.item.IP] = fmt.Errorf("nft batch failed: %s", errOut)
+			}
+			return nil, errs
 		}
 	}
 
@@ -544,8 +579,15 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 		rc, _, errOut := shell.RunStdin("tc -batch -", tcBuf.String(), 30*time.Second)
 		if rc != 0 && !isExistsErr(errOut) {
 			log.Printf("ratelimit.SetBatch: tc batch returned rc=%d: %s", rc, errOut)
+			rollback()
+			m.shellMu.Unlock()
+			for _, pl := range plans {
+				errs[pl.item.IP] = fmt.Errorf("tc batch failed: %s", errOut)
+			}
+			return nil, errs
 		}
 	}
+	m.shellMu.Unlock()
 
 	// 5. One conntrack Dump -> update mark on existing flows for all new marks.
 	srcToMark := make(map[string]uint32, len(plans))
@@ -625,6 +667,7 @@ func (m *Manager) RemoveBatch(ips []string) []Limit {
 	type p struct {
 		ip   string
 		mark int
+		l    Limit
 	}
 	plans := make([]p, 0, len(ips))
 	for _, ip := range ips {
@@ -632,9 +675,7 @@ func (m *Manager) RemoveBatch(ips []string) []Limit {
 		if !ok {
 			continue
 		}
-		plans = append(plans, p{ip, l.Mark})
-		delete(m.m, ip)
-		m.releaseMark(l.Mark)
+		plans = append(plans, p{ip, l.Mark, l})
 	}
 	m.mu.Unlock()
 	if len(plans) == 0 {
@@ -649,26 +690,45 @@ func (m *Manager) RemoveBatch(ips []string) []Limit {
 		srcToMark[pl.ip] = 0 // reset mark on conntrack flow
 	}
 
-	if nftBuf.Len() > 0 {
+	m.shellMu.Lock()
+	tcSuccess := true
+	if tcBuf.Len() > 0 {
+		rc, _, errOut := shell.RunStdin("tc -batch -", tcBuf.String(), 30*time.Second)
+		if rc != 0 && !isMissingErr(errOut) && !isExistsErr(errOut) {
+			tcSuccess = false
+			log.Printf("ratelimit.RemoveBatch: tc batch returned rc=%d: %s", rc, errOut)
+		}
+	}
+	if nftBuf.Len() > 0 && tcSuccess {
 		// Duplicate-delete returns "No such file" - ignore.
 		shell.RunStdin("nft -f -", nftBuf.String(), 30*time.Second)
 	}
-	if tcBuf.Len() > 0 {
-		shell.RunStdin("tc -batch -", tcBuf.String(), 30*time.Second)
-	}
-	// Reset mark of existing conntrack flows with one Dump.
-	if _, err := m.ct.MarkBySrcsUDP(srcToMark); err != nil {
-		log.Printf("ratelimit.RemoveBatch: conntrack reset mark: %v", err)
+	m.shellMu.Unlock()
+
+	if !tcSuccess {
+		return nil
 	}
 
+	// 2PC: delete from memory only after successful shell execution
+	m.mu.Lock()
 	removed := make([]Limit, 0, len(plans))
 	for _, pl := range plans {
-		removed = append(removed, Limit{IP: pl.ip, Mark: pl.mark})
+		if _, ok := m.m[pl.ip]; ok {
+			delete(m.m, pl.ip)
+			m.releaseMark(pl.mark)
+			removed = append(removed, pl.l)
+		}
 	}
-	m.mu.Lock()
 	m.triggerSave()
 	m.mu.Unlock()
-	log.Printf("Rate-limit batch removed: %d IPs (1 nft + 1 tc + 1 conntrack-dump)", len(removed))
+
+	// Reset mark of existing conntrack flows with one Dump.
+	if len(removed) > 0 {
+		if _, err := m.ct.MarkBySrcsUDP(srcToMark); err != nil {
+			log.Printf("ratelimit.RemoveBatch: conntrack reset mark: %v", err)
+		}
+		log.Printf("Rate-limit batch removed: %d IPs (1 nft + 1 tc + 1 conntrack-dump)", len(removed))
+	}
 	return removed
 }
 
