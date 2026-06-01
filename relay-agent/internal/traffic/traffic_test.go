@@ -22,7 +22,7 @@ func TestTrafficSaveAndLoad(t *testing.T) {
 	// Add some dummy traffic directly
 	m.mu.Lock()
 	m.state.IPs["1.2.3.4"] = ipStats{TX: 100, RX: 200, Updated: "now"}
-	m.save()
+	m.save(m.state)
 	m.mu.Unlock()
 	
 	// Check if file is written
@@ -53,7 +53,7 @@ func TestTrafficReset(t *testing.T) {
 	
 	m.mu.Lock()
 	m.state.IPs["1.2.3.4"] = ipStats{TX: 100, RX: 200, Updated: "now"}
-	m.save()
+	m.save(m.state)
 	m.mu.Unlock()
 	
 	m.Reset()
@@ -97,7 +97,7 @@ func BenchmarkTrafficSave(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		m.mu.Lock()
-		m.save()
+		m.save(m.state)
 		m.mu.Unlock()
 	}
 }

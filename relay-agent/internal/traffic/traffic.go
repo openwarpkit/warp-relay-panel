@@ -85,12 +85,12 @@ func (m *Monitor) empty() fileFmt {
 	}
 }
 
-func (m *Monitor) save() {
+func (m *Monitor) save(state fileFmt) {
 	if err := os.MkdirAll(filepath.Dir(m.path), 0o750); err != nil {
 		log.Printf("traffic: mkdir error: %v", err)
 		return
 	}
-	data, _ := json.MarshalIndent(m.state, "", "  ")
+	data, _ := json.MarshalIndent(state, "", "  ")
 	tmpPath := m.path + ".tmp"
 	// #nosec G304 -- Tmp file path is constructed from config
 	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
@@ -122,14 +122,18 @@ func (m *Monitor) save() {
 	}
 }
 
-func (m *Monitor) checkMonthReset() {
+func (m *Monitor) checkMonthReset() *fileFmt {
 	cur := nowMSK().Format("2006-01")
 	if m.state.Month != cur {
 		log.Printf("Monthly reset (MSK): %s → %s", m.state.Month, cur)
 		m.state = m.empty()
 		m.lastConn = make(map[connKey][2]uint64)
-		m.save()
+		
+		cp := m.state
+		cp.IPs = make(map[string]ipStats)
+		return &cp
 	}
+	return nil
 }
 
 func (m *Monitor) Collect(countFunc func(string) int) {
@@ -143,8 +147,7 @@ func (m *Monitor) Collect(countFunc func(string) int) {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.checkMonthReset()
+	resetState := m.checkMonthReset()
 
 	now := nowMSK().Format(time.RFC3339)
 	changed := false
@@ -193,8 +196,21 @@ func (m *Monitor) Collect(countFunc func(string) int) {
 		}
 	}
 	m.lastConn = current
+	var stateCopy *fileFmt
 	if changed {
-		m.save()
+		cp := m.state
+		cp.IPs = make(map[string]ipStats, len(m.state.IPs))
+		for k, v := range m.state.IPs {
+			cp.IPs[k] = v
+		}
+		stateCopy = &cp
+	}
+	m.mu.Unlock()
+
+	if resetState != nil && !changed {
+		m.save(*resetState)
+	} else if stateCopy != nil {
+		m.save(*stateCopy)
 	}
 }
 
@@ -248,7 +264,10 @@ type Summary struct {
 func (m *Monitor) GetAll(refCount func(string) int, clients func(string) []int64) Summary {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.checkMonthReset()
+	if resetState := m.checkMonthReset(); resetState != nil {
+		// Asynchronous save in a goroutine because GetAll is read-only path
+		go m.save(*resetState)
+	}
 	out := Summary{
 		Month:     m.state.Month,
 		LastReset: m.state.LastReset,
@@ -309,12 +328,15 @@ func (m *Monitor) GetIP(ip string, refCount func(string) int, clients func(strin
 
 func (m *Monitor) Reset() string {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.state = m.empty()
 	m.lastConn = make(map[connKey][2]uint64)
-	m.save()
+	cp := m.state
+	cp.IPs = make(map[string]ipStats)
+	m.mu.Unlock()
+	
+	m.save(cp)
 	log.Println("Traffic data manually reset")
-	return m.state.Month
+	return cp.Month
 }
 
 func (m *Monitor) Month() string {

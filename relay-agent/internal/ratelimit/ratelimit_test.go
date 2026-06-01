@@ -38,20 +38,25 @@ func TestManagerLoadSave(t *testing.T) {
 	
 	// Create manager, it will create empty state
 	m := New(dbPath, 10, 20, nil)
+	defer m.Close()
 	
 	m.mu.Lock()
 	m.m["1.2.3.4"] = Limit{Mbps: 10.0, Mark: 10, ExpiresAt: "never"}
 	m.used[10] = true
-	m.save()
+	m.dirty = true
 	m.mu.Unlock()
 
-	// Ensure file is there
-	if _, err := os.Stat(dbPath); err != nil {
+	// Manual trigger
+	m.ForceSave()
+
+	_, err = os.ReadFile(dbPath)
+	if err != nil {
 		t.Fatalf("save() did not write file: %v", err)
 	}
 
 	// Reload
 	m2 := New(dbPath, 10, 20, nil)
+	defer m2.Close()
 	
 	m2.mu.Lock()
 	l, ok := m2.m["1.2.3.4"]

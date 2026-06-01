@@ -15,6 +15,7 @@ func TestRefcount(t *testing.T) {
 
 	dbPath := filepath.Join(tmpDir, "refcount.json")
 	r := New(dbPath)
+	defer r.Close()
 
 	// Add new client
 	canRemove := r.Add("1.1.1.1", 1, "")
@@ -65,6 +66,7 @@ func TestSetAllAndLoad(t *testing.T) {
 
 	dbPath := filepath.Join(tmpDir, "refcount.json")
 	r := New(dbPath)
+	defer r.Close()
 
 	r.SetAll(map[string][]int64{
 		"1.1.1.1": {1, 2},
@@ -76,8 +78,11 @@ func TestSetAllAndLoad(t *testing.T) {
 		t.Errorf("unexpected IPs: %v", ips)
 	}
 
+	r.ForceSave()
+
 	// Reload
 	r2 := New(dbPath)
+	defer r2.Close()
 	if r2.Count("1.1.1.1") != 2 {
 		t.Errorf("expected 2 clients for 1.1.1.1, got %d", r2.Count("1.1.1.1"))
 	}
@@ -87,6 +92,7 @@ func BenchmarkRefcountAdd(b *testing.B) {
 	tmpDir, _ := os.MkdirTemp("", "refcount-bench")
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 	r := New(filepath.Join(tmpDir, "refcount.json"))
+	defer r.Close()
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -99,6 +105,7 @@ func BenchmarkRefcountRemove(b *testing.B) {
 	tmpDir, _ := os.MkdirTemp("", "refcount-bench")
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 	r := New(filepath.Join(tmpDir, "refcount.json"))
+	defer r.Close()
 
 	r.mu.Lock()
 	clients := make(map[int64]struct{}, 10000)

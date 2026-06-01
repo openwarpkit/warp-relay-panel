@@ -9,17 +9,27 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 )
 
 type Map struct {
-	mu   sync.Mutex
-	m    map[string]map[int64]struct{}
-	path string
+	mu     sync.Mutex
+	m      map[string]map[int64]struct{}
+	path   string
+	dirty  bool
+	notify chan struct{}
+	stop   chan struct{}
 }
 
 func New(path string) *Map {
-	r := &Map{m: make(map[string]map[int64]struct{}), path: path}
+	r := &Map{
+		m:      make(map[string]map[int64]struct{}),
+		path:   path,
+		notify: make(chan struct{}, 1),
+		stop:   make(chan struct{}),
+	}
 	r.load()
+	go r.saveWorker()
 	return r
 }
 
@@ -44,22 +54,60 @@ func (r *Map) load() {
 	log.Printf("refcount loaded: %d IPs", len(r.m))
 }
 
-func (r *Map) save() {
+func (r *Map) triggerSave() {
+	r.dirty = true
+	select {
+	case r.notify <- struct{}{}:
+	default:
+	}
+}
+
+func (r *Map) saveWorker() {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.notify:
+		case <-ticker.C:
+		case <-r.stop:
+			return
+		}
+
+		r.mu.Lock()
+		if !r.dirty {
+			r.mu.Unlock()
+			continue
+		}
+
+		out := make(map[string][]int64, len(r.m))
+		for ip, set := range r.m {
+			if len(set) == 0 {
+				continue
+			}
+			ids := make([]int64, 0, len(set))
+			for id := range set {
+				ids = append(ids, id)
+			}
+			sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+			out[ip] = ids
+		}
+		r.dirty = false
+		r.mu.Unlock()
+
+		r.writeToDisk(out)
+	}
+}
+
+// Close gracefully stops the background worker and forces a final save.
+func (r *Map) Close() {
+	close(r.stop)
+	r.ForceSave()
+}
+
+func (r *Map) writeToDisk(out map[string][]int64) {
 	if err := os.MkdirAll(filepath.Dir(r.path), 0o750); err != nil {
 		log.Printf("refcount: mkdir error: %v", err)
 		return
-	}
-	out := make(map[string][]int64, len(r.m))
-	for ip, set := range r.m {
-		if len(set) == 0 {
-			continue
-		}
-		ids := make([]int64, 0, len(set))
-		for id := range set {
-			ids = append(ids, id)
-		}
-		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-		out[ip] = ids
 	}
 	data, _ := json.MarshalIndent(out, "", "  ")
 
@@ -94,6 +142,31 @@ func (r *Map) save() {
 	}
 }
 
+// ForceSave writes immediately without debouncing, blocking until done.
+func (r *Map) ForceSave() {
+	r.mu.Lock()
+	if !r.dirty {
+		r.mu.Unlock()
+		return
+	}
+	out := make(map[string][]int64, len(r.m))
+	for ip, set := range r.m {
+		if len(set) == 0 {
+			continue
+		}
+		ids := make([]int64, 0, len(set))
+		for id := range set {
+			ids = append(ids, id)
+		}
+		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+		out[ip] = ids
+	}
+	r.dirty = false
+	r.mu.Unlock()
+
+	r.writeToDisk(out)
+}
+
 // Add returns true if the refcount for oldIP dropped to 0 (can be removed from ipset).
 func (r *Map) Add(ip string, clientID int64, oldIP string) bool {
 	r.mu.Lock()
@@ -112,7 +185,7 @@ func (r *Map) Add(ip string, clientID int64, oldIP string) bool {
 		r.m[ip] = make(map[int64]struct{})
 	}
 	r.m[ip][clientID] = struct{}{}
-	r.save()
+	r.triggerSave()
 	return canRemoveOld
 }
 
@@ -124,7 +197,7 @@ func (r *Map) RemoveClient(ip string, clientID int64) bool {
 	set, ok := r.m[ip]
 	if !ok || len(set) == 0 {
 		delete(r.m, ip)
-		r.save()
+		r.triggerSave()
 		return true
 	}
 	if clientID != 0 {
@@ -136,10 +209,10 @@ func (r *Map) RemoveClient(ip string, clientID int64) bool {
 	}
 	if len(set) == 0 {
 		delete(r.m, ip)
-		r.save()
+		r.triggerSave()
 		return true
 	}
-	r.save()
+	r.triggerSave()
 	return false
 }
 
@@ -155,7 +228,7 @@ func (r *Map) SetAll(entries map[string][]int64) {
 		}
 		r.m[ip] = set
 	}
-	r.save()
+	r.triggerSave()
 }
 
 func (r *Map) Count(ip string) int {

@@ -56,6 +56,9 @@ type Manager struct {
 	used     map[int]bool     // mark → in-use
 	ct       *conntrackgo.Client
 	useNft   bool // false -> legacy path
+	dirty    bool
+	notify   chan struct{}
+	stop     chan struct{}
 }
 
 func New(path string, markMin, markMax int, ct *conntrackgo.Client) *Manager {
@@ -67,8 +70,11 @@ func New(path string, markMin, markMax int, ct *conntrackgo.Client) *Manager {
 		used:    make(map[int]bool),
 		ct:      ct,
 		useNft:  os.Getenv("RATELIMIT_BACKEND") != "iptables",
+		notify:  make(chan struct{}, 1),
+		stop:    make(chan struct{}),
 	}
 	mgr.load()
+	go mgr.saveWorker()
 	// Startup-init: create nft warp_shaper + tc flow filter if missing.
 	// Protects against "binary updated but ExecStartPre ensure_rules.sh
 	// did not run" - otherwise the first /rate-limit or SetBatch would fail.
@@ -167,15 +173,71 @@ func (m *Manager) load() {
 	log.Printf("Rate limits loaded: %d IPs", len(m.m))
 }
 
-func (m *Manager) save() {
-	if err := os.MkdirAll(filepath.Dir(m.path), 0o750); err != nil {
-		log.Printf("ratelimit: mkdir error: %v", err)
+func (m *Manager) triggerSave() {
+	m.dirty = true
+	select {
+	case m.notify <- struct{}{}:
+	default:
+	}
+}
+
+func (m *Manager) saveWorker() {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.notify:
+		case <-ticker.C:
+		case <-m.stop:
+			return
+		}
+
+		m.mu.Lock()
+		if !m.dirty {
+			m.mu.Unlock()
+			continue
+		}
+
+		out := make(map[string]Limit, len(m.m))
+		for ip, l := range m.m {
+			l.IP = ""
+			out[ip] = l
+		}
+		m.dirty = false
+		m.mu.Unlock()
+
+		m.writeToDisk(out)
+	}
+}
+
+// Close gracefully stops the background worker and forces a final save.
+func (m *Manager) Close() {
+	close(m.stop)
+	m.ForceSave()
+}
+
+// ForceSave writes immediately without debouncing, blocking until done.
+func (m *Manager) ForceSave() {
+	m.mu.Lock()
+	if !m.dirty {
+		m.mu.Unlock()
 		return
 	}
 	out := make(map[string]Limit, len(m.m))
 	for ip, l := range m.m {
 		l.IP = ""
 		out[ip] = l
+	}
+	m.dirty = false
+	m.mu.Unlock()
+
+	m.writeToDisk(out)
+}
+
+func (m *Manager) writeToDisk(out map[string]Limit) {
+	if err := os.MkdirAll(filepath.Dir(m.path), 0o750); err != nil {
+		log.Printf("ratelimit: mkdir error: %v", err)
+		return
 	}
 	data, _ := json.MarshalIndent(out, "", "  ")
 
@@ -357,7 +419,7 @@ func (m *Manager) Set(ip string, mbps float64, expiresAt string, clientID *int64
 		AppliedAt: time.Now().In(time.FixedZone("MSK", 3*3600)).Format(time.RFC3339),
 	}
 	m.m[ip] = l
-	m.save()
+	m.triggerSave()
 	log.Printf("Rate-limit applied: %s = %.2f Mbps (mark=%d, expires=%s)", ip, mbps, mark, expiresAt)
 	out := l
 	out.IP = ip
@@ -511,7 +573,7 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 		out.IP = pl.item.IP
 		applied = append(applied, out)
 	}
-	m.save()
+	m.triggerSave()
 	m.mu.Unlock()
 
 	log.Printf("Rate-limit batch applied: %d IPs (1 nft + 1 tc + 1 conntrack-dump)", len(applied))
@@ -528,7 +590,7 @@ func (m *Manager) Remove(ip string) (Limit, bool) {
 	delete(m.m, ip)
 	m.removeTC(ip, l.Mark)
 	m.releaseMark(l.Mark)
-	m.save()
+	m.triggerSave()
 	log.Printf("Rate-limit removed: %s (mark=%d)", ip, l.Mark)
 	out := l
 	out.IP = ip
@@ -603,7 +665,7 @@ func (m *Manager) RemoveBatch(ips []string) []Limit {
 		removed = append(removed, Limit{IP: pl.ip, Mark: pl.mark})
 	}
 	m.mu.Lock()
-	m.save()
+	m.triggerSave()
 	m.mu.Unlock()
 	log.Printf("Rate-limit batch removed: %d IPs (1 nft + 1 tc + 1 conntrack-dump)", len(removed))
 	return removed
