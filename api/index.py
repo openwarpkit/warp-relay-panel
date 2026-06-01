@@ -1,10 +1,10 @@
 """
-Публичные:
-  GET  /activate/{token}         — активация клиента
+Public:
+  GET  /activate/{token}         - activate client
 
-Защищённые (X-API-Key):
+Protected (X-API-Key):
   POST/GET/DELETE  /api/clients
-  POST             /api/clients/{id}/activate  — ручная активация по IP
+  POST             /api/clients/{id}/activate  - manual activation by IP
   POST/GET/DELETE  /api/relays
   POST/GET/DELETE  /api/blacklist
   POST             /api/relays/sync-all
@@ -46,18 +46,13 @@ API_VERSION = "1.3.0"
 app = FastAPI(title="WARP Relay Panel", version=API_VERSION)
 
 
-# ═══════════════════════════════════════
-# AUTH
-# ═══════════════════════════════════════
 
 def require_api_key(x_api_key: str = Header(...)):
-    if x_api_key != os.environ.get("API_KEY", ""):
+    expected_key = os.environ.get("API_KEY", "")
+    if not expected_key or x_api_key != expected_key:
         raise HTTPException(403, "Invalid API key")
 
 
-# ═══════════════════════════════════════
-# BOT DETECTION
-# ═══════════════════════════════════════
 
 _BOT_PATTERNS = re.compile(
     r"(TelegramBot|TwitterBot|Twitterbot|facebookexternalhit|"
@@ -75,13 +70,9 @@ def _is_bot(user_agent: str) -> bool:
     return bool(_BOT_PATTERNS.search(user_agent))
 
 
-# ═══════════════════════════════════════
-# WARP / CLOUDFLARE DETECTION
-# ═══════════════════════════════════════
 
-# IPv4-префиксы Cloudflare AS13335 (включая WARP egress) + RFC 6598 CGNAT.
-# Источник: собранный список префиксов ASN AS13335 (Cloudflare, Inc.),
-# схлопнут через ipaddress.collapse_addresses() в минимальное покрытие.
+# Cloudflare AS13335 IPv4 prefixes (including WARP egress) + RFC 6598 CGNAT.
+# Source: collected ASN AS13335 prefixes, collapsed.
 _WARP_NETWORKS = [
     ipaddress.ip_network(cidr) for cidr in (
         "1.0.0.0/24",
@@ -441,7 +432,7 @@ _WARP_NETWORKS = [
         "217.217.128.0/24",
         "218.33.92.0/22",
         "222.167.32.0/22",
-        # CGNAT — внутренние egress-IP WARP
+        # CGNAT - internal WARP egress IPs
         "100.64.0.0/10",
     )
 ]
@@ -455,9 +446,6 @@ def _is_warp_ip(ip: str) -> bool:
     return any(addr in net for net in _WARP_NETWORKS)
 
 
-# ═══════════════════════════════════════
-# SCHEMAS
-# ═══════════════════════════════════════
 
 class ClientCreate(BaseModel):
     label: str = ""
@@ -473,6 +461,7 @@ class RelayCreate(BaseModel):
     host: str
     agent_port: int = 7580
     agent_secret: str = ""
+    agent_type: str = "full"
 
 class RelayToggle(BaseModel):
     active: bool
@@ -487,7 +476,7 @@ class IPBanRemove(BaseModel):
 class RateLimitCreate(BaseModel):
     ip: str
     mbps: float
-    expires_in_seconds: int | None = None   # None = бессрочно
+    expires_in_seconds: int | None = None   # None = forever
     reason: str = ""
     client_id: int | None = None
 
@@ -498,9 +487,6 @@ class ClientLabelsRequest(BaseModel):
     ids: list[int]
 
 
-# ═══════════════════════════════════════
-# HTML ШАБЛОНЫ
-# ═══════════════════════════════════════
 
 _TPL_DIR = pathlib.Path(__file__).parent / "templates"
 
@@ -519,26 +505,26 @@ _TPL_BOT = _load("bot.html")
 
 
 ERROR_MAP = {
-    "invalid_token": ("Неверная ссылка", "Ссылка активации недействительна."),
-    "blocked": ("Доступ заблокирован", "Ваш аккаунт заблокирован."),
-    "ipv6_detected": ("IPv6 не поддерживается",
-                      "Relay работает только с IPv4. Отключите IPv6 или используйте мобильную сеть."),
-    "invalid_ip": ("Ошибка определения IP", "Не удалось определить ваш IPv4 адрес."),
+    "invalid_token": ("Invalid Link", "Activation link is invalid."),
+    "blocked": ("Access Blocked", "Your account has been blocked."),
+    "ipv6_detected": ("IPv6 not supported",
+                      "Relay only supports IPv4. Disable IPv6 or use mobile network."),
+    "invalid_ip": ("IP Detection Error", "Failed to determine your IPv4 address."),
 }
 
-# Человекочитаемые ошибки для API-ответов (бот)
+# Human-readable errors for API responses (bot)
 API_ERROR_MESSAGES = {
-    "client_not_found": "Клиент не найден",
-    "blocked": "Ваш аккаунт заблокирован",
-    "ip_banned": "Этот IP-адрес заблокирован",
-    "invalid_ip": "Некорректный IP-адрес",
-    "ipv6_not_supported": "IPv6 не поддерживается, нужен IPv4",
-    "warp_detected": "Обнаружен Cloudflare WARP / VPN. Отключите WARP и повторите активацию",
+    "client_not_found": "Client not found",
+    "blocked": "Your account is blocked",
+    "ip_banned": "This IP address is banned",
+    "invalid_ip": "Invalid IP address",
+    "ipv6_not_supported": "IPv6 is not supported, IPv4 is required",
+    "warp_detected": "Cloudflare WARP / VPN detected. Please disable WARP and try again",
 }
 
 
 def _error_html(key: str, status: int = 403) -> HTMLResponse:
-    title, message = ERROR_MAP.get(key, ("Ошибка", key))
+    title, message = ERROR_MAP.get(key, ("Error", key))
     return HTMLResponse(
         _TPL_ERROR.safe_substitute(style=_BASE_STYLE, title=title, message=message),
         status_code=status,
@@ -556,7 +542,7 @@ def _ip_banned_html(reason: str = "") -> HTMLResponse:
     reason_block = ""
     if reason:
         reason_block = (
-            f'<div class="notice notice-error"><b>Причина:</b> {reason}</div>'
+            f'<div class="notice notice-error"><b>Reason:</b> {reason}</div>'
         )
     return HTMLResponse(
         _TPL_IP_BANNED.safe_substitute(style=_BASE_STYLE, reason_block=reason_block),
@@ -570,23 +556,21 @@ def _rate_limit_block_html(rate_limit: dict | None) -> str:
     mbps = rate_limit.get("mbps")
     expires_at = rate_limit.get("expires_at")
     if expires_at:
-        until = f"до {expires_at[:16].replace('T', ' ')} UTC"
+        until = f"until {expires_at[:16].replace('T', ' ')} UTC"
     else:
-        until = "бессрочно"
+        until = "unlimited"
     return (
         '<div class="rate-limit">'
         '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
         'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
         '<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/>'
         '<line x1="12" y1="16" x2="12.01" y2="16"/></svg>'
-        f'<span>Ограничение скорости: <b>{mbps} Mbps</b> ({until})</span>'
+        f'<span>Rate limit: <b>{mbps} Mbps</b> ({until})</span>'
         '</div>'
     )
 
 
-# ═══════════════════════════════════════
-# АКТИВАЦИЯ (публичный)
-# ═══════════════════════════════════════
+# ACTIVATION (public)
 
 @app.get("/activate/{token}")
 async def activate(token: str, request: Request):
@@ -633,7 +617,7 @@ async def activate(token: str, request: Request):
     rl_block = _rate_limit_block_html(result.get("rate_limit"))
 
     if result["status"] == "already_active":
-        # Re-push IP на relay (идемпотентно).
+        # Re-push IP to relay (idempotent).
         await relay_client.add_ip(client_ip, client_id=result["client_id"])
         return HTMLResponse(_TPL_SAME.safe_substitute(
             style=_BASE_STYLE, ip=client_ip, rate_limit_block=rl_block,
@@ -657,9 +641,6 @@ async def activate(token: str, request: Request):
     ))
 
 
-# ═══════════════════════════════════════
-# API: КЛИЕНТЫ
-# ═══════════════════════════════════════
 
 @app.post("/api/clients", dependencies=[Depends(require_api_key)])
 async def api_create_client(data: ClientCreate):
@@ -672,12 +653,9 @@ async def api_list_clients(include_blocked: bool = True):
 
 @app.post("/api/clients/labels", dependencies=[Depends(require_api_key)])
 async def api_client_labels(data: ClientLabelsRequest):
-    """Batch-резолв client_id → label.
+    """Batch-resolve client_id → label.
 
-    Удобно, чтобы по `client_ids` из `/api/traffic` показать имена клиентов
-    одним запросом вместо N штук `/api/clients/{id}`.
-
-    Возвращает {"<id>": "<label>"}; отсутствующие ID → null."""
+    Returns {"<id>": "<label>"}; missing IDs → null."""
     found = get_client_labels(data.ids)
     return {str(cid): found.get(cid) for cid in data.ids}
 
@@ -739,7 +717,7 @@ async def api_client_traffic(client_id: int):
 
 @app.get("/api/clients/{client_id}/full", dependencies=[Depends(require_api_key)])
 async def api_get_client_full(client_id: int):
-    """Клиент + флаги бана current/previous + текущий rate_limit. 1 RPC."""
+    """Client + ban flags + current rate_limit. 1 RPC."""
     client = get_client_full(client_id)
     if not client:
         raise HTTPException(404, "Client not found")
@@ -747,7 +725,7 @@ async def api_get_client_full(client_id: int):
 
 @app.post("/api/clients/{client_id}/activate", dependencies=[Depends(require_api_key)])
 async def api_activate_client_manual(client_id: int, data: ClientManualActivate):
-    """Ручная активация клиента по IP (вызывается ботом)."""
+    """Manual client activation by IP (bot called)."""
     ip = data.ip.strip()
 
     try:
@@ -810,8 +788,7 @@ async def api_activate_client_manual(client_id: int, data: ClientManualActivate)
 
 @app.patch("/api/clients/{client_id}/block", dependencies=[Depends(require_api_key)])
 async def api_block_client(client_id: int, data: ClientBlock):
-    """Блокировка/разблокировка через атомарный RPC. current_ip_shared
-    приходит сразу — не нужен отдельный count_clients_on_ip."""
+    """Block/unblock via atomic RPC."""
     updated = block_client(client_id, data.blocked)
     if not updated:
         raise HTTPException(404, "Client not found")
@@ -826,7 +803,7 @@ async def api_block_client(client_id: int, data: ClientBlock):
 
 @app.delete("/api/clients/{client_id}", dependencies=[Depends(require_api_key)])
 async def api_delete_client(client_id: int):
-    """Удаление через атомарный RPC: возвращает {id, current_ip, current_ip_shared}."""
+    """Deletion via atomic RPC: returns {id, current_ip, current_ip_shared}."""
     result = delete_client(client_id)
     if not result:
         raise HTTPException(404, "Client not found")
@@ -838,9 +815,6 @@ async def api_delete_client(client_id: int):
     return {"deleted": True, "id": client_id}
 
 
-# ═══════════════════════════════════════
-# API: IP BLACKLIST
-# ═══════════════════════════════════════
 
 @app.post("/api/blacklist", dependencies=[Depends(require_api_key)])
 async def api_add_ip_ban(data: IPBanCreate):
@@ -890,20 +864,18 @@ async def api_remove_ip_ban(ban_id: int):
     return {"deleted": True, "id": ban_id}
 
 
-# ═══════════════════════════════════════
-# API: RELAY-СЕРВЕРЫ
-# ═══════════════════════════════════════
 
 @app.post("/api/relays", dependencies=[Depends(require_api_key)])
 async def api_add_relay(data: RelayCreate):
     return add_relay(
         name=data.name, host=data.host,
         agent_port=data.agent_port, agent_secret=data.agent_secret,
+        agent_type=data.agent_type,
     )
 
 @app.get("/api/relays", dependencies=[Depends(require_api_key)])
 async def api_list_relays(fields: str = "full"):
-    """fields=basic — без last_health (легче payload)."""
+    """fields=basic - without last_health (lighter payload)."""
     return list_relays(fields=fields)
 
 
@@ -970,29 +942,23 @@ async def api_update_all_relays():
     return await relay_client.update_all_relays()
 
 
-# ═══════════════════════════════════════
-# API: ТРАФИК
-# ═══════════════════════════════════════
 
 @app.get("/api/traffic", dependencies=[Depends(require_api_key)])
 async def api_traffic_all():
     return await relay_client.get_traffic_all_relays()
 
 
-# ═══════════════════════════════════════
-# API: СТАТИСТИКА
-# ═══════════════════════════════════════
 
 @app.get("/api/stats", dependencies=[Depends(require_api_key)])
 async def api_stats():
-    """Лёгкая статистика через RPC dashboard_stats."""
+    """Lightweight statistics via dashboard_stats RPC."""
     from .database import get_dashboard_stats
     return get_dashboard_stats()
 
 
 @app.get("/api/dashboard", dependencies=[Depends(require_api_key)])
 async def api_dashboard():
-    """Главный экран: relays(basic) + stats. Stats через RPC."""
+    """Main dashboard screen: relays(basic) + stats."""
     from .database import get_dashboard_stats
     relays = list_relays(fields="basic")
     stats = get_dashboard_stats()
@@ -1003,16 +969,13 @@ async def api_dashboard():
     return {"relays": relays, "stats": stats}
 
 
-# ═══════════════════════════════════════
-# API: RATE-LIMITS
-# ═══════════════════════════════════════
 
 @app.post("/api/rate-limits", dependencies=[Depends(require_api_key)])
 async def api_set_rate_limit(data: RateLimitCreate):
     """
-    Создать/обновить rate-limit для IP.
-    expires_in_seconds=null означает бессрочно.
-    Сохраняет в Supabase + push на все активные relay'и.
+    Create/update rate-limit for an IP.
+    expires_in_seconds=null means unlimited.
+    Saves in Supabase and pushes to all active relays.
     """
     try:
         ip = str(ipaddress.ip_address(data.ip))
@@ -1045,7 +1008,7 @@ async def api_set_rate_limit(data: RateLimitCreate):
 
 @app.delete("/api/rate-limits/by-ip", dependencies=[Depends(require_api_key)])
 async def api_remove_rate_limit_by_ip(data: RateLimitRemove):
-    """Снять rate-limit по IP. Удаляет из БД и со всех relay'ев."""
+    """Remove rate-limit by IP from DB and all relays."""
     deleted = remove_rate_limit_by_ip(data.ip)
     relay_results = await relay_client.remove_rate_limit(data.ip)
     if not deleted and not any(r.get("ok") for r in relay_results.values()):
@@ -1055,7 +1018,7 @@ async def api_remove_rate_limit_by_ip(data: RateLimitRemove):
 
 @app.delete("/api/rate-limits/{ip}", dependencies=[Depends(require_api_key)])
 async def api_remove_rate_limit(ip: str):
-    """Снять rate-limit по IP в URL."""
+    """Remove rate-limit by IP from URL."""
     deleted = remove_rate_limit_by_ip(ip)
     relay_results = await relay_client.remove_rate_limit(ip)
     if not deleted and not any(r.get("ok") for r in relay_results.values()):
@@ -1070,7 +1033,7 @@ async def api_list_rate_limits():
 
 @app.get("/api/rate-limits/expired", dependencies=[Depends(require_api_key)])
 async def api_list_expired_rate_limits():
-    """Для внешнего шедулера юзера: всё, что пора снять (expires_at < NOW)."""
+    """For external scheduler: everything to remove (expires_at < NOW)."""
     return list_expired_rate_limits()
 
 
@@ -1082,17 +1045,14 @@ async def api_get_rate_limit(ip: str):
     return {"limited": True, **rl}
 
 
-# ═══════════════════════════════════════
-# WHITELIST PAYLOAD (для startup-resync агента)
-# ═══════════════════════════════════════
+# WHITELIST PAYLOAD (for startup-resync agent)
 
 @app.get("/api/relays/{relay_id}/whitelist-payload",
          dependencies=[Depends(require_api_key)])
 async def api_relay_whitelist_payload(relay_id: int):
     """
-    Полный payload для агента: расшифрованные IP клиентов + текущие rate_limits.
-    Вызывается агентом на startup для пересборки in-memory state.
-    relay_id передаётся для логирования; payload одинаков для всех relay'ев.
+    Full payload for the agent: decrypted client IPs + current rate_limits.
+    Called by agent on startup to rebuild in-memory state.
     """
     payload = get_sync_payload()
     logger.info("Whitelist-payload requested by relay #%d: %d clients, %d rate_limits",
@@ -1100,9 +1060,6 @@ async def api_relay_whitelist_payload(relay_id: int):
     return payload
 
 
-# ═══════════════════════════════════════
-# HEALTH
-# ═══════════════════════════════════════
 
 @app.get("/health")
 async def health():

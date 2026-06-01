@@ -3,6 +3,7 @@
 BIN := warp-relay-agent
 BIN_MIN := warp-relay-agent-min
 VERSION ?= 2.2.6
+FUZZTIME ?= 10s
 LDFLAGS := -s -w -X main.Version=$(VERSION)
 LDFLAGS_MIN := -s -w -X main.Version=$(VERSION)-min
 
@@ -41,3 +42,15 @@ run:
 
 run-min:
 	go run ./cmd/agent-min
+
+test:
+	go test -v ./...
+
+test-fuzz:
+	@echo "Running fuzz tests with FUZZTIME=$(FUZZTIME)"
+	go test -fuzz=FuzzRefcountLoad -fuzztime=$(FUZZTIME) ./internal/refcount
+	go test -fuzz=FuzzRatelimitLoad -fuzztime=$(FUZZTIME) ./internal/ratelimit
+	go test -fuzz=FuzzTrafficLoad -fuzztime=$(FUZZTIME) ./internal/traffic
+
+test-bench:
+	go test -bench=. -benchmem ./...

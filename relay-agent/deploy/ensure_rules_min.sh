@@ -1,32 +1,25 @@
 #!/bin/bash
 # ═══════════════════════════════════════
-# WARP Relay (MIN) — pre-flight self-heal
-# Запускается перед стартом агента (ExecStartPre) и периодически из watchdog'а.
+# WARP Relay (MIN) - pre-flight self-heal
+# Run before agent start (ExecStartPre) and periodically from watchdog.
 #
-# В отличие от full-варианта: НЕТ ipset-восстановления, FORWARD-правила
-# простые ACCEPT (без --match-set whitelist).
+# Unlike full variant: NO ipset restoration, FORWARD rules
+# are simple ACCEPT (no --match-set whitelist).
 # ═══════════════════════════════════════
 
 TAG="WR_RULE"
 RECIPE="${RECIPE:-/opt/warp-relay-agent/rules_recipe.json}"
-ENV_FILE="${ENV_FILE:-/opt/warp-relay-agent/.env}"
-
-SHARED_LIMIT_MBPS=""
-if [ -f "$ENV_FILE" ]; then
-    SHARED_LIMIT_MBPS=$(grep -E '^SHARED_LIMIT_MBPS=' "$ENV_FILE" | head -1 | cut -d= -f2 | tr -d '[:space:]')
-fi
-SHARED_LIMIT_MBPS="${SHARED_LIMIT_MBPS:-30}"
 
 G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; N='\033[0m'
 
-# ── iptables NAT (WR_RULE) ──
+# -- iptables NAT (WR_RULE) --
 rebuild_from_recipe() {
     if [ ! -f "$RECIPE" ]; then
-        echo -e "${R}[ensure-min] Recipe $RECIPE не найден — нечего пересобирать${N}"
+        echo -e "${R}[ensure-min] Recipe $RECIPE not found - nothing to rebuild${N}"
         return 1
     fi
     if ! command -v jq &>/dev/null; then
-        echo -e "${R}[ensure-min] jq не установлен${N}"
+        echo -e "${R}[ensure-min] jq is not installed${N}"
         return 1
     fi
 
@@ -35,11 +28,11 @@ rebuild_from_recipe() {
     PORTS=$(jq -r '.ports | join(",")' "$RECIPE")
 
     if [ -z "$SRC_IP" ] || [ -z "$DST_IP" ] || [ -z "$PORTS" ]; then
-        echo -e "${R}[ensure-min] Recipe неполный${N}"
+        echo -e "${R}[ensure-min] Recipe incomplete${N}"
         return 1
     fi
 
-    echo -e "${Y}[ensure-min] Пересобираем NAT+FORWARD из recipe${N}"
+    echo -e "${Y}[ensure-min] Rebuilding NAT+FORWARD from recipe${N}"
 
     iptables -t nat -S 2>/dev/null | grep "$TAG" | sed 's/^-A/-D/' | while read rule; do
         iptables -t nat $rule 2>/dev/null || true
@@ -75,67 +68,63 @@ rebuild_from_recipe() {
     done
 
     netfilter-persistent save 2>/dev/null || true
-    echo -e "${G}[ensure-min] NAT+FORWARD пересобран${N}"
+    echo -e "${G}[ensure-min] NAT+FORWARD rebuilt${N}"
     return 0
 }
 
-# ── iptables NAT ──
+# -- iptables NAT --
 if ! iptables -t nat -S 2>/dev/null | grep -q "$TAG"; then
-    echo -e "${Y}[ensure-min] iptables NAT не найдены${N}"
+    echo -e "${Y}[ensure-min] iptables NAT not found${N}"
     if command -v netfilter-persistent &>/dev/null; then
         netfilter-persistent reload 2>/dev/null
     fi
     if ! iptables -t nat -S 2>/dev/null | grep -q "$TAG"; then
         rebuild_from_recipe || \
-          echo -e "${R}[ensure-min] Запустите setup.sh для полной настройки${N}"
+          echo -e "${R}[ensure-min] Run setup.sh for full setup${N}"
     fi
 else
     echo "[ensure-min] iptables NAT OK"
 fi
 
-# ── iptables FORWARD ACCEPT ──
+# -- iptables FORWARD ACCEPT --
 if ! iptables -S FORWARD 2>/dev/null | grep -q "WR_FORWARD_OUT"; then
-    echo -e "${Y}[ensure-min] FORWARD ACCEPT правила потеряны — пересобираем${N}"
+    echo -e "${Y}[ensure-min] FORWARD ACCEPT rules lost - rebuilding${N}"
     rebuild_from_recipe || true
 fi
 
-# ── ip_forward ──
+# -- ip_forward --
 FWD=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)
 if [ "$FWD" != "1" ]; then
     sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
 fi
 
-# ── tc HTB qdisc + CONNMARK restore (для shared rate-limit) ──
+# -- tc HTB qdisc + CONNMARK restore (for shared rate-limit) --
 IFACE=$(ip route | awk '/default/ {print $5; exit}')
 if [ -n "$IFACE" ]; then
     if ! tc qdisc show dev "$IFACE" 2>/dev/null | grep -q "qdisc htb 1:"; then
-        echo -e "${Y}[ensure-min] HTB qdisc на $IFACE не найден — создаём${N}"
+        echo -e "${Y}[ensure-min] HTB qdisc on $IFACE not found - creating${N}"
         tc qdisc add dev "$IFACE" root handle 1: htb default 999 2>/dev/null
-        tc class add dev "$IFACE" parent 1: classid 1:999 htb rate "${SHARED_LIMIT_MBPS}mbit" ceil "${SHARED_LIMIT_MBPS}mbit" 2>/dev/null
+        tc class add dev "$IFACE" parent 1: classid 1:999 htb rate 1000mbit 2>/dev/null
     fi
-    # Дефолтный класс = лимит на клиента, не безлимит: новые/недетектированные
-    # флоу до conntrack-скана не должны обходить шейп через 1:999.
-    tc class change dev "$IFACE" parent 1: classid 1:999 htb rate "${SHARED_LIMIT_MBPS}mbit" ceil "${SHARED_LIMIT_MBPS}mbit" 2>/dev/null || \
-        tc class add dev "$IFACE" parent 1: classid 1:999 htb rate "${SHARED_LIMIT_MBPS}mbit" ceil "${SHARED_LIMIT_MBPS}mbit" 2>/dev/null
     if ! iptables -t mangle -S POSTROUTING 2>/dev/null | grep -q "CONNMARK --restore-mark"; then
         iptables -t mangle -A POSTROUTING -j CONNMARK --restore-mark 2>/dev/null
     fi
 fi
 
-# ── nftables warp_shaper (per-IP CONNMARK через O(1) map lookup) ──
-# Заменяет N штук "iptables -t mangle PREROUTING -m conntrack --ctorigsrc IP -j CONNMARK"
-# одной общей конструкцией с hash-map. На 200+ IP даёт колоссальное снижение CPU в softirq.
-# Переключатель: RATELIMIT_BACKEND=iptables в systemd unit → пропустить nft-инициализацию.
+# -- nftables warp_shaper (per-IP CONNMARK via O(1) map lookup) --
+# Replaces N "iptables -t mangle PREROUTING -m conntrack --ctorigsrc IP -j CONNMARK"
+# with one common hash-map construct. On 200+ IPs gives colossal CPU reduction in softirq.
+# Switch: RATELIMIT_BACKEND=iptables in systemd unit -> skip nft initialization.
 if [ "${RATELIMIT_BACKEND:-nftables}" != "iptables" ] && ! command -v nft &>/dev/null; then
-    # На существующих relay'ях после self-update nft может отсутствовать —
-    # ставим один раз без интерактива. Если apt недоступен — graceful fallback ниже.
-    echo -e "${Y}[ensure-min] nft не установлен, ставим apt-пакет nftables...${N}"
+    # On existing relays after self-update nft may be missing -
+    # install once non-interactively. If apt is unavailable - graceful fallback below.
+    echo -e "${Y}[ensure-min] nft not installed, installing apt package nftables...${N}"
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nftables 2>/dev/null || \
-        echo -e "${R}[ensure-min] apt install nftables не удался — продолжаем в legacy iptables-режиме${N}"
+        echo -e "${R}[ensure-min] apt install nftables failed - continuing in legacy iptables mode${N}"
 fi
 if [ "${RATELIMIT_BACKEND:-nftables}" != "iptables" ] && command -v nft &>/dev/null; then
     if ! nft list table ip warp_shaper >/dev/null 2>&1; then
-        echo -e "${Y}[ensure-min] nft: создаём table ip warp_shaper${N}"
+        echo -e "${Y}[ensure-min] nft: creating table ip warp_shaper${N}"
         nft add table ip warp_shaper
         nft add chain ip warp_shaper prerouting \
             "{ type filter hook prerouting priority -150 ; }"
@@ -145,10 +134,10 @@ if [ "${RATELIMIT_BACKEND:-nftables}" != "iptables" ] && command -v nft &>/dev/n
             ct mark set ip saddr map @ip2mark
     fi
 
-    # Миграция iptables → nft. Делаем ДО создания flow filter'а, чтобы не было
-    # конфликта prio с осиротевшими fw-фильтрами от прошлой жизни.
-    # iptables печатает "--set-xmark 0xM/0xffffffff" (новый формат iptables-nft);
-    # старый "--set-mark" тоже ловим на всякий случай.
+    # Migration iptables -> nft. Do this BEFORE creating flow filter, so there's no
+    # prio conflict with orphaned fw-filters from past life.
+    # iptables prints "--set-xmark 0xM/0xffffffff" (new iptables-nft format);
+    # old "--set-mark" is also caught just in case.
     REMOVED=0
     while IFS= read -r rule; do
         if [ -n "$rule" ]; then
@@ -162,9 +151,9 @@ if [ "${RATELIMIT_BACKEND:-nftables}" != "iptables" ] && command -v nft &>/dev/n
     fi
 
     if [ -n "$IFACE" ]; then
-        # Миграция: убрать старые per-IP fw filter'ы. ДО создания flow filter,
-        # иначе flow не вставится — "Specified filter kind does not match existing one".
-        # Grep ищет любые handle'ы у fw-фильтров на parent 1:0.
+        # Migration: remove old per-IP fw filters. BEFORE creating flow filter,
+        # otherwise flow won't be inserted - "Specified filter kind does not match existing one".
+        # Grep searches for any handles in fw-filters on parent 1:0.
         REMOVED_FW=0
         while IFS= read -r handle; do
             if [ -n "$handle" ]; then
@@ -177,23 +166,23 @@ if [ "${RATELIMIT_BACKEND:-nftables}" != "iptables" ] && command -v nft &>/dev/n
             echo -e "${G}[ensure-min] migrated $REMOVED_FW tc fw-filter(s) to flow-map${N}"
         fi
 
-        # Один root tc flow filter маршрутизирует пакеты в class 1:<mark> за O(1).
-        # Заменяет N штук "tc filter ... fw flowid 1:M" одним вызовом.
+        # One root tc flow filter routes packets to class 1:<mark> in O(1).
+        # Replaces N "tc filter ... fw flowid 1:M" calls with a single one.
         #
-        # Синтаксис: "flow map key mark addend 0xffffffff baseclass 1:1"
-        #   - "key mark" (singular, не "keys nfmark" — это другое имя в iproute2 6.x)
-        #   - "baseclass 1:1" — дефолт для map-режима (явный 1:0 у нас даёт "Illegal baseclass")
-        #   - "addend 0xffffffff" = +(-1) → итог: classid = (1:1) + (mark - 1) = 1:mark
-        # Без addend classid был бы 1:(mark+1) — несовпадение с HTB-классом 1:mark.
+        # Syntax: "flow map key mark addend 0xffffffff baseclass 1:1"
+        #   - "key mark" (singular, not "keys nfmark" - different name in iproute2 6.x)
+        #   - "baseclass 1:1" - default for map mode (explicit 1:0 gives "Illegal baseclass")
+        #   - "addend 0xffffffff" = +(-1) -> result: classid = (1:1) + (mark - 1) = 1:mark
+        # Without addend classid would be 1:(mark+1) - mismatch with HTB class 1:mark.
         if ! tc filter show dev "$IFACE" parent 1:0 2>/dev/null | grep -q "flow map"; then
-            echo -e "${Y}[ensure-min] tc: создаём root flow filter на $IFACE${N}"
+            echo -e "${Y}[ensure-min] tc: creating root flow filter on $IFACE${N}"
             tc filter add dev "$IFACE" parent 1:0 protocol ip prio 1 \
                 handle 1 flow map key mark addend 0xffffffff baseclass 1:1 2>&1 || \
-                echo -e "${R}[ensure-min] tc flow filter не создан${N}"
+                echo -e "${R}[ensure-min] tc flow filter not created${N}"
         fi
     fi
 elif [ "${RATELIMIT_BACKEND:-nftables}" != "iptables" ]; then
-    echo -e "${Y}[ensure-min] nft не установлен — выполняется в legacy iptables-режиме${N}"
+    echo -e "${Y}[ensure-min] nft not installed - running in legacy iptables mode${N}"
 fi
 
 echo "[ensure-min] Done"

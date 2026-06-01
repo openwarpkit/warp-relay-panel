@@ -1,11 +1,12 @@
-// Package traffic собирает per-IP трафик через netlink-conntrack
-// и хранит месячный агрегат на диске (MSK-таймзона).
+// Package traffic collects per-IP traffic via netlink-conntrack
+// and stores a monthly aggregate on disk (MSK timezone).
 package traffic
 
 import (
 	"context"
 	"encoding/json"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -24,9 +25,11 @@ type ipStats struct {
 }
 
 type fileFmt struct {
-	Month     string             `json:"month"`
-	IPs       map[string]ipStats `json:"ips"`
-	LastReset string             `json:"last_reset,omitempty"`
+	Month      string             `json:"month"`
+	IPs        map[string]ipStats `json:"ips"`
+	OrphanedTX int64              `json:"orphaned_tx"`
+	OrphanedRX int64              `json:"orphaned_rx"`
+	LastReset  string             `json:"last_reset,omitempty"`
 }
 
 type connKey struct {
@@ -82,40 +85,70 @@ func (m *Monitor) empty() fileFmt {
 	}
 }
 
-func (m *Monitor) save() {
-	if err := os.MkdirAll(filepath.Dir(m.path), 0o755); err != nil {
+func (m *Monitor) save(state fileFmt) {
+	if err := os.MkdirAll(filepath.Dir(m.path), 0o750); err != nil {
 		log.Printf("traffic: mkdir error: %v", err)
 		return
 	}
-	data, _ := json.MarshalIndent(m.state, "", "  ")
-	if err := os.WriteFile(m.path, data, 0o644); err != nil {
-		log.Printf("traffic: save error: %v", err)
+	tmpPath := m.path + ".tmp"
+	// #nosec G304 -- Tmp file path is constructed from config
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		log.Printf("traffic: save error (create tmp): %v", err)
+		return
+	}
+
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(state); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		log.Printf("traffic: save error (write tmp): %v", err)
+		return
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		log.Printf("traffic: save error (sync tmp): %v", err)
+		return
+	}
+	if err := f.Close(); err != nil {
+        _ = os.Remove(tmpPath)
+        log.Printf("traffic: save error (close tmp): %v", err)
+        return
+    }
+	if err := os.Rename(tmpPath, m.path); err != nil {
+		_ = os.Remove(tmpPath)
+		log.Printf("traffic: save error (rename): %v", err)
 	}
 }
 
-func (m *Monitor) checkMonthReset() {
+func (m *Monitor) checkMonthReset() *fileFmt {
 	cur := nowMSK().Format("2006-01")
 	if m.state.Month != cur {
 		log.Printf("Monthly reset (MSK): %s → %s", m.state.Month, cur)
 		m.state = m.empty()
 		m.lastConn = make(map[connKey][2]uint64)
-		m.save()
+		
+		cp := m.state
+		cp.IPs = make(map[string]ipStats)
+		return &cp
 	}
+	return nil
 }
 
-func (m *Monitor) Collect() {
-	// TTL = половина периода: traffic.Loop крутится с m.interval (default 30s),
-	// поэтому 15s кеш позволяет HTTP /traffic-handler'у дёшево переиспользовать
-	// тот же snapshot, не блокируя коллектор.
-	flows, err := m.ct.SnapshotUDP(m.interval / 2)
+func (m *Monitor) Collect(countFunc func(string) int) {
+	// TTL = half period: traffic.Loop runs with m.interval (default 30s),
+	// so a 15s cache allows the HTTP /traffic handler to cheaply reuse
+	// the same snapshot without blocking the collector.
+	flows, err := m.ct.SnapshotUDP()
 	if err != nil {
 		log.Printf("traffic: conntrack snapshot error: %v", err)
 		return
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.checkMonthReset()
+	resetState := m.checkMonthReset()
 
 	now := nowMSK().Format(time.RFC3339)
 	changed := false
@@ -129,13 +162,32 @@ func (m *Monitor) Collect() {
 		var dtx, drx int64
 		if prev, ok := m.lastConn[k]; ok {
 			if f.BytesOrig >= prev[0] {
-				dtx = int64(f.BytesOrig - prev[0])
+				diff := f.BytesOrig - prev[0]
+				if diff > math.MaxInt64 {
+					dtx = math.MaxInt64
+				} else {
+					dtx = int64(diff)
+				}
 			}
 			if f.BytesReply >= prev[1] {
-				drx = int64(f.BytesReply - prev[1])
+				diff := f.BytesReply - prev[1]
+				if diff > math.MaxInt64 {
+					drx = math.MaxInt64
+				} else {
+					drx = int64(diff)
+				}
 			}
 		}
 		if dtx > 0 || drx > 0 {
+			if countFunc != nil && countFunc(f.SrcIP) == 0 {
+				// Unauthorized / unknown IP - add to orphaned totals but do NOT allocate per-IP entry
+				// to prevent Unbounded Memory Leak DDoS vector.
+				m.state.OrphanedTX += dtx
+				m.state.OrphanedRX += drx
+				changed = true
+				continue
+			}
+
 			s := m.state.IPs[f.SrcIP]
 			s.TX += dtx
 			s.RX += drx
@@ -145,26 +197,45 @@ func (m *Monitor) Collect() {
 		}
 	}
 	m.lastConn = current
+	var stateCopy *fileFmt
 	if changed {
-		m.save()
+		cp := m.state
+		cp.IPs = make(map[string]ipStats, len(m.state.IPs))
+		for k, v := range m.state.IPs {
+			cp.IPs[k] = v
+		}
+		stateCopy = &cp
+	}
+	m.mu.Unlock()
+
+	if resetState != nil && !changed {
+		m.save(*resetState)
+	} else if stateCopy != nil {
+		m.save(*stateCopy)
 	}
 }
 
-func (m *Monitor) Loop(ctx context.Context) {
+func (m *Monitor) Loop(ctx context.Context, countFunc func(string) int) {
+	log.Printf("traffic: started collector every %s", m.interval)
 	t := time.NewTicker(m.interval)
 	defer t.Stop()
-	m.Collect()
+
+	// First immediate collection on start
+	m.Collect(countFunc)
+
 	for {
 		select {
 		case <-ctx.Done():
+			log.Println("traffic: shutdown signal received, saving final snapshot...")
+			m.Collect(countFunc)
 			return
 		case <-t.C:
-			m.Collect()
+			m.Collect(countFunc)
 		}
 	}
 }
 
-// PerIP — публичная структура для эндпоинтов.
+// PerIP is the public struct for endpoints.
 type PerIP struct {
 	IP          string  `json:"ip,omitempty"`
 	TXBytes     int64   `json:"tx_bytes"`
@@ -194,7 +265,10 @@ type Summary struct {
 func (m *Monitor) GetAll(refCount func(string) int, clients func(string) []int64) Summary {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.checkMonthReset()
+	if resetState := m.checkMonthReset(); resetState != nil {
+		// Asynchronous save in a goroutine because GetAll is read-only path
+		go m.save(*resetState)
+	}
 	out := Summary{
 		Month:     m.state.Month,
 		LastReset: m.state.LastReset,
@@ -218,6 +292,8 @@ func (m *Monitor) GetAll(refCount func(string) int, clients func(string) []int64
 			Updated:     s.Updated,
 		}
 	}
+	totalTX += m.state.OrphanedTX
+	totalRX += m.state.OrphanedRX
 	out.TotalTXBytes = totalTX
 	out.TotalRXBytes = totalRX
 	out.TotalBytes = totalTX + totalRX
@@ -253,12 +329,15 @@ func (m *Monitor) GetIP(ip string, refCount func(string) int, clients func(strin
 
 func (m *Monitor) Reset() string {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.state = m.empty()
 	m.lastConn = make(map[connKey][2]uint64)
-	m.save()
+	cp := m.state
+	cp.IPs = make(map[string]ipStats)
+	m.mu.Unlock()
+	
+	m.save(cp)
 	log.Println("Traffic data manually reset")
-	return m.state.Month
+	return cp.Month
 }
 
 func (m *Monitor) Month() string {

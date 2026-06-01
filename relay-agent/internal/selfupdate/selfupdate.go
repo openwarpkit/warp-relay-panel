@@ -1,6 +1,6 @@
-// Package selfupdate — git pull репозитория для обновления конфигов/скриптов,
-// скачивание свежего бинаря из GitHub Releases (slim VPS — без `make build`),
-// атомарная замена и рестарт через systemd.
+// Package selfupdate - git pull repository to update configs/scripts,
+// download fresh binary from GitHub Releases (slim VPS - no `make build`),
+// atomic swap and restart via systemd.
 package selfupdate
 
 import (
@@ -13,11 +13,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 )
 
-// DefaultReleaseRepo — owner/repo на GitHub, откуда тянем бинари.
-// Override через env AGENT_RELEASE_REPO=user/repo.
+// DefaultReleaseRepo - owner/repo on GitHub, from where we pull binaries.
+// Override via env AGENT_RELEASE_REPO=user/repo.
 const DefaultReleaseRepo = "nellimonix/warp-relay-panel"
 
 type Status struct {
@@ -35,12 +37,12 @@ type Status struct {
 }
 
 type Updater struct {
-	RepoDir     string // /opt/warp-relay-panel — нужен только для git pull скриптов
+	RepoDir     string // /opt/warp-relay-panel - only needed for git pull of scripts
 	InstallDir  string // /opt/warp-relay-agent
 	StatusPath  string
 	Version     string
-	BinaryName  string // "warp-relay-agent" или "warp-relay-agent-min"
-	ReleaseRepo string // owner/repo, по умолчанию DefaultReleaseRepo
+	BinaryName  string // "warp-relay-agent" or "warp-relay-agent-min"
+	ReleaseRepo string // owner/repo, defaults to DefaultReleaseRepo
 }
 
 type ghRelease struct {
@@ -73,15 +75,45 @@ func (u *Updater) binaryName() string {
 }
 
 func (u *Updater) saveStatus(s Status) {
-	if err := os.MkdirAll(filepath.Dir(u.StatusPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(u.StatusPath), 0o750); err != nil {
 		log.Printf("selfupdate: mkdir error: %v", err)
 		return
 	}
-	data, _ := json.MarshalIndent(s, "", "  ")
-	os.WriteFile(u.StatusPath, data, 0o644)
+	tmpPath := u.StatusPath + ".tmp"
+	// #nosec G304 -- Status file path is controlled by config
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		log.Printf("selfupdate: saveStatus error (create tmp): %v", err)
+		return
+	}
+
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(s); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		log.Printf("selfupdate: saveStatus error (write tmp): %v", err)
+		return
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		log.Printf("selfupdate: saveStatus error (sync tmp): %v", err)
+		return
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		log.Printf("selfupdate: saveStatus error (close tmp): %v", err)
+		return
+	}
+	if err := os.Rename(tmpPath, u.StatusPath); err != nil {
+		_ = os.Remove(tmpPath)
+		log.Printf("selfupdate: saveStatus error (rename): %v", err)
+	}
 }
 
 func (u *Updater) LastStatus() *Status {
+	// #nosec G304 -- Status file path is controlled by config
 	data, err := os.ReadFile(u.StatusPath)
 	if err != nil {
 		return nil
@@ -93,8 +125,8 @@ func (u *Updater) LastStatus() *Status {
 	return &s
 }
 
-// fetchLatestRelease — тянет latest release с GitHub API,
-// возвращает asset URL для нашего бинаря.
+// fetchLatestRelease - pulls the latest release from GitHub API,
+// returns asset URL for our binary.
 func (u *Updater) fetchLatestRelease() (tag, assetURL string, err error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", u.repo())
 	req, _ := http.NewRequest("GET", url, nil)
@@ -105,7 +137,7 @@ func (u *Updater) fetchLatestRelease() (tag, assetURL string, err error) {
 	if err != nil {
 		return "", "", fmt.Errorf("github api: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
@@ -126,52 +158,58 @@ func (u *Updater) fetchLatestRelease() (tag, assetURL string, err error) {
 	return rel.TagName, "", fmt.Errorf("asset %q not found in release %s", binName, rel.TagName)
 }
 
-// downloadBinary — скачивает свежий бинарь во временный файл рядом с целевым.
+// downloadBinary - downloads fresh binary to a temp file next to the target.
 func (u *Updater) downloadBinary(url, tmpPath string) error {
-	req, _ := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return fmt.Errorf("invalid download url: %w", err)
+	}
 	client := &http.Client{Timeout: 120 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("download: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("download status %d", resp.StatusCode)
 	}
 
+	// #nosec G302,G304 -- Executable file needs run permissions, path is from config
 	out, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
 	if err != nil {
 		return fmt.Errorf("create tmp: %w", err)
 	}
-	defer out.Close()
+	defer func() { _ = out.Close() }()
 
 	n, err := io.Copy(out, resp.Body)
 	if err != nil {
 		return fmt.Errorf("write tmp: %w", err)
 	}
-	if n < 1024*1024 { // <1 MB — заведомо битый бинарь
+	if n < 1024*1024 { // <1 MB - certainly a corrupted binary
 		return fmt.Errorf("downloaded binary too small: %d bytes", n)
 	}
 	return nil
 }
 
-// runShell — лёгкий wrapper вместо отдельного shell пакета.
+// runShell - lightweight wrapper instead of a separate shell package.
 func runShell(cmd string, timeout time.Duration) (rc int, out string, errOut string) {
+	// #nosec G204 -- Intentional shell execution for updates
 	c := exec.Command("bash", "-c", cmd)
 	stdout, _ := c.StdoutPipe()
 	stderr, _ := c.StderrPipe()
 	if err := c.Start(); err != nil {
 		return -1, "", err.Error()
 	}
-	done := make(chan struct{})
+	var wg sync.WaitGroup
 	var outB, errB strings.Builder
-	go func() { io.Copy(&outB, stdout); close(done) }()
-	go func() { io.Copy(&errB, stderr) }()
+	wg.Add(2)
+	go func() { defer wg.Done(); _, _ = io.Copy(&outB, stdout) }()
+	go func() { defer wg.Done(); _, _ = io.Copy(&errB, stderr) }()
 
 	timer := time.AfterFunc(timeout, func() { _ = c.Process.Kill() })
 	err := c.Wait()
 	timer.Stop()
-	<-done
+	wg.Wait()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return exitErr.ExitCode(), outB.String(), errB.String()
@@ -181,14 +219,14 @@ func runShell(cmd string, timeout time.Duration) (rc int, out string, errOut str
 	return 0, outB.String(), errB.String()
 }
 
-// Run — git pull (для скриптов/конфигов) → проверить latest release →
-// скачать бинарь → atomic swap → restart.
+// Run - git pull (for scripts/configs) -> check latest release ->
+// download binary -> atomic swap -> restart.
 func (u *Updater) Run() {
 	startedAt := nowISO()
 
-	// 1. git pull (ensure_rules.sh, deploy-скрипты, README) — даже если бинарь не обновится.
+	// 1. git pull (ensure_rules.sh, deploy scripts, README) - even if binary won't update.
 	lock := filepath.Join(u.RepoDir, ".git", "index.lock")
-	os.Remove(lock)
+	_ = os.Remove(lock)
 
 	rc, out, errOut := runShell(
 		fmt.Sprintf("cd %s && git pull --ff-only 2>&1", u.RepoDir),
@@ -228,7 +266,7 @@ func (u *Updater) Run() {
 		return
 	}
 
-	// 3. Если tag совпадает с текущей версией — пропустить скачивание.
+	// 3. If tag matches current version - skip download.
 	tagVersion := strings.TrimPrefix(tag, "agent-v")
 	if tagVersion == u.Version {
 		u.saveStatus(Status{
@@ -243,11 +281,11 @@ func (u *Updater) Run() {
 		return
 	}
 
-	// 4. Скачать бинарь.
+	// 4. Download binary.
 	dstBin := filepath.Join(u.InstallDir, u.binaryName())
 	tmpBin := dstBin + ".new"
 	if err := u.downloadBinary(assetURL, tmpBin); err != nil {
-		os.Remove(tmpBin)
+		_ = os.Remove(tmpBin)
 		u.saveStatus(Status{
 			OK: false, Error: "download failed",
 			Details:    truncate(err.Error(), 500),
@@ -261,7 +299,7 @@ func (u *Updater) Run() {
 
 	// 5. Atomic swap.
 	if err := os.Rename(tmpBin, dstBin); err != nil {
-		os.Remove(tmpBin)
+		_ = os.Remove(tmpBin)
 		u.saveStatus(Status{
 			OK: false, Error: "binary swap failed",
 			Details:    truncate(err.Error(), 500),
@@ -273,7 +311,7 @@ func (u *Updater) Run() {
 		return
 	}
 
-	// 6. ensure_rules.sh из свежего git pull.
+	// 6. ensure_rules.sh from fresh git pull.
 	src := filepath.Join(u.RepoDir, "relay-agent", "deploy", "ensure_rules.sh")
 	if u.binaryName() == "warp-relay-agent-min" {
 		src = filepath.Join(u.RepoDir, "relay-agent", "deploy", "ensure_rules_min.sh")
@@ -293,13 +331,12 @@ func (u *Updater) Run() {
 		StartedAt:  startedAt,
 		FinishedAt: nowISO(),
 	})
-	log.Printf("Update complete: %s → %s, restarting via systemd...", u.Version, tag)
+	log.Printf("Update complete: %s -> %s, restarting via SIGTERM...", u.Version, tag)
 
-	// 7. systemctl restart (отложенный, чтобы успеть отдать ответ).
-	cmd := exec.Command("bash", "-c", "sleep 2 && systemctl restart warp-relay-agent")
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	cmd.Start()
+	// 7. SIGTERM (delayed, to allow returning a response).
+	time.AfterFunc(2*time.Second, func() {
+		_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+	})
 }
 
 func truncate(s string, n int) string {

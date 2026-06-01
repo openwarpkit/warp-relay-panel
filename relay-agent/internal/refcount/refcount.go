@@ -1,5 +1,5 @@
-// Package refcount хранит, сколько клиентов сидят за одним IP.
-// Persistent JSON на диске + thread-safe in-memory map.
+// Package refcount stores how many clients are on a single IP.
+// Persistent JSON on disk + thread-safe in-memory map.
 package refcount
 
 import (
@@ -7,23 +7,34 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"sync"
+	"time"
 )
 
 type Map struct {
-	mu   sync.Mutex
-	m    map[string]map[int64]struct{}
-	path string
+	mu     sync.Mutex
+	m      map[string]map[int64]struct{}
+	path   string
+	dirty  bool
+	notify chan struct{}
+	stop   chan struct{}
 }
 
 func New(path string) *Map {
-	r := &Map{m: make(map[string]map[int64]struct{}), path: path}
+	r := &Map{
+		m:      make(map[string]map[int64]struct{}),
+		path:   path,
+		notify: make(chan struct{}, 1),
+		stop:   make(chan struct{}),
+	}
 	r.load()
+	go r.saveWorker()
 	return r
 }
 
 func (r *Map) load() {
+	// #nosec G304 -- Status file path is controlled by config
 	data, err := os.ReadFile(r.path)
 	if err != nil {
 		return
@@ -43,9 +54,100 @@ func (r *Map) load() {
 	log.Printf("refcount loaded: %d IPs", len(r.m))
 }
 
-func (r *Map) save() {
-	if err := os.MkdirAll(filepath.Dir(r.path), 0o755); err != nil {
+func (r *Map) triggerSave() {
+	r.dirty = true
+	select {
+	case r.notify <- struct{}{}:
+	default:
+	}
+}
+
+func (r *Map) saveWorker() {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.notify:
+		case <-ticker.C:
+		case <-r.stop:
+			return
+		}
+
+		r.mu.Lock()
+		if !r.dirty {
+			r.mu.Unlock()
+			continue
+		}
+
+		out := make(map[string][]int64, len(r.m))
+		for ip, set := range r.m {
+			if len(set) == 0 {
+				continue
+			}
+			ids := make([]int64, 0, len(set))
+			for id := range set {
+				ids = append(ids, id)
+			}
+			slices.Sort(ids)
+			out[ip] = ids
+		}
+		r.dirty = false
+		r.mu.Unlock()
+
+		r.writeToDisk(out)
+	}
+}
+
+// Close gracefully stops the background worker and forces a final save.
+func (r *Map) Close() {
+	close(r.stop)
+	r.ForceSave()
+}
+
+func (r *Map) writeToDisk(out map[string][]int64) {
+	if err := os.MkdirAll(filepath.Dir(r.path), 0o750); err != nil {
 		log.Printf("refcount: mkdir error: %v", err)
+		return
+	}
+
+	tmpPath := r.path + ".tmp"
+	// #nosec G304 -- Tmp file path is constructed from config
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		log.Printf("refcount: create tmp file error: %v", err)
+		return
+	}
+
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(out); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		log.Printf("refcount: write tmp file error: %v", err)
+		return
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		log.Printf("refcount: sync tmp file error: %v", err)
+		return
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		log.Printf("refcount: close tmp file error: %v", err)
+		return
+	}
+	if err := os.Rename(tmpPath, r.path); err != nil {
+		_ = os.Remove(tmpPath)
+		log.Printf("refcount: rename error: %v", err)
+	}
+}
+
+// ForceSave writes immediately without debouncing, blocking until done.
+func (r *Map) ForceSave() {
+	r.mu.Lock()
+	if !r.dirty {
+		r.mu.Unlock()
 		return
 	}
 	out := make(map[string][]int64, len(r.m))
@@ -57,16 +159,16 @@ func (r *Map) save() {
 		for id := range set {
 			ids = append(ids, id)
 		}
-		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+		slices.Sort(ids)
 		out[ip] = ids
 	}
-	data, _ := json.MarshalIndent(out, "", "  ")
-	if err := os.WriteFile(r.path, data, 0o644); err != nil {
-		log.Printf("refcount: save error: %v", err)
-	}
+	r.dirty = false
+	r.mu.Unlock()
+
+	r.writeToDisk(out)
 }
 
-// Add возвращает true, если для oldIP refcount упал до 0 (можно удалять из ipset).
+// Add returns true if the refcount for oldIP dropped to 0 (can be removed from ipset).
 func (r *Map) Add(ip string, clientID int64, oldIP string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -84,19 +186,19 @@ func (r *Map) Add(ip string, clientID int64, oldIP string) bool {
 		r.m[ip] = make(map[int64]struct{})
 	}
 	r.m[ip][clientID] = struct{}{}
-	r.save()
+	r.triggerSave()
 	return canRemoveOld
 }
 
-// RemoveClient удаляет клиента (или всех, если clientID==0).
-// Возвращает true, если для IP больше нет клиентов.
+// RemoveClient removes a client (or all, if clientID==0).
+// Returns true if there are no more clients for this IP.
 func (r *Map) RemoveClient(ip string, clientID int64) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	set, ok := r.m[ip]
 	if !ok || len(set) == 0 {
 		delete(r.m, ip)
-		r.save()
+		r.triggerSave()
 		return true
 	}
 	if clientID != 0 {
@@ -108,14 +210,14 @@ func (r *Map) RemoveClient(ip string, clientID int64) bool {
 	}
 	if len(set) == 0 {
 		delete(r.m, ip)
-		r.save()
+		r.triggerSave()
 		return true
 	}
-	r.save()
+	r.triggerSave()
 	return false
 }
 
-// SetAll полностью заменяет содержимое.
+// SetAll completely replaces the contents.
 func (r *Map) SetAll(entries map[string][]int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -127,7 +229,7 @@ func (r *Map) SetAll(entries map[string][]int64) {
 		}
 		r.m[ip] = set
 	}
-	r.save()
+	r.triggerSave()
 }
 
 func (r *Map) Count(ip string) int {
@@ -144,11 +246,11 @@ func (r *Map) ClientsFor(ip string) []int64 {
 	for k := range set {
 		out = append(out, k)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	slices.Sort(out)
 	return out
 }
 
-// All возвращает копию всей карты для эндпоинта /refcount.
+// All returns a copy of the entire map for the /refcount endpoint.
 func (r *Map) All() map[string][]int64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -161,13 +263,13 @@ func (r *Map) All() map[string][]int64 {
 		for id := range set {
 			ids = append(ids, id)
 		}
-		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+		slices.Sort(ids)
 		out[ip] = ids
 	}
 	return out
 }
 
-// IPs возвращает список всех IP (для пересборки ipset из refcount).
+// IPs returns a list of all IPs (for rebuilding ipset from refcount).
 func (r *Map) IPs() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -177,6 +279,6 @@ func (r *Map) IPs() []string {
 			out = append(out, ip)
 		}
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }

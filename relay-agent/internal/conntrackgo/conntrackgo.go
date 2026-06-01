@@ -1,9 +1,3 @@
-// Package conntrackgo — netlink-обёртка вокруг ti-mo/conntrack для горячих
-// операций. Заменяет shell-вызовы `conntrack -L | grep | sort | uniq` и
-// `conntrack -D -p udp -s IP`.
-//
-// Производительность: на 100k UDP-флоу snapshot занимает ~30-50ms CPU и
-// ~30 MB peak memory (vs ~100-200ms / 50 MB у shell-пути с парсингом текста).
 package conntrackgo
 
 import (
@@ -14,13 +8,16 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"net"
 
 	"github.com/ti-mo/conntrack"
+	"github.com/ti-mo/netfilter"
 )
 
 const protoUDP = 17
+const numShards = 256
 
-// UDPFlow — минимальный набор для traffic accounting.
+// UDPFlow is the minimal set for traffic accounting.
 type UDPFlow struct {
 	SrcIP      string
 	DstIP      string
@@ -31,34 +28,84 @@ type UDPFlow struct {
 	Assured    bool
 }
 
-// Client — persistent netlink-соединение с лениво-восстанавливаемой реконнекцией.
-// Один Conn используется все время процесса, пересоздаётся при ошибке.
-//
-// Кеш Dump'а: публичные методы принимают maxAge — если последний снимок свежее,
-// возвращается он же. Снимает GC-pressure от ~30MB аллокаций на каждом Dump и
-// дедупит параллельные запросы от разных Loop'ов.
+type FlowKey struct {
+	SrcIP   string
+	DstIP   string
+	SrcPort uint16
+	DstPort uint16
+}
+
+func (k FlowKey) Hash() uint32 {
+	hash := uint32(2166136261)
+	for i := 0; i < len(k.SrcIP); i++ {
+		hash ^= uint32(k.SrcIP[i])
+		hash *= 16777619
+	}
+	for i := 0; i < len(k.DstIP); i++ {
+		hash ^= uint32(k.DstIP[i])
+		hash *= 16777619
+	}
+	hash ^= uint32(k.SrcPort)
+	hash *= 16777619
+	hash ^= uint32(k.DstPort)
+	hash *= 16777619
+	return hash
+}
+
+type flowShard struct {
+	mu    sync.RWMutex
+	flows map[FlowKey]conntrack.Flow
+}
+
 type Client struct {
 	mu   sync.Mutex
 	conn *conntrack.Conn
 
-	snapMu    sync.Mutex
-	snapFlows []conntrack.Flow
-	snapAt    time.Time
+	shards [numShards]*flowShard
+
+	obsMu     sync.RWMutex
+	observers []chan<- conntrack.Event
+
+	stopListen chan struct{}
+	closeOnce  sync.Once
+	wg         sync.WaitGroup
 }
 
 func New() *Client {
-	c := &Client{}
+	c := &Client{
+		stopListen: make(chan struct{}),
+	}
+	for i := 0; i < numShards; i++ {
+		c.shards[i] = &flowShard{
+			flows: make(map[FlowKey]conntrack.Flow, 64),
+		}
+	}
 	c.enableAccounting()
+	
+	c.wg.Add(2)
+	go c.listenWorker()
+	go c.reconcileWorker()
+	
 	return c
 }
 
-// enableAccounting — включаем nf_conntrack_acct=1, иначе counters пустые.
+func (c *Client) RegisterObserver(ch chan<- conntrack.Event) {
+	c.obsMu.Lock()
+	defer c.obsMu.Unlock()
+	c.observers = append(c.observers, ch)
+}
+
+func (c *Client) getShard(k FlowKey) *flowShard {
+	return c.shards[k.Hash()%numShards]
+}
+
 func (c *Client) enableAccounting() {
 	const path = "/proc/sys/net/netfilter/nf_conntrack_acct"
 	data, err := os.ReadFile(path)
 	if err == nil && strings.TrimSpace(string(data)) == "1" {
 		return
 	}
+	// #nosec G306 -- Kernel /proc requires default permissions
 	if err := os.WriteFile(path, []byte("1\n"), 0o644); err == nil {
 		log.Println("conntrack accounting enabled (nf_conntrack_acct=1)")
 	}
@@ -78,18 +125,20 @@ func (c *Client) ensureConn() (*conntrack.Conn, error) {
 	return c.conn, nil
 }
 
-// reset закрывает текущий conn — следующий ensureConn откроет новый.
-// Вызывается при ENOBUFS или иных recoverable-ошибках.
 func (c *Client) reset() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.conn != nil {
-		c.conn.Close()
+		_ = c.conn.Close()
 		c.conn = nil
 	}
 }
 
 func (c *Client) Close() error {
+	c.closeOnce.Do(func() {
+		close(c.stopListen)
+	})
+	c.wg.Wait()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.conn != nil {
@@ -100,173 +149,282 @@ func (c *Client) Close() error {
 	return nil
 }
 
-// cachedDump возвращает кешированный Dump если ему меньше maxAge, иначе
-// делает свежий. maxAge<=0 — всегда свежий (для горячих операций типа MarkBySrcUDP).
-// Сериализует параллельные cache-miss'ы под snapMu — другие читатели ждут активный
-// Dump вместо того чтобы делать свой.
-func (c *Client) cachedDump(maxAge time.Duration) ([]conntrack.Flow, error) {
-	if maxAge <= 0 {
-		return c.dumpWithRetry()
+func (c *Client) listenWorker() {
+	defer c.wg.Done()
+	for {
+		select {
+		case <-c.stopListen:
+			return
+		default:
+		}
+
+		conn, err := c.ensureConn()
+		if err != nil {
+			log.Printf("conntrack listenWorker: dial failed: %v", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		// Initial sync
+		flows, err := conn.Dump(nil)
+		if err == nil {
+			for i := 0; i < numShards; i++ {
+				c.shards[i].mu.Lock()
+				c.shards[i].flows = make(map[FlowKey]conntrack.Flow, len(flows)/numShards+1)
+				c.shards[i].mu.Unlock()
+			}
+			for _, f := range flows {
+				if f.TupleOrig.Proto.Protocol == protoUDP {
+					k := FlowKey{
+						SrcIP:   f.TupleOrig.IP.SourceAddress.String(),
+						DstIP:   f.TupleOrig.IP.DestinationAddress.String(),
+						SrcPort: f.TupleOrig.Proto.SourcePort,
+						DstPort: f.TupleOrig.Proto.DestinationPort,
+					}
+					shard := c.getShard(k)
+					shard.mu.Lock()
+					shard.flows[k] = f
+					shard.mu.Unlock()
+				}
+			}
+		} else {
+			log.Printf("conntrack listenWorker: dump failed: %v", err)
+		}
+
+		evChan := make(chan conntrack.Event, 4096)
+		errChan, err := conn.Listen(evChan, 4, netfilter.GroupsCT)
+		if err != nil {
+			log.Printf("conntrack listenWorker: listen failed: %v", err)
+			c.reset()
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+	loop:
+		for {
+			select {
+			case <-c.stopListen:
+				return
+			case ev, ok := <-evChan:
+				if !ok {
+					break loop
+				}
+				if ev.Flow == nil || ev.Flow.TupleOrig.Proto.Protocol != protoUDP {
+					continue
+				}
+				k := FlowKey{
+					SrcIP:   ev.Flow.TupleOrig.IP.SourceAddress.String(),
+					DstIP:   ev.Flow.TupleOrig.IP.DestinationAddress.String(),
+					SrcPort: ev.Flow.TupleOrig.Proto.SourcePort,
+					DstPort: ev.Flow.TupleOrig.Proto.DestinationPort,
+				}
+
+				shard := c.getShard(k)
+				shard.mu.Lock()
+				switch ev.Type {
+				case conntrack.EventNew, conntrack.EventUpdate:
+					shard.flows[k] = *ev.Flow
+				case conntrack.EventDestroy:
+					delete(shard.flows, k)
+				}
+				shard.mu.Unlock()
+
+				c.obsMu.RLock()
+				for _, ch := range c.observers {
+					select {
+					case ch <- ev:
+					default:
+					}
+				}
+				c.obsMu.RUnlock()
+
+			case err := <-errChan:
+				log.Printf("conntrack listenWorker: worker error: %v", err)
+				break loop
+			}
+		}
+
+		c.reset()
+		time.Sleep(1 * time.Second)
 	}
-	c.snapMu.Lock()
-	defer c.snapMu.Unlock()
-	if c.snapFlows != nil && time.Since(c.snapAt) < maxAge {
-		return c.snapFlows, nil
-	}
-	flows, err := c.dumpWithRetry()
-	if err != nil {
-		return nil, err
-	}
-	c.snapFlows = flows
-	c.snapAt = time.Now()
-	return flows, nil
 }
 
-// dumpWithRetry делает Dump, при системных ошибках реконнектит и пробует ещё раз.
-func (c *Client) dumpWithRetry() ([]conntrack.Flow, error) {
+// reconcileWorker periodically syncs byte counters and removes zombies
+func (c *Client) reconcileWorker() {
+	defer c.wg.Done()
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.stopListen:
+			return
+		case <-ticker.C:
+			c.reconcileOnce()
+		}
+	}
+}
+
+func (c *Client) reconcileOnce() {
 	conn, err := c.ensureConn()
 	if err != nil {
-		return nil, err
+		return
 	}
 	flows, err := conn.Dump(nil)
 	if err != nil {
-		// Recoverable: ENOBUFS, EBADF, EBUSY, EINTR — переоткрываем conn
-		c.reset()
-		conn, err2 := c.ensureConn()
-		if err2 != nil {
-			return nil, fmt.Errorf("dump retry failed: %w (orig: %v)", err2, err)
-		}
-		return conn.Dump(nil)
+		return
 	}
-	return flows, nil
+
+	activeKernel := make(map[FlowKey]conntrack.Flow, len(flows))
+	for _, f := range flows {
+		if f.TupleOrig.Proto.Protocol == protoUDP {
+			k := FlowKey{
+				SrcIP:   f.TupleOrig.IP.SourceAddress.String(),
+				DstIP:   f.TupleOrig.IP.DestinationAddress.String(),
+				SrcPort: f.TupleOrig.Proto.SourcePort,
+				DstPort: f.TupleOrig.Proto.DestinationPort,
+			}
+			activeKernel[k] = f
+		}
+	}
+
+	for i := 0; i < numShards; i++ {
+		shard := c.shards[i]
+		shard.mu.Lock()
+		for k := range shard.flows {
+			if kf, ok := activeKernel[k]; ok {
+				flow := shard.flows[k]
+				flow.CountersOrig = kf.CountersOrig
+				flow.CountersReply = kf.CountersReply
+				flow.Status = kf.Status
+				shard.flows[k] = flow
+			} else {
+				delete(shard.flows, k)
+			}
+		}
+		shard.mu.Unlock()
+	}
 }
 
-// SnapshotUDP возвращает все UDP-флоу с accounting-данными.
-// Исключает source = 162.159.* и 172.* (CF-internal обратный трафик),
-// а также флоу с sport/dport = 22 (SSH-шум).
-// maxAge — TTL кеша Dump'а; 0 = всегда свежий.
-func (c *Client) SnapshotUDP(maxAge time.Duration) ([]UDPFlow, error) {
-	flows, err := c.cachedDump(maxAge)
-	if err != nil {
-		return nil, err
+func isFilteredIP(src string) bool {
+	if strings.HasPrefix(src, "162.159.") {
+		return true
 	}
-	out := make([]UDPFlow, 0, len(flows)/4)
-	for i := range flows {
-		f := &flows[i]
-		if f.TupleOrig.Proto.Protocol != protoUDP {
-			continue
+	ip := net.ParseIP(src)
+	if ip == nil {
+		return false
+	}
+	return ip.IsPrivate() || ip.IsLoopback()
+}
+
+func (c *Client) SnapshotUDP() ([]UDPFlow, error) {
+	var out []UDPFlow
+	for i := 0; i < numShards; i++ {
+		shard := c.shards[i]
+		shard.mu.RLock()
+		for _, f := range shard.flows {
+			src := f.TupleOrig.IP.SourceAddress.String()
+			dst := f.TupleOrig.IP.DestinationAddress.String()
+			sport := f.TupleOrig.Proto.SourcePort
+			dport := f.TupleOrig.Proto.DestinationPort
+			if isFilteredIP(src) {
+				continue
+			}
+			if dport == 22 || sport == 22 {
+				continue
+			}
+			out = append(out, UDPFlow{
+				SrcIP:      src,
+				DstIP:      dst,
+				SrcPort:    sport,
+				DstPort:    dport,
+				BytesOrig:  f.CountersOrig.Bytes,
+				BytesReply: f.CountersReply.Bytes,
+				Assured:    f.Status.Assured(),
+			})
 		}
-		src := f.TupleOrig.IP.SourceAddress.String()
-		dst := f.TupleOrig.IP.DestinationAddress.String()
-		sport := f.TupleOrig.Proto.SourcePort
-		dport := f.TupleOrig.Proto.DestinationPort
-		if strings.HasPrefix(src, "162.159.") || strings.HasPrefix(src, "172.") {
-			continue
-		}
-		if dport == 22 || sport == 22 {
-			continue
-		}
-		out = append(out, UDPFlow{
-			SrcIP: src, DstIP: dst, SrcPort: sport, DstPort: dport,
-			BytesOrig:  f.CountersOrig.Bytes,
-			BytesReply: f.CountersReply.Bytes,
-			Assured:    f.Status.Assured(),
-		})
+		shard.mu.RUnlock()
 	}
 	return out, nil
 }
 
-// AssuredUDPSrcs возвращает уникальные source IP для UDP-флоу со статусом ASSURED,
-// без CF-internal префиксов. Ровно то, что давал shell-pipeline `conntrack -L | grep ASSURED | …`.
-// maxAge — TTL кеша Dump'а; 0 = всегда свежий.
-func (c *Client) AssuredUDPSrcs(maxAge time.Duration) (map[string]struct{}, error) {
-	flows, err := c.cachedDump(maxAge)
-	if err != nil {
-		return nil, err
-	}
+func (c *Client) AssuredUDPSrcs() (map[string]struct{}, error) {
 	out := make(map[string]struct{}, 256)
-	for i := range flows {
-		f := &flows[i]
-		if f.TupleOrig.Proto.Protocol != protoUDP {
-			continue
+	for i := 0; i < numShards; i++ {
+		shard := c.shards[i]
+		shard.mu.RLock()
+		for _, f := range shard.flows {
+			if !f.Status.Assured() {
+				continue
+			}
+			src := f.TupleOrig.IP.SourceAddress.String()
+			if strings.HasPrefix(src, "162.159.") {
+				continue
+			}
+			out[src] = struct{}{}
 		}
-		if !f.Status.Assured() {
-			continue
-		}
-		src := f.TupleOrig.IP.SourceAddress.String()
-		if strings.HasPrefix(src, "162.159.") {
-			continue
-		}
-		out[src] = struct{}{}
+		shard.mu.RUnlock()
 	}
 	return out, nil
 }
 
-// DeleteBySrcUDP удаляет все UDP-флоу с заданным source IP.
-// Аналог shell `conntrack -D -p udp -s {ip}`.
 func (c *Client) DeleteBySrcUDP(srcIP string) error {
-	flows, err := c.dumpWithRetry()
-	if err != nil {
-		return err
-	}
 	conn, err := c.ensureConn()
 	if err != nil {
 		return err
 	}
-	deleted := 0
-	for i := range flows {
-		f := &flows[i]
-		if f.TupleOrig.Proto.Protocol != protoUDP {
-			continue
+
+	var toDelete []conntrack.Flow
+	for i := 0; i < numShards; i++ {
+		shard := c.shards[i]
+		shard.mu.RLock()
+		for _, f := range shard.flows {
+			if f.TupleOrig.IP.SourceAddress.String() == srcIP {
+				toDelete = append(toDelete, f)
+			}
 		}
-		if f.TupleOrig.IP.SourceAddress.String() != srcIP {
-			continue
-		}
-		if err := conn.Delete(*f); err != nil {
-			// игнорируем ENOENT — флоу мог истечь между Dump и Delete
+		shard.mu.RUnlock()
+	}
+
+	for _, f := range toDelete {
+		if err := conn.Delete(f); err != nil {
 			if !errIsENOENT(err) {
 				log.Printf("conntrack delete %s: %v", srcIP, err)
 			}
-			continue
 		}
-		deleted++
 	}
 	return nil
 }
 
-// MarkBySrcsUDP — batch-вариант MarkBySrcUDP. За один Dump обновляет mark для
-// N источников (разные mark на разный IP). Используется в SetBatch / RestoreAll.
-// Возвращает количество обновлённых flow'ов и первую ошибку (если была).
-func (c *Client) MarkBySrcsUDP(maxAge time.Duration, srcToMark map[string]uint32) (int, error) {
+func (c *Client) MarkBySrcsUDP(srcToMark map[string]uint32) (int, error) {
 	if len(srcToMark) == 0 {
 		return 0, nil
-	}
-	flows, err := c.cachedDump(maxAge)
-	if err != nil {
-		return 0, err
 	}
 	conn, err := c.ensureConn()
 	if err != nil {
 		return 0, err
 	}
+
+	var toUpdate []conntrack.Flow
+	for i := 0; i < numShards; i++ {
+		shard := c.shards[i]
+		shard.mu.RLock()
+		for _, f := range shard.flows {
+			src := f.TupleOrig.IP.SourceAddress.String()
+			newMark, ok := srcToMark[src]
+			if ok && f.Mark != newMark {
+				fCopy := f
+				fCopy.Mark = newMark
+				toUpdate = append(toUpdate, fCopy)
+			}
+		}
+		shard.mu.RUnlock()
+	}
+
 	updated := 0
-	for i := range flows {
-		f := flows[i]
-		if f.TupleOrig.Proto.Protocol != protoUDP {
-			continue
-		}
-		src := f.TupleOrig.IP.SourceAddress.String()
-		newMark, ok := srcToMark[src]
-		if !ok {
-			continue
-		}
-		if f.Mark == newMark {
-			continue // уже правильный mark, пропускаем
-		}
-		f.Mark = newMark
+	for _, f := range toUpdate {
 		if err := conn.Update(f); err != nil {
 			if !errIsENOENT(err) {
-				log.Printf("conntrack update mark %s: %v", src, err)
+				log.Printf("conntrack update mark %s: %v", f.TupleOrig.IP.SourceAddress.String(), err)
 			}
 			continue
 		}
@@ -275,39 +433,33 @@ func (c *Client) MarkBySrcsUDP(maxAge time.Duration, srcToMark map[string]uint32
 	return updated, nil
 }
 
-// MarkBySrcUDP проставляет mark всем существующим UDP-флоу с заданным src.
-// Аналог shell `conntrack -U -s {ip} -p udp --mark {mark}`.
-//
-// maxAge — TTL для cache: 0 = всегда свежий Dump (~30MB heap + 5-30ms CPU).
-// При batch-applyTC (RestoreAll / sharedlimit reconcile с N новыми IP) передача
-// разумного maxAge (например, 5s — половина SharedScanInterval) переиспользует
-// один и тот же snapshot и снимает N×Dump → 1×Dump.
-func (c *Client) MarkBySrcUDP(maxAge time.Duration, srcIP string, mark uint32) error {
-	flows, err := c.cachedDump(maxAge)
-	if err != nil {
-		return err
-	}
+func (c *Client) MarkBySrcUDP(srcIP string, mark uint32) error {
 	conn, err := c.ensureConn()
 	if err != nil {
 		return err
 	}
-	updated := 0
-	for i := range flows {
-		f := flows[i]
-		if f.TupleOrig.Proto.Protocol != protoUDP {
-			continue
+
+	var toUpdate []conntrack.Flow
+	for i := 0; i < numShards; i++ {
+		shard := c.shards[i]
+		shard.mu.RLock()
+		for _, f := range shard.flows {
+			if f.TupleOrig.IP.SourceAddress.String() == srcIP {
+				fCopy := f
+				fCopy.Mark = mark
+				toUpdate = append(toUpdate, fCopy)
+			}
 		}
-		if f.TupleOrig.IP.SourceAddress.String() != srcIP {
-			continue
-		}
-		f.Mark = mark
+		shard.mu.RUnlock()
+	}
+
+	for _, f := range toUpdate {
 		if err := conn.Update(f); err != nil {
 			if !errIsENOENT(err) {
 				log.Printf("conntrack update mark %s: %v", srcIP, err)
 			}
 			continue
 		}
-		updated++
 	}
 	return nil
 }
@@ -323,8 +475,6 @@ func errIsENOENT(err error) bool {
 	return false
 }
 
-// asErrno — не используем errors.As напрямую, чтобы не тащить лишний импорт
-// в горячий путь (но реально errors.As дешёвый).
 func asErrno(err error, target *syscall.Errno) bool {
 	for err != nil {
 		if e, ok := err.(syscall.Errno); ok {
@@ -341,77 +491,58 @@ func asErrno(err error, target *syscall.Errno) bool {
 	return false
 }
 
-// ActiveUDPClients возвращает уникальные client-IP (orig.src), которые
-// прямо сейчас имеют conntrack-флоу: dst=один из наших WARP-портов, и
-// reply.src = dstIP (флоу прошёл DNAT к CF). Это надёжный признак
-// клиента, активно использующего relay.
-//
-// Используется в min-agent reconcile-loop'е (заменяет shell awk-pipeline).
-// maxAge — TTL кеша Dump'а; 0 = всегда свежий.
-func (c *Client) ActiveUDPClients(maxAge time.Duration, dstIP string, ports map[uint16]bool) (map[string]struct{}, error) {
-	flows, err := c.cachedDump(maxAge)
-	if err != nil {
-		return nil, err
-	}
+func (c *Client) ActiveUDPClients(dstIP string, ports map[uint16]bool) (map[string]struct{}, error) {
 	out := make(map[string]struct{}, 64)
-	for i := range flows {
-		f := &flows[i]
-		if f.TupleOrig.Proto.Protocol != protoUDP {
-			continue
+	for i := 0; i < numShards; i++ {
+		shard := c.shards[i]
+		shard.mu.RLock()
+		for _, f := range shard.flows {
+			if !ports[f.TupleOrig.Proto.DestinationPort] {
+				continue
+			}
+			if f.TupleReply.IP.SourceAddress.String() != dstIP {
+				continue
+			}
+			src := f.TupleOrig.IP.SourceAddress.String()
+			if strings.HasPrefix(src, "162.159.") || strings.HasPrefix(src, "172.") {
+				continue
+			}
+			out[src] = struct{}{}
 		}
-		if !ports[f.TupleOrig.Proto.DestinationPort] {
-			continue
-		}
-		if f.TupleReply.IP.SourceAddress.String() != dstIP {
-			continue
-		}
-		src := f.TupleOrig.IP.SourceAddress.String()
-		if strings.HasPrefix(src, "162.159.") || strings.HasPrefix(src, "172.") {
-			continue
-		}
-		out[src] = struct{}{}
+		shard.mu.RUnlock()
 	}
 	return out, nil
 }
 
-// UDPStats — агрегаты для эндпоинта /stats.
 type UDPStats struct {
 	Assured   int
 	Unreplied int
-	TopPorts  map[uint16]int // dport → count
+	TopPorts  map[uint16]int // dport -> count
 }
 
-// StatsUDP возвращает счётчики ASSURED/UNREPLIED и top-dport за один Dump.
-// Аналог shell `conntrack -L | grep ASSURED | wc -l` + `... | grep -oP 'dport=\K[0-9]+' | sort | uniq -c`.
-// maxAge — TTL кеша Dump'а; 0 = всегда свежий.
-func (c *Client) StatsUDP(maxAge time.Duration) (UDPStats, error) {
-	flows, err := c.cachedDump(maxAge)
-	if err != nil {
-		return UDPStats{}, err
-	}
+func (c *Client) StatsUDP() (UDPStats, error) {
 	out := UDPStats{TopPorts: make(map[uint16]int, 64)}
-	for i := range flows {
-		f := &flows[i]
-		if f.TupleOrig.Proto.Protocol != protoUDP {
-			continue
+	for i := 0; i < numShards; i++ {
+		shard := c.shards[i]
+		shard.mu.RLock()
+		for _, f := range shard.flows {
+			if f.TupleOrig.Proto.DestinationPort == 22 ||
+				f.TupleOrig.Proto.SourcePort == 22 {
+				continue
+			}
+			if f.Status.Assured() {
+				out.Assured++
+			}
+			if !f.Status.SeenReply() {
+				out.Unreplied++
+			}
+			out.TopPorts[f.TupleOrig.Proto.DestinationPort]++
 		}
-		if f.TupleOrig.Proto.DestinationPort == 22 ||
-			f.TupleOrig.Proto.SourcePort == 22 {
-			continue
-		}
-		if f.Status.Assured() {
-			out.Assured++
-		}
-		if !f.Status.SeenReply() {
-			out.Unreplied++
-		}
-		out.TopPorts[f.TupleOrig.Proto.DestinationPort]++
+		shard.mu.RUnlock()
 	}
 	return out, nil
 }
 
-// PingDeadline вызывает Stats — лёгкая проверка работоспособности netlink.
-// Используется в healthcheck.
 func (c *Client) PingDeadline(d time.Duration) error {
 	conn, err := c.ensureConn()
 	if err != nil {

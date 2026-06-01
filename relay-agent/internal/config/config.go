@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"log"
 	"net"
 	"os"
 	"strconv"
@@ -9,7 +10,7 @@ import (
 	"time"
 )
 
-// ResolveDstIP возвращает WarpDstIP, при пустом — резолвит через DNS.
+// ResolveDstIP returns WarpDstIP, if empty - resolves via DNS.
 func (c Config) ResolveDstIP() (string, error) {
 	if c.WarpDstIP != "" {
 		return c.WarpDstIP, nil
@@ -52,17 +53,17 @@ type Config struct {
 	RateLimitMarkMin int
 	RateLimitMarkMax int
 
-	// Min-agent (shared limit) — игнорируются full-агентом.
+	// Min-agent (shared limit) - ignored by full-agent.
 	SharedLimitMbps    float64
 	SharedScanInterval int      // sec
 	SharedIdleGrace    int      // sec
 	WarpDstIP          string   // "" = auto-detect (engage.cloudflareclient.com)
-	WarpPorts          []uint16 // default — embed
-	WarpDstHostname    string   // источник auto-detect (default engage.cloudflareclient.com)
+	WarpPorts          []uint16 // default - embed
+	WarpDstHostname    string   // auto-detect source (default engage.cloudflareclient.com)
 }
 
 func Load() Config {
-	return Config{
+	cfg := Config{
 		AgentSecret:           env("AGENT_SECRET", "change-me"),
 		AgentPort:             envInt("AGENT_PORT", 7580),
 		IpsetName:             env("IPSET_NAME", "warp_whitelist"),
@@ -87,9 +88,13 @@ func Load() Config {
 		WarpDstHostname:    env("WARP_DST_HOSTNAME", "engage.cloudflareclient.com"),
 		WarpPorts:          parsePorts(env("WARP_PORTS", "")),
 	}
+	if cfg.AgentSecret == "change-me" {
+		log.Println("WARNING: Using default AGENT_SECRET ('change-me'). This is insecure!")
+	}
+	return cfg
 }
 
-// DefaultWarpPorts — список UDP-портов WARP, тот же что у setup_relay.sh.
+// DefaultWarpPorts - list of UDP ports for WARP, same as setup_relay.sh.
 var DefaultWarpPorts = []uint16{
 	500, 854, 859, 864, 878, 880, 890, 891, 894, 903, 908, 928, 934, 939,
 	942, 943, 945, 946, 955, 968, 987, 988, 1002, 1010, 1014, 1018, 1070,
@@ -98,7 +103,7 @@ var DefaultWarpPorts = []uint16{
 	8742, 8854, 8886,
 }
 
-// parsePorts: "500,854,..." → []uint16. Пустая строка → DefaultWarpPorts.
+// parsePorts: "500,854,..." -> []uint16. Empty string -> DefaultWarpPorts.
 func parsePorts(s string) []uint16 {
 	if s == "" {
 		return DefaultWarpPorts

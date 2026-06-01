@@ -2,7 +2,7 @@ package server
 
 import "net/http"
 
-// authMiddleware: X-Agent-Key для всех путей, кроме /health.
+// authMiddleware: X-Agent-Key for all paths, except /health.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {

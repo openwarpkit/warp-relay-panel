@@ -1,21 +1,21 @@
-// Package ipsetgo — netlink-обёртка вокруг github.com/vishvananda/netlink
-// для ipset-операций. Заменяет shell-вызовы ipset.
+// Package ipsetgo is a netlink-wrapper around github.com/vishvananda/netlink
+// for ipset operations. Replaces shell calls to ipset.
 //
-// Save (ipset save > /etc/ipset.rules) намеренно остаётся через shell:
-// формат файла — ipset-CLI-специфичный, дёргается раз в дебаунс (~3s),
-// не имеет смысла переписывать.
+// Save (ipset save > /etc/ipset.rules) intentionally remains via shell:
+// the file format is ipset-CLI specific, triggered once per debounce (~3s),
+// doesn't make sense to rewrite.
 package ipsetgo
 
 import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
+	"syscall"
 
 	"github.com/vishvananda/netlink"
 )
 
-// Add добавляет IP в ipset. Идемпотентно — EEXIST не считается ошибкой.
+// Add adds an IP to the ipset. Idempotent - EEXIST is not an error.
 func Add(setname, ipStr string) error {
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
@@ -31,7 +31,7 @@ func Add(setname, ipStr string) error {
 	return nil
 }
 
-// Del удаляет IP из ipset. Идемпотентно — ENOENT не считается ошибкой.
+// Del removes an IP from the ipset. Idempotent - ENOENT is not an error.
 func Del(setname, ipStr string) error {
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
@@ -47,7 +47,7 @@ func Del(setname, ipStr string) error {
 	return nil
 }
 
-// Members возвращает все IP в ipset как set.
+// Members returns all IPs in the ipset as a set.
 func Members(setname string) (map[string]struct{}, error) {
 	res, err := netlink.IpsetList(setname)
 	if err != nil {
@@ -62,7 +62,7 @@ func Members(setname string) (map[string]struct{}, error) {
 	return out, nil
 }
 
-// Count — число элементов. Использует NumEntries из дампа метаданных.
+// Count returns the number of elements. Uses NumEntries from metadata dump.
 func Count(setname string) (int, error) {
 	res, err := netlink.IpsetList(setname)
 	if err != nil {
@@ -74,19 +74,19 @@ func Count(setname string) (int, error) {
 	return len(res.Entries), nil
 }
 
-// Exists возвращает true, если ipset существует.
+// Exists returns true if the ipset exists.
 func Exists(setname string) bool {
 	_, err := netlink.IpsetList(setname)
 	return err == nil
 }
 
-// Flush очищает ipset.
+// Flush clears the ipset.
 func Flush(setname string) error {
 	return netlink.IpsetFlush(setname)
 }
 
-// Create создаёт ipset hash:ip с заданным maxelem. Идемпотентно (Replace=false).
-// Если уже существует с тем же типом — ошибка не считается ошибкой.
+// Create creates an ipset hash:ip with given maxelem. Idempotent (Replace=false).
+// If it already exists with the same type, error is not considered an error.
 func Create(setname string, maxelem uint32) error {
 	err := netlink.IpsetCreate(setname, "hash:ip", netlink.IpsetCreateOptions{
 		MaxElements: maxelem,
@@ -102,23 +102,21 @@ func isEexist(err error) bool {
 	if err == nil {
 		return false
 	}
-	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "exist") || errors.Is(err, errEEXIST)
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return errno == syscall.EEXIST
+	}
+	return false
 }
 
 func isEnoent(err error) bool {
 	if err == nil {
 		return false
 	}
-	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "not exist") || strings.Contains(s, "no such") ||
-		strings.Contains(s, "enoent") || errors.Is(err, errENOENT)
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return errno == syscall.ENOENT
+	}
+	return false
 }
 
-// errEEXIST/ENOENT — фантомные ошибки для errors.Is fallback.
-// vishvananda/netlink возвращает текстовые ошибки, не syscall.Errno напрямую,
-// поэтому опираемся на text-match.
-var (
-	errEEXIST = errors.New("EEXIST")
-	errENOENT = errors.New("ENOENT")
-)

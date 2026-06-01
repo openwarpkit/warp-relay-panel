@@ -1,11 +1,12 @@
 package servermin
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 )
 
 func (s *Server) loadStatusFile(path string) interface{} {
+	// #nosec G304 -- Status file path is controlled by config
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
@@ -106,15 +108,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, resp)
 }
 
-// noRefcount — у min-агента нет refcount, но Traffic ждёт callback.
-// Возвращает 0 для всех IP (поле "clients_on_ip" в /traffic будет 0).
+// noRefcount - min-agent has no refcount, but Traffic expects a callback.
+// Returns 0 for all IPs ("clients_on_ip" field in /traffic will be 0).
 func noRefcount(ip string) int { return 0 }
 
 func noClients(ip string) []int64 { return nil }
 
 func (s *Server) onlineClients() map[string]interface{} {
-	// 2s кеша — дедуп для параллельных /health и /stats вызовов от панели.
-	assured, err := s.Conntrack.AssuredUDPSrcs(2 * time.Second)
+	// 2s cache - deduplicate parallel /health and /stats from panel.
+	assured, err := s.Conntrack.AssuredUDPSrcs()
 	if err != nil {
 		assured = map[string]struct{}{}
 	}
@@ -122,7 +124,7 @@ func (s *Server) onlineClients() map[string]interface{} {
 	for ip := range assured {
 		online = append(online, ip)
 	}
-	sort.Strings(online)
+	slices.Sort(online)
 	clients := make([]map[string]interface{}, 0, len(online))
 	for _, ip := range online {
 		clients = append(clients, map[string]interface{}{"ip": ip})
@@ -138,7 +140,7 @@ func (s *Server) onlineClients() map[string]interface{} {
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	online := s.onlineClients()
 
-	stats, err := s.Conntrack.StatsUDP(2 * time.Second)
+	stats, err := s.Conntrack.StatsUDP()
 	if err != nil {
 		writeError(w, 500, "conntrack stats: "+err.Error())
 		return
@@ -152,7 +154,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	for p, c := range stats.TopPorts {
 		pc = append(pc, portCount{p, c})
 	}
-	sort.Slice(pc, func(i, j int) bool { return pc[i].Count > pc[j].Count })
+	slices.SortFunc(pc, func(a, b portCount) int { return cmp.Compare(b.Count, a.Count) })
 	if len(pc) > 10 {
 		pc = pc[:10]
 	}
@@ -184,6 +186,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func readSysfsInt(path string) int64 {
+	// #nosec G304 -- Sysfs path is constructed from interface name
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0

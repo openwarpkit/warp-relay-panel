@@ -1,38 +1,38 @@
 -- ═══════════════════════════════════════════════════════════════
--- WARP Relay Panel — единая схема Supabase (источник истины)
--- Запускать в Supabase Dashboard → SQL Editor.
--- Идемпотентна: безопасно прогонять повторно.
+-- WARP Relay Panel - single Supabase schema (source of truth)
+-- Run in Supabase Dashboard -> SQL Editor.
+-- Idempotent: safe to run multiple times.
 -- ═══════════════════════════════════════════════════════════════
 
 -- ═══════════════════════════════════════
--- ТАБЛИЦЫ
+-- TABLES
 -- ═══════════════════════════════════════
 
--- Клиенты (подписчики)
+-- Clients (subscribers)
 CREATE TABLE IF NOT EXISTS clients (
     id BIGSERIAL PRIMARY KEY,
     token TEXT UNIQUE NOT NULL,
     label TEXT NOT NULL DEFAULT '',
-    current_ip_enc TEXT,            -- Fernet-зашифрованный IP
-    current_ip_hash TEXT,           -- SHA-256 хэш для поиска
-    previous_ip_enc TEXT,           -- предыдущий IP (зашифрованный)
-    previous_ip_hash TEXT,          -- SHA-256 хэш предыдущего IP
+    current_ip_enc TEXT,            -- Fernet-encrypted IP
+    current_ip_hash TEXT,           -- SHA-256 hash for lookup
+    previous_ip_enc TEXT,           -- previous IP (encrypted)
+    previous_ip_hash TEXT,          -- SHA-256 hash of previous IP
     last_activated_at TIMESTAMPTZ,
     is_blocked BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Relay-серверы
+-- Relay servers
 CREATE TABLE IF NOT EXISTS relays (
     id BIGSERIAL PRIMARY KEY,
     name TEXT NOT NULL,
-    host TEXT NOT NULL,             -- IP или домен relay
+    host TEXT NOT NULL,             -- IP or domain of relay
     agent_port INT NOT NULL DEFAULT 7580,
     agent_secret TEXT NOT NULL DEFAULT '',
     agent_type TEXT NOT NULL DEFAULT 'full',
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     is_synced BOOLEAN NOT NULL DEFAULT TRUE,
-    last_health JSONB,              -- последний /health ответ
+    last_health JSONB,              -- last /health response
     last_health_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -48,49 +48,49 @@ BEGIN
   END IF;
 END $$;
 
--- Лог активаций
+-- Activation log
 CREATE TABLE IF NOT EXISTS activation_log (
     id BIGSERIAL PRIMARY KEY,
     client_id BIGINT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
-    ip_enc TEXT NOT NULL,           -- зашифрованный IP
-    ip_hash TEXT,                   -- SHA-256 хэш для поиска
+    ip_enc TEXT NOT NULL,           -- encrypted IP
+    ip_hash TEXT,                   -- SHA-256 hash for lookup
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- IP-блэклист (хард-бан по IP)
+-- IP blacklist (hard-ban by IP)
 CREATE TABLE IF NOT EXISTS ip_blacklist (
     id BIGSERIAL PRIMARY KEY,
-    ip_hash TEXT UNIQUE NOT NULL,   -- SHA-256 хэш для быстрого поиска
-    ip_enc TEXT NOT NULL,           -- Fernet-зашифрованный IP (для отображения)
+    ip_hash TEXT UNIQUE NOT NULL,   -- SHA-256 hash for fast lookup
+    ip_enc TEXT NOT NULL,           -- Fernet-encrypted IP (for display)
     reason TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Rate-limits по IP (Mbps + опциональный TTL)
+-- Rate-limits per IP (Mbps + optional TTL)
 CREATE TABLE IF NOT EXISTS rate_limits (
     id BIGSERIAL PRIMARY KEY,
     ip_hash TEXT UNIQUE NOT NULL,
     ip_enc TEXT NOT NULL,
     mbps NUMERIC(10,2) NOT NULL CHECK (mbps > 0),
     reason TEXT NOT NULL DEFAULT '',
-    expires_at TIMESTAMPTZ,         -- NULL = бессрочно
+    expires_at TIMESTAMPTZ,         -- NULL = forever
     client_id BIGINT REFERENCES clients(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 
 -- ═══════════════════════════════════════
--- ИНДЕКСЫ
+-- INDEXES
 -- ═══════════════════════════════════════
 
 CREATE INDEX IF NOT EXISTS idx_clients_token         ON clients(token);
 CREATE INDEX IF NOT EXISTS idx_clients_ip_hash       ON clients(current_ip_hash);
 CREATE INDEX IF NOT EXISTS idx_clients_prev_ip_hash  ON clients(previous_ip_hash);
--- partial: 90%+ клиентов не заблокированы
+-- partial: 90%+ clients are not blocked
 CREATE INDEX IF NOT EXISTS idx_clients_active        ON clients(id) WHERE is_blocked = FALSE;
 
 CREATE INDEX IF NOT EXISTS idx_relays_active         ON relays(id) WHERE is_active = TRUE;
--- partial для горячего пути get_active_relays(agent_type='full')
+-- partial for hot path get_active_relays(agent_type='full')
 CREATE INDEX IF NOT EXISTS idx_relays_active_full    ON relays(id) WHERE is_active = TRUE AND agent_type = 'full';
 
 CREATE INDEX IF NOT EXISTS idx_activation_log_client   ON activation_log(client_id);
@@ -100,12 +100,12 @@ CREATE INDEX IF NOT EXISTS idx_activation_log_ip_hash  ON activation_log(ip_hash
 CREATE INDEX IF NOT EXISTS idx_ip_blacklist_hash     ON ip_blacklist(ip_hash);
 
 CREATE INDEX IF NOT EXISTS idx_rate_limits_hash      ON rate_limits(ip_hash);
--- partial: только активные с TTL — для /api/rate-limits/expired
+-- partial: only active with TTL - for /api/rate-limits/expired
 CREATE INDEX IF NOT EXISTS idx_rate_limits_expires   ON rate_limits(expires_at) WHERE expires_at IS NOT NULL;
 
 
 -- ═══════════════════════════════════════
--- RLS — доступ только через service_role key
+-- RLS - access only via service_role key
 -- ═══════════════════════════════════════
 ALTER TABLE clients        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE relays         ENABLE ROW LEVEL SECURITY;
@@ -127,13 +127,13 @@ CREATE POLICY "Service role full access" ON rate_limits    FOR ALL USING (true) 
 
 
 -- ═══════════════════════════════════════════════════════════════
--- RPC ФУНКЦИИ
+-- RPC FUNCTIONS
 -- ═══════════════════════════════════════════════════════════════
 
 -- ═══════════════════════════════════════
 -- activate_client_atomic
--- Активация по token. Атомарно: проверка bana → проверка тот ли IP →
--- update clients → insert activation_log → возврат rate_limit.
+-- Activation by token. Atomic: ban check -> same IP check ->
+-- update clients -> insert activation_log -> return rate_limit.
 -- ═══════════════════════════════════════
 CREATE OR REPLACE FUNCTION activate_client_atomic(
   p_token         TEXT,
@@ -166,7 +166,7 @@ BEGIN
     RETURN jsonb_build_object('error', 'ip_banned', 'reason', v_ban_reason);
   END IF;
 
-  -- Тот же IP: не трогаем clients/log, но возвращаем актуальный rate_limit
+  -- Same IP: do not touch clients/log, but return current rate_limit
   IF v_client.current_ip_hash = p_new_ip_hash THEN
     SELECT jsonb_build_object('mbps', mbps, 'expires_at', expires_at)
       INTO v_rate_limit
@@ -222,7 +222,7 @@ $$;
 
 -- ═══════════════════════════════════════
 -- activate_client_by_id_atomic
--- Ручная активация по id (вызывается ботом).
+-- Manual activation by id (called by bot).
 -- ═══════════════════════════════════════
 CREATE OR REPLACE FUNCTION activate_client_by_id_atomic(
   p_client_id     BIGINT,
@@ -310,8 +310,8 @@ $$;
 
 -- ═══════════════════════════════════════
 -- block_client_atomic
--- UPDATE + флаги (current_ip_banned, previous_ip_banned, current_ip_shared)
--- одним запросом.
+-- UPDATE + flags (current_ip_banned, previous_ip_banned, current_ip_shared)
+-- in one query.
 -- ═══════════════════════════════════════
 CREATE OR REPLACE FUNCTION block_client_atomic(
   p_client_id BIGINT,
@@ -370,7 +370,7 @@ $$;
 
 -- ═══════════════════════════════════════
 -- delete_client_atomic
--- Удаление + возврат данных для очистки relay.
+-- Deletion + return data to cleanup relay.
 -- ═══════════════════════════════════════
 CREATE OR REPLACE FUNCTION delete_client_atomic(
   p_client_id BIGINT
@@ -410,7 +410,7 @@ $$;
 
 -- ═══════════════════════════════════════
 -- get_client_full_with_bans
--- Клиент + флаги бана current/previous IP + текущий rate_limit.
+-- Client + ban flags for current/previous IP + current rate_limit.
 -- ═══════════════════════════════════════
 CREATE OR REPLACE FUNCTION get_client_full_with_bans(
   p_client_id BIGINT
@@ -464,8 +464,8 @@ $$;
 
 -- ═══════════════════════════════════════
 -- get_client_labels
--- Batch-резолв id → label. Принимает массив в JSON-body,
--- не упирается в URL-лимит (в отличие от ?id=in.(...)).
+-- Batch-resolve id -> label. Accepts array in JSON-body,
+-- avoids URL length limits (unlike ?id=in.(...)).
 -- ═══════════════════════════════════════
 CREATE OR REPLACE FUNCTION get_client_labels(p_ids BIGINT[])
 RETURNS TABLE (id BIGINT, label TEXT)
@@ -480,7 +480,7 @@ $$;
 
 -- ═══════════════════════════════════════
 -- add_ip_ban_idempotent
--- INSERT ON CONFLICT DO NOTHING — без race condition.
+-- INSERT ON CONFLICT DO NOTHING - without race condition.
 -- ═══════════════════════════════════════
 CREATE OR REPLACE FUNCTION add_ip_ban_idempotent(
   p_ip_hash TEXT,
@@ -513,8 +513,8 @@ $$;
 
 -- ═══════════════════════════════════════
 -- get_sync_payload
--- Полный payload для агента (startup-resync, /sync).
--- Учитывает блокировку, бан IP, актуальный rate_limit.
+-- Full payload for agent (startup-resync, /sync).
+-- Accounts for block, IP ban, current rate_limit.
 -- ═══════════════════════════════════════
 CREATE OR REPLACE FUNCTION get_sync_payload()
 RETURNS TABLE (
@@ -547,8 +547,8 @@ $$;
 
 -- ═══════════════════════════════════════
 -- get_expired_rate_limits
--- Для внешнего шедулера: всё, что пора снять.
--- NULL expires_at — бессрочные, не возвращаются.
+-- For external scheduler: everything that needs to be removed.
+-- NULL expires_at - permanent, not returned.
 -- ═══════════════════════════════════════
 CREATE OR REPLACE FUNCTION get_expired_rate_limits()
 RETURNS TABLE (
@@ -572,7 +572,7 @@ $$;
 
 -- ═══════════════════════════════════════
 -- dashboard_stats
--- Все счётчики одним вызовом (вместо 4 round-trip'ов).
+-- All counters in one call (instead of 4 round-trips).
 -- ═══════════════════════════════════════
 CREATE OR REPLACE FUNCTION dashboard_stats()
 RETURNS JSON
@@ -594,8 +594,8 @@ $$;
 
 -- ═══════════════════════════════════════
 -- count_clients_on_ip
--- Сколько активных (не заблокированных) клиентов сидит на IP.
--- Используется при block/delete для проверки shared-IP.
+-- How many active (unblocked) clients sit on an IP.
+-- Used during block/delete to check shared-IP.
 -- ═══════════════════════════════════════
 CREATE OR REPLACE FUNCTION count_clients_on_ip(
   p_ip_hash           TEXT,
@@ -615,8 +615,8 @@ $$;
 
 -- ═══════════════════════════════════════
 -- find_clients_by_ip
--- Поиск клиентов по IP: current → previous → история активаций.
--- Приоритет: current > previous > history (одна запись на клиента).
+-- Search clients by IP: current -> previous -> activation history.
+-- Priority: current > previous > history (one record per client).
 -- ═══════════════════════════════════════
 CREATE OR REPLACE FUNCTION find_clients_by_ip(
   p_ip_hash             TEXT,

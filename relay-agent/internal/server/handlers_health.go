@@ -1,11 +1,12 @@
 package server
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 )
 
 func (s *Server) loadStatusFile(path string) interface{} {
+	// #nosec G304 -- Status file path is controlled by config
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
@@ -28,9 +30,31 @@ func (s *Server) loadStatusFile(path string) interface{} {
 
 func (s *Server) saveSyncStatus(status map[string]interface{}) {
 	path := s.Cfg.DataDir + "/sync_status.json"
-	os.MkdirAll(s.Cfg.DataDir, 0o755)
-	data, _ := json.MarshalIndent(status, "", "  ")
-	os.WriteFile(path, data, 0o644)
+	_ = os.MkdirAll(s.Cfg.DataDir, 0o750)
+	tmpPath := path + ".tmp"
+	// #nosec G304 -- Tmp file path is constructed from config
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return
+	}
+
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(status); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return
+	}
+	_ = os.Rename(tmpPath, path)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -114,8 +138,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) onlineClients() map[string]interface{} {
 	whitelist, _ := ipsetgo.Members(s.Cfg.IpsetName)
-	// 2s кеша — дедуп параллельных /health, /stats, /online от панели.
-	assured, err := s.Conntrack.AssuredUDPSrcs(2 * time.Second)
+	// 2s cache - deduplicate parallel /health, /stats, /online from panel.
+	assured, err := s.Conntrack.AssuredUDPSrcs()
 	if err != nil {
 		assured = map[string]struct{}{}
 	}
@@ -125,7 +149,7 @@ func (s *Server) onlineClients() map[string]interface{} {
 			onlineIPs = append(onlineIPs, ip)
 		}
 	}
-	sort.Strings(onlineIPs)
+	slices.Sort(onlineIPs)
 	clients := []map[string]interface{}{}
 	for _, ip := range onlineIPs {
 		clients = append(clients, map[string]interface{}{
@@ -145,7 +169,7 @@ func (s *Server) onlineClients() map[string]interface{} {
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	online := s.onlineClients()
 
-	stats, err := s.Conntrack.StatsUDP(2 * time.Second)
+	stats, err := s.Conntrack.StatsUDP()
 	if err != nil {
 		writeError(w, 500, "conntrack stats: "+err.Error())
 		return
@@ -160,7 +184,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	for p, c := range stats.TopPorts {
 		pc = append(pc, portCount{p, c})
 	}
-	sort.Slice(pc, func(i, j int) bool { return pc[i].Count > pc[j].Count })
+	slices.SortFunc(pc, func(a, b portCount) int { return cmp.Compare(b.Count, a.Count) })
 	if len(pc) > 10 {
 		pc = pc[:10]
 	}
@@ -191,6 +215,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func readSysfsInt(path string) int64 {
+	// #nosec G304 -- Sysfs path is constructed from interface name
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0

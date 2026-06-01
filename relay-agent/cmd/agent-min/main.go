@@ -1,11 +1,8 @@
 // WARP Relay Agent (MIN) v2.1.0-min
 //
-// Тип агента: пропускает ВСЕХ клиентов (без whitelist),
-// каждый активный клиентский IP получает индивидуальный лимит SHARED_LIMIT_MBPS
-// (по умолчанию 25 Mbps) симметрично через CONNMARK + HTB на egress eth0.
-//
-// Дизайн один и тот же что у full-agent ratelimit, но активные IP получаются
-// автоматически из conntrack (а не из API-команд панели).
+// Agent type: allows ALL clients (no whitelist),
+// each active client IP gets an individual limit SHARED_LIMIT_MBPS
+// symmetrically via CONNMARK + HTB on egress eth0.
 package main
 
 import (
@@ -16,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -36,11 +34,11 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
 	cfg := config.Load()
-	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
+	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		log.Fatalf("Cannot create data dir %s: %v", cfg.DataDir, err)
 	}
 
-	// DST_IP для conntrack-фильтра (auto-detect через DNS если не задан)
+	// DST_IP for conntrack-filter (auto-detect via DNS if not set)
 	dstIP, err := cfg.ResolveDstIP()
 	if err != nil {
 		log.Fatalf("Cannot resolve WARP DST_IP: %v (set WARP_DST_IP env explicitly)", err)
@@ -48,7 +46,7 @@ func main() {
 	log.Printf("WARP DST_IP = %s", dstIP)
 
 	ct := conntrackgo.New()
-	defer ct.Close()
+	defer func() { _ = ct.Close() }()
 
 	tm := traffic.New(
 		filepath.Join(cfg.DataDir, "traffic.json"),
@@ -69,7 +67,7 @@ func main() {
 		IpsetName:        cfg.IpsetName,
 		EnsureScriptPath: filepath.Join(cfg.DataDir, "ensure_rules.sh"),
 		StatusFilePath:   filepath.Join(cfg.DataDir, "self_heal_status.json"),
-		Refcount:         nil, // не нужен min-агенту
+		Refcount:         nil, // not needed for min-agent
 		RateLimit:        rl,
 		SkipIpset:        true,
 		ForwardTags:      []string{"WR_FORWARD_OUT", "WR_FORWARD_IN"},
@@ -105,10 +103,31 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go tm.Loop(ctx)
-	go ms.Loop(ctx)
-	go wd.Loop(ctx, time.Duration(cfg.RulesWatchdogInterval)*time.Second)
-	go sl.Loop(ctx)
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tm.Loop(ctx, sl.HasIP)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ms.Loop(ctx)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		wd.Loop(ctx, time.Duration(cfg.RulesWatchdogInterval)*time.Second)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		sl.Loop(ctx)
+	}()
 
 	addr := fmt.Sprintf(":%d", cfg.AgentPort)
 	log.Printf("WARP Relay Agent MIN v%s starting on %s", Version, addr)
@@ -128,11 +147,14 @@ func main() {
 		log.Println("Shutting down...")
 		shutdownCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
 		defer c()
-		httpSrv.Shutdown(shutdownCtx)
+		_ = httpSrv.Shutdown(shutdownCtx)
 		cancel()
 	}()
 
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("HTTP server error: %v", err)
 	}
+
+	wg.Wait()
+	log.Println("All background workers stopped. Exiting.")
 }
