@@ -48,9 +48,11 @@ app = FastAPI(title="WARP Relay Panel", version=API_VERSION)
 
 
 
+import hmac
+
 def require_api_key(x_api_key: str = Header(...)):
     expected_key = os.environ.get("API_KEY", "")
-    if not expected_key or x_api_key != expected_key:
+    if not expected_key or not hmac.compare_digest(x_api_key, expected_key):
         raise HTTPException(403, "Invalid API key")
 
 
