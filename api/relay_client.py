@@ -42,14 +42,33 @@ def _agent_headers(relay: dict) -> dict:
     return {"X-Agent-Key": secret, "Content-Type": "application/json"}
 
 
+import socket
+
 async def _agent_request(relay: dict, method: str, path: str,
                          json_data: dict = None,
                          timeout: float = AGENT_TIMEOUT) -> tuple[bool, dict]:
-    url = f"{_agent_url(relay)}{path}"
+    host = relay['host']
+    try:
+        resolved_ip = socket.gethostbyname(host)
+        ip_obj = ipaddress.ip_address(resolved_ip)
+        if ip_obj.is_loopback or ip_obj.is_private or ip_obj.is_link_local:
+            msg = f"[{relay['name']}] SSRF blocked: {host} resolved to local IP {resolved_ip}"
+            logger.error(msg)
+            return False, {"error": msg}
+    except socket.gaierror:
+        msg = f"[{relay['name']}] DNS error: could not resolve {host}"
+        logger.error(msg)
+        return False, {"error": msg}
+
+    # Prevent DNS rebinding by connecting to the resolved IP directly
+    url = f"http://{resolved_ip}:{relay['agent_port']}{path}"
+    headers = _agent_headers(relay)
+    headers["Host"] = host
+
     try:
         resp = await _get_client().request(
             method, url,
-            headers=_agent_headers(relay),
+            headers=headers,
             json=json_data,
             timeout=timeout,
         )
