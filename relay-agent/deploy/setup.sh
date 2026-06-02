@@ -195,6 +195,8 @@ EOF
 )
 chmod 600 ${INSTALL_DIR}/.env
 
+chown -R nobody:nogroup ${INSTALL_DIR}
+
 # ═══════════════════════════════════════
 # 6. SYSTEMD
 # ═══════════════════════════════════════
