@@ -92,20 +92,22 @@ func (m *Manager) reconcile() {
 	m.mu.Unlock()
 
 	// 3. Batch apply for new IPs (outside m.mu - rl has its own mutex).
-	m.applyBatch(newIPs, "scan")
+	go m.applyBatch(newIPs, "scan")
 
 	// 4. Remove limits for idle - batch.
 	if len(toRemove) > 0 {
-		removed := m.rl.RemoveBatch(toRemove)
-		log.Printf("sharedlimit: batch -%d (idle)", len(removed))
-		
-		if len(removed) > 0 {
-			m.mu.Lock()
-			for _, limit := range removed {
-				delete(m.seen, limit.IP)
+		go func(ips []string) {
+			removed := m.rl.RemoveBatch(ips)
+			log.Printf("sharedlimit: batch -%d (idle)", len(removed))
+			
+			if len(removed) > 0 {
+				m.mu.Lock()
+				for _, limit := range removed {
+					delete(m.seen, limit.IP)
+				}
+				m.mu.Unlock()
 			}
-			m.mu.Unlock()
-		}
+		}(toRemove)
 	}
 }
 
@@ -198,7 +200,7 @@ func (m *Manager) Loop(ctx context.Context) {
 					for ip := range pending {
 						unique = append(unique, ip)
 					}
-					m.applyBatch(unique, "event_emergency")
+					go m.applyBatch(unique, "event_emergency")
 					pending = make(map[string]struct{})
 				}
 			}
@@ -209,7 +211,7 @@ func (m *Manager) Loop(ctx context.Context) {
 				for ip := range pending {
 					unique = append(unique, ip)
 				}
-				m.applyBatch(unique, "event")
+				go m.applyBatch(unique, "event")
 				pending = make(map[string]struct{})
 			}
 		}
