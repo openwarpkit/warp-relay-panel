@@ -274,13 +274,28 @@ func (m *Monitor) GetAll(refCount func(string) int, clients func(string) []int64
 	if resetState := m.checkMonthReset(); resetState != nil {
 		go m.save(*resetState)
 	}
-	out := Summary{
-		Month:     m.state.Month,
-		LastReset: m.state.LastReset,
-		IPs:       make(map[string]PerIP, len(m.state.IPs)),
-	}
-	var totalTX, totalRX int64
+	
+	// Fast copy phase under lock
+	month := m.state.Month
+	lastReset := m.state.LastReset
+	orphanedTX := m.state.OrphanedTX
+	orphanedRX := m.state.OrphanedRX
+	
+	ipsCopy := make(map[string]ipStats, len(m.state.IPs))
 	for ip, s := range m.state.IPs {
+		ipsCopy[ip] = s
+	}
+	m.mu.Unlock()
+
+	// Slow formatting phase (unlocked)
+	out := Summary{
+		Month:     month,
+		LastReset: lastReset,
+		IPs:       make(map[string]PerIP, len(ipsCopy)),
+	}
+	
+	var totalTX, totalRX int64
+	for ip, s := range ipsCopy {
 		totalTX += s.TX
 		totalRX += s.RX
 		out.IPs[ip] = PerIP{
@@ -291,8 +306,8 @@ func (m *Monitor) GetAll(refCount func(string) int, clients func(string) []int64
 			Updated:    s.Updated,
 		}
 	}
-	totalTX += m.state.OrphanedTX
-	totalRX += m.state.OrphanedRX
+	totalTX += orphanedTX
+	totalRX += orphanedRX
 	out.TotalTXBytes = totalTX
 	out.TotalRXBytes = totalRX
 	out.TotalBytes = totalTX + totalRX
@@ -300,7 +315,6 @@ func (m *Monitor) GetAll(refCount func(string) int, clients func(string) []int64
 	out.TotalRX = shell.FormatBytes(totalRX)
 	out.Total = shell.FormatBytes(totalTX + totalRX)
 	out.IPCount = len(out.IPs)
-	m.mu.Unlock()
 
 	for ip, p := range out.IPs {
 		p.ClientsOnIP = refCount(ip)
