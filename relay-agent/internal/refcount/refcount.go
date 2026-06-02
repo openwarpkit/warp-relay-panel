@@ -15,6 +15,7 @@ import (
 type Map struct {
 	mu     sync.Mutex
 	m      map[string]map[int64]struct{}
+	cache  map[string][]int64
 	path   string
 	dirty  bool
 	notify chan struct{}
@@ -25,6 +26,7 @@ type Map struct {
 func New(path string) *Map {
 	r := &Map{
 		m:      make(map[string]map[int64]struct{}),
+		cache:  make(map[string][]int64),
 		path:   path,
 		notify: make(chan struct{}, 1),
 		stop:   make(chan struct{}),
@@ -52,6 +54,7 @@ func (r *Map) load() {
 			set[c] = struct{}{}
 		}
 		r.m[ip] = set
+		r.cache[ip] = nil // will be built on demand
 	}
 	log.Printf("refcount loaded: %d IPs", len(r.m))
 }
@@ -87,11 +90,16 @@ func (r *Map) saveWorker() {
 			if len(set) == 0 {
 				continue
 			}
+			if cached, ok := r.cache[ip]; ok && cached != nil {
+				out[ip] = cached
+				continue
+			}
 			ids := make([]int64, 0, len(set))
 			for id := range set {
 				ids = append(ids, id)
 			}
 			slices.Sort(ids)
+			r.cache[ip] = ids
 			out[ip] = ids
 		}
 		r.dirty = false
@@ -159,11 +167,16 @@ func (r *Map) ForceSave() {
 		if len(set) == 0 {
 			continue
 		}
+		if cached, ok := r.cache[ip]; ok && cached != nil {
+			out[ip] = cached
+			continue
+		}
 		ids := make([]int64, 0, len(set))
 		for id := range set {
 			ids = append(ids, id)
 		}
 		slices.Sort(ids)
+		r.cache[ip] = ids
 		out[ip] = ids
 	}
 	r.dirty = false
@@ -180,8 +193,10 @@ func (r *Map) Add(ip string, clientID int64, oldIP string) bool {
 	if oldIP != "" {
 		if set, ok := r.m[oldIP]; ok {
 			delete(set, clientID)
+			r.cache[oldIP] = nil
 			if len(set) == 0 {
 				delete(r.m, oldIP)
+				delete(r.cache, oldIP)
 				canRemoveOld = true
 			}
 		}
@@ -190,6 +205,7 @@ func (r *Map) Add(ip string, clientID int64, oldIP string) bool {
 		r.m[ip] = make(map[int64]struct{})
 	}
 	r.m[ip][clientID] = struct{}{}
+	r.cache[ip] = nil
 	r.triggerSave()
 	return canRemoveOld
 }
@@ -202,6 +218,7 @@ func (r *Map) RemoveClient(ip string, clientID int64) bool {
 	set, ok := r.m[ip]
 	if !ok || len(set) == 0 {
 		delete(r.m, ip)
+		delete(r.cache, ip)
 		r.triggerSave()
 		return true
 	}
@@ -212,8 +229,10 @@ func (r *Map) RemoveClient(ip string, clientID int64) bool {
 			delete(set, k)
 		}
 	}
+	r.cache[ip] = nil
 	if len(set) == 0 {
 		delete(r.m, ip)
+		delete(r.cache, ip)
 		r.triggerSave()
 		return true
 	}
@@ -226,6 +245,7 @@ func (r *Map) SetAll(entries map[string][]int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.m = make(map[string]map[int64]struct{}, len(entries))
+	r.cache = make(map[string][]int64, len(entries))
 	for ip, cids := range entries {
 		set := make(map[int64]struct{}, len(cids))
 		for _, c := range cids {
@@ -245,12 +265,18 @@ func (r *Map) Count(ip string) int {
 func (r *Map) ClientsFor(ip string) []int64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	
+	if cached, ok := r.cache[ip]; ok && cached != nil {
+		return cached
+	}
+
 	set := r.m[ip]
 	out := make([]int64, 0, len(set))
 	for k := range set {
 		out = append(out, k)
 	}
 	slices.Sort(out)
+	r.cache[ip] = out
 	return out
 }
 
@@ -263,11 +289,16 @@ func (r *Map) All() map[string][]int64 {
 		if len(set) == 0 {
 			continue
 		}
+		if cached, ok := r.cache[ip]; ok && cached != nil {
+			out[ip] = cached
+			continue
+		}
 		ids := make([]int64, 0, len(set))
 		for id := range set {
 			ids = append(ids, id)
 		}
 		slices.Sort(ids)
+		r.cache[ip] = ids
 		out[ip] = ids
 	}
 	return out
