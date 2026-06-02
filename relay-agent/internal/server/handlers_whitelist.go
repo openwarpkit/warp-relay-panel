@@ -119,17 +119,12 @@ func (s *Server) handleWhitelistRemove(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleWhitelistSync - fire-and-forget, heavy lifting in goroutine.
+// handleWhitelistSync - synchronous: processes the payload and returns metrics.
 func (s *Server) handleWhitelistSync(w http.ResponseWriter, r *http.Request) {
 	var req syncReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid json")
 		return
-	}
-	total := len(req.Clients)
-	totalRL := -1 // -1 = missing field, don't touch limits
-	if req.RateLimits != nil {
-		totalRL = len(*req.RateLimits)
 	}
 
 	if !s.SyncInProgress.CompareAndSwap(false, true) {
