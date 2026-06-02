@@ -494,13 +494,6 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 	plans := make([]plan, 0, len(items))
 	errs := make(map[string]error)
 
-	// Pre-build used marks array for O(1) allocation during batch processing
-	usedMarks := make([]bool, m.markMax+1)
-	for _, l := range m.m {
-		if l.Mark >= m.markMin && l.Mark <= m.markMax {
-			usedMarks[l.Mark] = true
-		}
-	}
 	nextFreeMark := m.markMin
 
 	for _, it := range items {
@@ -512,7 +505,7 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 			// Find next free mark O(1) per iteration
 			mark := 0
 			for i := nextFreeMark; i <= m.markMax; i++ {
-				if !usedMarks[i] {
+				if !m.used[i] {
 					mark = i
 					nextFreeMark = i + 1
 					break
@@ -522,7 +515,6 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 				errs[it.IP] = fmt.Errorf("no free marks available (max %d limits)", m.markMax-m.markMin+1)
 				continue
 			}
-			usedMarks[mark] = true
 			m.used[mark] = true
 			pl.mark = mark
 			pl.isNew = true
@@ -825,6 +817,7 @@ func (m *Manager) RestoreAll() (applied []string, failed []string) {
 			srcToMark[e.ip] = uint32(e.mark)
 		}
 
+		m.shellMu.Lock()
 		rc, _, errOut := shell.RunStdin("nft -f -", nftBuf.String(), 30*time.Second)
 		if rc != 0 && isMissingErr(errOut) {
 			if healErr := m.ensureBackend(); healErr == nil {
@@ -832,6 +825,7 @@ func (m *Manager) RestoreAll() (applied []string, failed []string) {
 			}
 		}
 		if rc != 0 && !isExistsErr(errOut) {
+			m.shellMu.Unlock()
 			log.Printf("ratelimit.RestoreAll: nft batch rc=%d: %s", rc, errOut)
 			for _, e := range all {
 				failed = append(failed, e.ip)
@@ -842,6 +836,7 @@ func (m *Manager) RestoreAll() (applied []string, failed []string) {
 		if rcTc, _, tcErr := shell.RunStdin("tc -batch -", tcBuf.String(), 30*time.Second); rcTc != 0 && !isExistsErr(tcErr) {
 			log.Printf("ratelimit.RestoreAll: tc batch rc=%d: %s", rcTc, tcErr)
 		}
+		m.shellMu.Unlock()
 		if _, err := m.ct.MarkBySrcsUDP(srcToMark); err != nil {
 			log.Printf("ratelimit.RestoreAll: conntrack mark update: %v", err)
 		}
@@ -868,6 +863,9 @@ func (m *Manager) RestoreAll() (applied []string, failed []string) {
 		}{ip, l.Mbps, l.Mark})
 	}
 	m.mu.Unlock()
+
+	m.shellMu.Lock()
+	defer m.shellMu.Unlock()
 
 	for _, l := range limits {
 		if err := m.applyTC(l.IP, l.Mbps, l.Mark); err == nil {
