@@ -28,35 +28,6 @@ func (s *Server) loadStatusFile(path string) interface{} {
 	return v
 }
 
-func (s *Server) saveSyncStatus(status map[string]interface{}) {
-	path := s.Cfg.DataDir + "/sync_status.json"
-	_ = os.MkdirAll(s.Cfg.DataDir, 0o750)
-	tmpPath := path + ".tmp"
-	// #nosec G304 -- Tmp file path is constructed from config
-	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return
-	}
-
-	enc := json.NewEncoder(f)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(status); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmpPath)
-		return
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmpPath)
-		return
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return
-	}
-	_ = os.Rename(tmpPath, path)
-}
-
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	fwd := "0"
 	if data, err := os.ReadFile("/proc/sys/net/ipv4/ip_forward"); err == nil {
@@ -130,7 +101,6 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"traffic_total":        t.Total,
 		"traffic_ips":          t.IPCount,
 		"last_update":          s.loadStatusFile(s.Cfg.DataDir + "/update_status.json"),
-		"last_sync":            s.loadStatusFile(s.Cfg.DataDir + "/sync_status.json"),
 		"last_self_heal":       s.Watchdog.LastStatus(),
 	}
 	writeJSON(w, 200, resp)
