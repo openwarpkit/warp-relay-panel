@@ -29,7 +29,7 @@ import (
 )
 
 // Version is set via -ldflags during build.
-var Version = "2.2.9"
+var Version = "2.2.10"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
