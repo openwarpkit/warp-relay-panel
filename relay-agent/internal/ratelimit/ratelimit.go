@@ -690,7 +690,6 @@ func (m *Manager) RemoveBatch(ips []string) []Limit {
 		l, ok := m.m[ip]
 		if ok {
 			plans = append(plans, p{ip: ip, mark: l.Mark, l: l})
-			delete(m.m, ip)
 		}
 	}
 	m.mu.Unlock()
@@ -729,6 +728,7 @@ func (m *Manager) RemoveBatch(ips []string) []Limit {
 	m.mu.Lock()
 	removed := make([]Limit, 0, len(plans))
 	for _, pl := range plans {
+		delete(m.m, pl.ip)
 		m.releaseMark(pl.mark)
 		removed = append(removed, pl.l)
 	}
