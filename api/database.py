@@ -60,7 +60,7 @@ def get_dashboard_stats() -> dict:
     try:
         result = _db().rpc("dashboard_stats", {}).execute()
         if result.data:
-            return result.data
+            return result.data[0] if isinstance(result.data, list) else result.data
     except Exception as e:
         print(f"[dashboard_stats] RPC error: {e}")
     return {
@@ -73,6 +73,8 @@ def get_dashboard_stats() -> dict:
 def create_client_record(label: str = "") -> dict:
     token = uuid.uuid4().hex[:16]
     result = _db().table("clients").insert({"token": token, "label": label}).execute()
+    if not result.data:
+        raise ValueError("Failed to create client record")
     row = result.data[0]
     return {"id": row["id"], "token": row["token"], "label": label}
 
@@ -119,7 +121,9 @@ def count_clients_on_ip(ip: str, exclude_client_id: int | None = None) -> int:
             {"p_ip_hash": ip_h, "p_exclude_client_id": exclude_client_id},
         ).execute()
         if result.data is not None:
-            return int(result.data) if not isinstance(result.data, list) else int(result.data or 0)
+            if isinstance(result.data, list):
+                return int(result.data[0] if len(result.data) > 0 else 0)
+            return int(result.data)
         return 0
     except Exception as e:
         print(f"[count_clients_on_ip] RPC error: {e}")
@@ -419,6 +423,19 @@ _RELAYS_CACHE_TTL = float(os.environ.get("RELAYS_CACHE_TTL", "15"))
 
 def add_relay(name: str, host: str, agent_port: int = 7580,
               agent_secret: str = "", agent_type: str = "full") -> dict:
+    import socket
+    try:
+        resolved_ip = socket.gethostbyname(host)
+        ip = ipaddress.ip_address(resolved_ip)
+        if ip.is_loopback or ip.is_private or ip.is_link_local:
+            raise ValueError(f"Invalid host: {host} resolves to a local/private IP ({resolved_ip})")
+    except socket.gaierror:
+        raise ValueError(f"Invalid host: could not resolve {host}")
+    except ValueError as e:
+        if "Invalid host" in str(e):
+            raise
+        pass
+
     if agent_type not in ("full", "min"):
         raise ValueError(f"agent_type must be 'full' or 'min', got: {agent_type}")
     data = {
@@ -427,6 +444,8 @@ def add_relay(name: str, host: str, agent_port: int = 7580,
         "agent_type": agent_type,
     }
     result = _db().table("relays").insert(data).execute()
+    if not result.data:
+        raise ValueError("Failed to add relay")
     cache.invalidate("relays:")
     return result.data[0]
 
