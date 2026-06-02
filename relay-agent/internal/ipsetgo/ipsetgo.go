@@ -99,6 +99,16 @@ func Create(setname string, maxelem uint32) error {
 	return nil
 }
 
+// Destroy destroys the ipset.
+func Destroy(setname string) error {
+	return netlink.IpsetDestroy(setname)
+}
+
+// Swap swaps the content of two ipsets.
+func Swap(setname1, setname2 string) error {
+	return netlink.IpsetSwap(setname1, setname2)
+}
+
 func isEexist(err error) bool {
 	if err == nil {
 		return false

@@ -180,18 +180,11 @@ func (s *Server) doSync(entries []syncEntry, rlEntries *[]syncRateLimitEntry) {
 		}
 	}
 
-	if err := ipsetgo.Create(s.Cfg.IpsetName, 1000000); err != nil {
-		log.Printf("ipset create %s: %v", s.Cfg.IpsetName, err)
+	tmpIpset := s.Cfg.IpsetName + "_tmp"
+	if err := ipsetgo.Create(tmpIpset, 1000000); err != nil {
+		log.Printf("ipset create %s: %v", tmpIpset, err)
 	}
-	if err := ipsetgo.Flush(s.Cfg.IpsetName); err != nil {
-		s.saveSyncStatus(map[string]interface{}{
-			"ok": false, "in_progress": false,
-			"error":       "flush failed: " + err.Error(),
-			"started_at":  startedAt,
-			"finished_at": time.Now().In(time.FixedZone("MSK", 3*3600)).Format(time.RFC3339),
-		})
-		return
-	}
+	_ = ipsetgo.Flush(tmpIpset)
 
 	uniqueIPs := make(map[string]struct{}, len(valid))
 	rcEntries := make(map[string][]int64, len(valid))
@@ -200,10 +193,19 @@ func (s *Server) doSync(entries []syncEntry, rlEntries *[]syncRateLimitEntry) {
 		rcEntries[e.IP] = append(rcEntries[e.IP], e.ClientID)
 	}
 	for ip := range uniqueIPs {
-		if err := ipsetgo.Add(s.Cfg.IpsetName, ip); err != nil {
+		if err := ipsetgo.Add(tmpIpset, ip); err != nil {
 			log.Printf("ipset add %s: %v", ip, err)
 		}
 	}
+
+	// Atomic swap
+	if err := ipsetgo.Create(s.Cfg.IpsetName, 1000000); err != nil {
+		log.Printf("ipset create %s: %v", s.Cfg.IpsetName, err)
+	}
+	if err := ipsetgo.Swap(tmpIpset, s.Cfg.IpsetName); err != nil {
+		log.Printf("ipset swap error: %v", err)
+	}
+	_ = ipsetgo.Destroy(tmpIpset)
 	s.Refcount.SetAll(rcEntries)
 	shell.Run("ipset save > /etc/ipset.rules 2>/dev/null", 10*time.Second)
 
