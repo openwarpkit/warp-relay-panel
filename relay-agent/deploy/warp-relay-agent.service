@@ -4,8 +4,12 @@ After=network.target ipset-restore.service netfilter-persistent.service
 
 [Service]
 Type=simple
+User=nobody
+Group=nogroup
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 WorkingDirectory=/opt/warp-relay-agent
-ExecStartPre=/bin/bash /opt/warp-relay-agent/ensure_rules.sh
+ExecStartPre=+/bin/bash /opt/warp-relay-agent/ensure_rules.sh
 ExecStart=/opt/warp-relay-agent/warp-relay-agent
 Restart=always
 RestartSec=5
@@ -13,6 +17,9 @@ EnvironmentFile=/opt/warp-relay-agent/.env
 
 LimitNOFILE=65536
 NoNewPrivileges=false
+
+ProtectSystem=strict
+ReadWritePaths=-/opt/warp-relay-agent -/etc/iptables -/etc/ipset.rules
 
 [Install]
 WantedBy=multi-user.target

@@ -13,13 +13,13 @@ func TestSharedLimitBasic(t *testing.T) {
 		DstIP:        "1.1.1.1",
 		Ports:        []uint16{500, 1000},
 	}
-	
+
 	m := &Manager{
 		cfg:      cfg,
 		seen:     make(map[string]time.Time),
 		portsSet: map[uint16]bool{500: true, 1000: true},
 	}
-	
+
 	if m.Cfg().LimitMbps != 25.0 {
 		t.Errorf("expected 25.0, got %f", m.Cfg().LimitMbps)
 	}
@@ -46,7 +46,7 @@ func TestSharedLimitBasic(t *testing.T) {
 	m.mu.Lock()
 	m.seen = make(map[string]time.Time)
 	m.mu.Unlock()
-	
+
 	if m.Count() != 0 {
 		t.Errorf("expected 0 after reset")
 	}

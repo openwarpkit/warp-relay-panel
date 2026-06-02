@@ -80,7 +80,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"ip_forward":     fwd == "1",
 		"online_clients": online["count"],
 		"shaped_clients": s.SharedLimit.Count(),
-		"shared_limit":   map[string]interface{}{
+		"shared_limit": map[string]interface{}{
 			"mbps":          cfg.LimitMbps,
 			"scan_interval": int(cfg.ScanInterval.Seconds()),
 			"idle_grace":    int(cfg.IdleGrace.Seconds()),

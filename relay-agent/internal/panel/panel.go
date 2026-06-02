@@ -2,6 +2,7 @@
 package panel
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -47,7 +48,9 @@ func (c *Client) Configured() bool {
 // FetchWhitelistPayload - GET /api/relays/{id}/whitelist-payload.
 func (c *Client) FetchWhitelistPayload() (*Payload, error) {
 	url := fmt.Sprintf("%s/api/relays/%s/whitelist-payload", c.URL, c.RelayID)
-	req, err := http.NewRequest("GET", url, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -58,7 +61,7 @@ func (c *Client) FetchWhitelistPayload() (*Payload, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("panel returned %d: %s", resp.StatusCode, string(body))
 	}
 	var p Payload

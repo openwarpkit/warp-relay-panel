@@ -13,9 +13,15 @@ logger = logging.getLogger("relay_client")
 AGENT_TIMEOUT = 10.0
 SYNC_TIMEOUT = 30.0  # For /whitelist/sync (large payload)
 
-_http_client = httpx.AsyncClient(
-    limits=httpx.Limits(max_keepalive_connections=20, max_connections=100)
-)
+_http_client: httpx.AsyncClient = None
+
+def _get_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=100)
+        )
+    return _http_client
 
 
 def _validate_ipv4(ip: str) -> str:
@@ -36,14 +42,33 @@ def _agent_headers(relay: dict) -> dict:
     return {"X-Agent-Key": secret, "Content-Type": "application/json"}
 
 
+import socket
+
 async def _agent_request(relay: dict, method: str, path: str,
                          json_data: dict = None,
                          timeout: float = AGENT_TIMEOUT) -> tuple[bool, dict]:
-    url = f"{_agent_url(relay)}{path}"
+    host = relay['host']
     try:
-        resp = await _http_client.request(
+        resolved_ip = socket.gethostbyname(host)
+        ip_obj = ipaddress.ip_address(resolved_ip)
+        if ip_obj.is_loopback or ip_obj.is_private or ip_obj.is_link_local:
+            msg = f"[{relay['name']}] SSRF blocked: {host} resolved to local IP {resolved_ip}"
+            logger.error(msg)
+            return False, {"error": msg}
+    except socket.gaierror:
+        msg = f"[{relay['name']}] DNS error: could not resolve {host}"
+        logger.error(msg)
+        return False, {"error": msg}
+
+    # Prevent DNS rebinding by connecting to the resolved IP directly
+    url = f"http://{resolved_ip}:{relay['agent_port']}{path}"
+    headers = _agent_headers(relay)
+    headers["Host"] = host
+
+    try:
+        resp = await _get_client().request(
             method, url,
-            headers=_agent_headers(relay),
+            headers=headers,
             json=json_data,
             timeout=timeout,
         )
@@ -176,13 +201,13 @@ async def full_sync(relay_id: int | None = None) -> dict:
             },
             timeout=SYNC_TIMEOUT,
         )
-        # Mark synced=True if agent accepted payload.
-        # Actual result will come through /health.
-        db.mark_relay_synced(relay["id"], ok)
+        # Agent processes payload synchronously now.
+        # Actual results are directly in data: synced, clients, invalid, rate_limits_applied
+        db.mark_relay_synced(relay["id"], ok and data.get("ok", False))
         results[relay["name"]] = {
-            "ok": ok,
-            "accepted": data.get("accepted", False) if ok else False,
-            "received": data.get("received", 0) if ok else 0,
+            "ok": ok and data.get("ok", False),
+            "synced": data.get("synced", 0) if ok else 0,
+            "rate_limits_applied": data.get("rate_limits_applied", 0) if ok else 0,
             "skipped_banned": skipped_banned,
             **data,
         }

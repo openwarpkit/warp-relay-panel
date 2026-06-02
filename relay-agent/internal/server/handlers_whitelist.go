@@ -131,31 +131,29 @@ func (s *Server) handleWhitelistSync(w http.ResponseWriter, r *http.Request) {
 	if req.RateLimits != nil {
 		totalRL = len(*req.RateLimits)
 	}
-	go s.doSync(req.Clients, req.RateLimits)
-	writeJSON(w, 200, map[string]interface{}{
-		"accepted":             true,
-		"received":             total,
-		"received_rate_limits": totalRL,
-		"message":              "Sync started in background",
-		"check_status":         "GET /health → last_sync",
-	})
+
+	if !s.SyncInProgress.CompareAndSwap(false, true) {
+		writeError(w, http.StatusTooManyRequests, "Sync is already in progress")
+		return
+	}
+
+	result := s.doSync(req.Clients, req.RateLimits)
+	writeJSON(w, 200, result)
 }
 
-// doSync - background processing of sync payload.
+// doSync - processing of sync payload.
 // rlEntries == nil - missing "rate_limits" field in payload (old panel
 // or manual curl) -> don't touch shaping (to not accidentally remove limits).
 // rlEntries != nil - even if empty -> diff-replace (full synchronization).
-func (s *Server) doSync(entries []syncEntry, rlEntries *[]syncRateLimitEntry) {
+func (s *Server) doSync(entries []syncEntry, rlEntries *[]syncRateLimitEntry) map[string]interface{} {
+	defer s.SyncInProgress.Store(false)
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("CRITICAL: Panic in doSync recovered: %v", r)
+		}
+	}()
+
 	startedAt := time.Now().In(time.FixedZone("MSK", 3*3600)).Format(time.RFC3339)
-	statusInit := map[string]interface{}{
-		"ok": nil, "in_progress": true,
-		"total":      len(entries),
-		"started_at": startedAt,
-	}
-	if rlEntries != nil {
-		statusInit["total_rate_limits"] = len(*rlEntries)
-	}
-	s.saveSyncStatus(statusInit)
 
 	valid := []syncEntry{}
 	invalid := 0
@@ -167,18 +165,11 @@ func (s *Server) doSync(entries []syncEntry, rlEntries *[]syncRateLimitEntry) {
 		}
 	}
 
-	if err := ipsetgo.Create(s.Cfg.IpsetName, 1000000); err != nil {
-		log.Printf("ipset create %s: %v", s.Cfg.IpsetName, err)
+	tmpIpset := s.Cfg.IpsetName + "_tmp"
+	if err := ipsetgo.Create(tmpIpset, 1000000); err != nil {
+		log.Printf("ipset create %s: %v", tmpIpset, err)
 	}
-	if err := ipsetgo.Flush(s.Cfg.IpsetName); err != nil {
-		s.saveSyncStatus(map[string]interface{}{
-			"ok": false, "in_progress": false,
-			"error":       "flush failed: " + err.Error(),
-			"started_at":  startedAt,
-			"finished_at": time.Now().In(time.FixedZone("MSK", 3*3600)).Format(time.RFC3339),
-		})
-		return
-	}
+	_ = ipsetgo.Flush(tmpIpset)
 
 	uniqueIPs := make(map[string]struct{}, len(valid))
 	rcEntries := make(map[string][]int64, len(valid))
@@ -187,10 +178,19 @@ func (s *Server) doSync(entries []syncEntry, rlEntries *[]syncRateLimitEntry) {
 		rcEntries[e.IP] = append(rcEntries[e.IP], e.ClientID)
 	}
 	for ip := range uniqueIPs {
-		if err := ipsetgo.Add(s.Cfg.IpsetName, ip); err != nil {
+		if err := ipsetgo.Add(tmpIpset, ip); err != nil {
 			log.Printf("ipset add %s: %v", ip, err)
 		}
 	}
+
+	// Atomic swap
+	if err := ipsetgo.Create(s.Cfg.IpsetName, 1000000); err != nil {
+		log.Printf("ipset create %s: %v", s.Cfg.IpsetName, err)
+	}
+	if err := ipsetgo.Swap(tmpIpset, s.Cfg.IpsetName); err != nil {
+		log.Printf("ipset swap error: %v", err)
+	}
+	_ = ipsetgo.Destroy(tmpIpset)
 	s.Refcount.SetAll(rcEntries)
 	shell.Run("ipset save > /etc/ipset.rules 2>/dev/null", 10*time.Second)
 
@@ -216,7 +216,8 @@ func (s *Server) doSync(entries []syncEntry, rlEntries *[]syncRateLimitEntry) {
 		log.Printf("Sync complete: %d IPs, %d clients, %d invalid (rate_limits not in payload — skipped)",
 			len(uniqueIPs), len(valid), invalid)
 	}
-	s.saveSyncStatus(statusFin)
+	
+	return statusFin
 }
 
 // syncRateLimits applies batch + removes stale (not in payload).

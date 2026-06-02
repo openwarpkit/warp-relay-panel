@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/pprof"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -31,10 +32,12 @@ type Server struct {
 	Version        string
 	StartTime      time.Time
 	PersistTrigger func()
+	SyncInProgress atomic.Bool
 }
 
 func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
+	r.Use(s.limitBodyMiddleware)
 	r.Use(s.authMiddleware)
 
 	r.Get("/health", s.handleHealth)
@@ -75,6 +78,13 @@ func (s *Server) Routes() http.Handler {
 	})
 
 	return r
+}
+
+func (s *Server) limitBodyMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, 20*1024*1024)
+		next.ServeHTTP(w, r)
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, body interface{}) {

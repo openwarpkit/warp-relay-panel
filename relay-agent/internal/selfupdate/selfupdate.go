@@ -112,19 +112,6 @@ func (u *Updater) saveStatus(s Status) {
 	}
 }
 
-func (u *Updater) LastStatus() *Status {
-	// #nosec G304 -- Status file path is controlled by config
-	data, err := os.ReadFile(u.StatusPath)
-	if err != nil {
-		return nil
-	}
-	var s Status
-	if err := json.Unmarshal(data, &s); err != nil {
-		return nil
-	}
-	return &s
-}
-
 // fetchLatestRelease - pulls the latest release from GitHub API,
 // returns asset URL for our binary.
 func (u *Updater) fetchLatestRelease() (tag, assetURL string, err error) {
@@ -140,7 +127,7 @@ func (u *Updater) fetchLatestRelease() (tag, assetURL string, err error) {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return "", "", fmt.Errorf("github api status %d: %s", resp.StatusCode, truncate(string(body), 200))
 	}
 

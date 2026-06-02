@@ -79,7 +79,7 @@ func (m *Manager) reconcile() {
 		}
 		m.seen[ip] = now
 	}
-	// 2. Remove idle IPs (only from seen - limit is removed after unlock).
+	// 2. Collect idle IPs
 	toRemove := make([]string, 0)
 	for ip, lastSeen := range m.seen {
 		if _, stillActive := active[ip]; stillActive {
@@ -87,18 +87,27 @@ func (m *Manager) reconcile() {
 		}
 		if now.Sub(lastSeen) > m.cfg.IdleGrace {
 			toRemove = append(toRemove, ip)
-			delete(m.seen, ip)
 		}
 	}
 	m.mu.Unlock()
 
 	// 3. Batch apply for new IPs (outside m.mu - rl has its own mutex).
-	m.applyBatch(newIPs, "scan")
+	go m.applyBatch(newIPs, "scan")
 
 	// 4. Remove limits for idle - batch.
 	if len(toRemove) > 0 {
-		removed := m.rl.RemoveBatch(toRemove)
-		log.Printf("sharedlimit: batch -%d (idle)", len(removed))
+		go func(ips []string) {
+			removed := m.rl.RemoveBatch(ips)
+			log.Printf("sharedlimit: batch -%d (idle)", len(removed))
+
+			if len(removed) > 0 {
+				m.mu.Lock()
+				for _, limit := range removed {
+					delete(m.seen, limit.IP)
+				}
+				m.mu.Unlock()
+			}
+		}(toRemove)
 	}
 }
 
@@ -112,8 +121,15 @@ func (m *Manager) applyBatch(newIPs []string, source string) {
 	}
 	applied, errs := m.rl.SetBatch(items)
 	log.Printf("sharedlimit: %s batch +%d @ %.1f Mbps (%d errors)", source, len(applied), m.cfg.LimitMbps, len(errs))
+	printed := 0
 	for ip, e := range errs {
-		log.Printf("sharedlimit: apply %s failed: %v", ip, e)
+		if printed < 10 {
+			log.Printf("sharedlimit: apply %s failed: %v", ip, e)
+			printed++
+		}
+	}
+	if len(errs) > 10 {
+		log.Printf("sharedlimit: ... and %d more errors omitted", len(errs)-10)
 	}
 }
 
@@ -121,7 +137,7 @@ func (m *Manager) Loop(ctx context.Context) {
 	log.Printf("sharedlimit: started - limit=%.1f Mbps, dst=%s, ports=%d, scan=%s, idle_grace=%s",
 		m.cfg.LimitMbps, m.cfg.DstIP, len(m.cfg.Ports),
 		m.cfg.ScanInterval, m.cfg.IdleGrace)
-		
+
 	// Initial full sync
 	m.reconcile()
 
@@ -171,6 +187,22 @@ func (m *Manager) Loop(ctx context.Context) {
 					debounceTimer.Reset(200 * time.Millisecond)
 					timerActive = true
 				}
+				if len(pending) >= 10000 {
+					// Emergency Flush: Drop batch immediately to avoid OOM or dropped IPs
+					if !debounceTimer.Stop() {
+						select {
+						case <-debounceTimer.C:
+						default:
+						}
+					}
+					timerActive = false
+					unique := make([]string, 0, len(pending))
+					for ip := range pending {
+						unique = append(unique, ip)
+					}
+					go m.applyBatch(unique, "event_emergency")
+					pending = make(map[string]struct{})
+				}
 			}
 		case <-debounceTimer.C:
 			timerActive = false
@@ -179,7 +211,7 @@ func (m *Manager) Loop(ctx context.Context) {
 				for ip := range pending {
 					unique = append(unique, ip)
 				}
-				m.applyBatch(unique, "event")
+				go m.applyBatch(unique, "event")
 				pending = make(map[string]struct{})
 			}
 		}
@@ -228,10 +260,8 @@ func (m *Manager) Reset() {
 	m.seen = make(map[string]time.Time, 64)
 	m.mu.Unlock()
 
-	for _, ip := range ips {
-		m.rl.Remove(ip)
-	}
-	log.Printf("sharedlimit: reset (%d removed)", len(ips))
+	removed := m.rl.RemoveBatch(ips)
+	log.Printf("sharedlimit: reset (%d removed)", len(removed))
 }
 
 // Config for /health and /shaped endpoints (readonly view).

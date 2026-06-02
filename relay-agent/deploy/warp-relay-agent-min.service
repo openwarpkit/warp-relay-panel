@@ -14,5 +14,8 @@ EnvironmentFile=/opt/warp-relay-agent/.env
 LimitNOFILE=65536
 NoNewPrivileges=false
 
+ProtectSystem=strict
+ReadWritePaths=-/opt/warp-relay-agent -/etc/iptables -/etc/ipset.rules
+
 [Install]
 WantedBy=multi-user.target

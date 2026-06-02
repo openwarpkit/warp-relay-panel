@@ -37,11 +37,11 @@ type DiskUsage struct {
 }
 
 type Snapshot struct {
-	CPUPercentTotal   float64       `json:"cpu_percent_total"`
-	CPUPercentPerCore []float64     `json:"cpu_percent_per_core"`
-	CPUCount          int           `json:"cpu_count"`
-	NetworkSpeed      NetworkSpeed  `json:"network_speed"`
-	AgentProcess      AgentProcess  `json:"agent_process"`
+	CPUPercentTotal   float64      `json:"cpu_percent_total"`
+	CPUPercentPerCore []float64    `json:"cpu_percent_per_core"`
+	CPUCount          int          `json:"cpu_count"`
+	NetworkSpeed      NetworkSpeed `json:"network_speed"`
+	AgentProcess      AgentProcess `json:"agent_process"`
 }
 
 type Sampler struct {

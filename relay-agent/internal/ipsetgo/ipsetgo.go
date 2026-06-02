@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"syscall"
 
 	"github.com/vishvananda/netlink"
@@ -98,15 +99,28 @@ func Create(setname string, maxelem uint32) error {
 	return nil
 }
 
+// Destroy destroys the ipset.
+func Destroy(setname string) error {
+	return netlink.IpsetDestroy(setname)
+}
+
+// Swap swaps the content of two ipsets.
+func Swap(setname1, setname2 string) error {
+	return netlink.IpsetSwap(setname1, setname2)
+}
+
 func isEexist(err error) bool {
 	if err == nil {
 		return false
 	}
 	var errno syscall.Errno
 	if errors.As(err, &errno) {
-		return errno == syscall.EEXIST
+		if errno == syscall.EEXIST {
+			return true
+		}
 	}
-	return false
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "file exists") || strings.Contains(s, "already added") || strings.Contains(s, "already exists")
 }
 
 func isEnoent(err error) bool {
@@ -115,8 +129,10 @@ func isEnoent(err error) bool {
 	}
 	var errno syscall.Errno
 	if errors.As(err, &errno) {
-		return errno == syscall.ENOENT
+		if errno == syscall.ENOENT {
+			return true
+		}
 	}
-	return false
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "no such file") || strings.Contains(s, "not added") || strings.Contains(s, "does not exist")
 }
-

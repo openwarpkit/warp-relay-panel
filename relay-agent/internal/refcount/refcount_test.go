@@ -131,7 +131,7 @@ func FuzzRefcountLoad(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		tmpFile := filepath.Join(t.TempDir(), "refcount_fuzz.json")
 		_ = os.WriteFile(tmpFile, data, 0o644)
-		
+
 		r := New(tmpFile)
 		// Should not panic on corrupted JSON.
 		// Test some basic operations to ensure internal state is safe even if load failed.

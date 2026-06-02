@@ -148,7 +148,9 @@ cp "${SCRIPT_DIR}/ensure_rules_min.sh" ${INSTALL_DIR}/ensure_rules.sh
 chmod +x ${INSTALL_DIR}/ensure_rules.sh
 
 # .env
-cat > ${INSTALL_DIR}/.env << EOF
+(
+  umask 077
+  cat > ${INSTALL_DIR}/.env << EOF
 AGENT_SECRET=${AGENT_SECRET}
 AGENT_PORT=${AGENT_PORT}
 
@@ -172,6 +174,8 @@ REPO_DIR=${REPO_DIR}
 # Override owner/repo for self-update (if fork)
 # AGENT_RELEASE_REPO=user/repo
 EOF
+)
+chmod 600 ${INSTALL_DIR}/.env
 
 # ═══════════════════════════════════════
 # 5. SYSTEMD
@@ -210,8 +214,8 @@ echo -e "  ${C}Release:${N}      ${B}${RELEASE_REPO}${N}"
 echo ""
 echo -e "  ${Y}Check:${N}     curl http://localhost:${AGENT_PORT}/health"
 echo -e "  ${Y}Logs:${N}         journalctl -u warp-relay-agent -f"
-echo -e "  ${Y}Active:${N}     curl -H 'X-Agent-Key:${AGENT_SECRET}' http://localhost:${AGENT_PORT}/shaped"
+echo -e "  ${Y}Active:${N}     curl -H 'X-Agent-Key:<YOUR_SECRET>' http://localhost:${AGENT_PORT}/shaped"
 echo ""
 echo -e "  ${Y}Add to panel:${N}"
-echo -e "  POST /api/relays {\"name\":\"$(hostname)\",\"host\":\"${SRC_IP}\",\"agent_port\":${AGENT_PORT},\"agent_secret\":\"${AGENT_SECRET}\",\"agent_type\":\"min\"}"
+echo -e "  POST /api/relays {\"name\":\"$(hostname)\",\"host\":\"${SRC_IP}\",\"agent_port\":${AGENT_PORT},\"agent_secret\":\"<YOUR_SECRET>\",\"agent_type\":\"min\"}"
 echo ""

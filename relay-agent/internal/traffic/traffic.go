@@ -33,12 +33,13 @@ type fileFmt struct {
 }
 
 type connKey struct {
-	src, dst       string
-	sport, dport   uint16
+	src, dst     string
+	sport, dport uint16
 }
 
 type Monitor struct {
 	mu       sync.Mutex
+	saveMu   sync.Mutex
 	path     string
 	interval time.Duration
 	state    fileFmt
@@ -86,6 +87,8 @@ func (m *Monitor) empty() fileFmt {
 }
 
 func (m *Monitor) save(state fileFmt) {
+	m.saveMu.Lock()
+	defer m.saveMu.Unlock()
 	if err := os.MkdirAll(filepath.Dir(m.path), 0o750); err != nil {
 		log.Printf("traffic: mkdir error: %v", err)
 		return
@@ -113,10 +116,10 @@ func (m *Monitor) save(state fileFmt) {
 		return
 	}
 	if err := f.Close(); err != nil {
-        _ = os.Remove(tmpPath)
-        log.Printf("traffic: save error (close tmp): %v", err)
-        return
-    }
+		_ = os.Remove(tmpPath)
+		log.Printf("traffic: save error (close tmp): %v", err)
+		return
+	}
 	if err := os.Rename(tmpPath, m.path); err != nil {
 		_ = os.Remove(tmpPath)
 		log.Printf("traffic: save error (rename): %v", err)
@@ -129,7 +132,7 @@ func (m *Monitor) checkMonthReset() *fileFmt {
 		log.Printf("Monthly reset (MSK): %s → %s", m.state.Month, cur)
 		m.state = m.empty()
 		m.lastConn = make(map[connKey][2]uint64)
-		
+
 		cp := m.state
 		cp.IPs = make(map[string]ipStats)
 		return &cp
@@ -150,7 +153,7 @@ func (m *Monitor) Collect(countFunc func(string) int) {
 	m.mu.Lock()
 	resetState := m.checkMonthReset()
 
-	now := nowMSK().Format(time.RFC3339)
+	var now string
 	changed := false
 	current := make(map[connKey][2]uint64, len(flows))
 
@@ -191,6 +194,9 @@ func (m *Monitor) Collect(countFunc func(string) int) {
 			s := m.state.IPs[f.SrcIP]
 			s.TX += dtx
 			s.RX += drx
+			if now == "" {
+				now = nowMSK().Format(time.RFC3339)
+			}
 			s.Updated = now
 			m.state.IPs[f.SrcIP] = s
 			changed = true
@@ -200,10 +206,11 @@ func (m *Monitor) Collect(countFunc func(string) int) {
 	var stateCopy *fileFmt
 	if changed {
 		cp := m.state
-		cp.IPs = make(map[string]ipStats, len(m.state.IPs))
+		newMap := make(map[string]ipStats, len(m.state.IPs))
 		for k, v := range m.state.IPs {
-			cp.IPs[k] = v
+			newMap[k] = v
 		}
+		cp.IPs = newMap
 		stateCopy = &cp
 	}
 	m.mu.Unlock()
@@ -264,36 +271,43 @@ type Summary struct {
 
 func (m *Monitor) GetAll(refCount func(string) int, clients func(string) []int64) Summary {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if resetState := m.checkMonthReset(); resetState != nil {
-		// Asynchronous save in a goroutine because GetAll is read-only path
 		go m.save(*resetState)
 	}
-	out := Summary{
-		Month:     m.state.Month,
-		LastReset: m.state.LastReset,
-		IPs:       make(map[string]PerIP, len(m.state.IPs)),
-	}
-	var totalTX, totalRX int64
+	
+	// Fast copy phase under lock
+	month := m.state.Month
+	lastReset := m.state.LastReset
+	orphanedTX := m.state.OrphanedTX
+	orphanedRX := m.state.OrphanedRX
+	
+	ipsCopy := make(map[string]ipStats, len(m.state.IPs))
 	for ip, s := range m.state.IPs {
+		ipsCopy[ip] = s
+	}
+	m.mu.Unlock()
+
+	// Slow formatting phase (unlocked)
+	out := Summary{
+		Month:     month,
+		LastReset: lastReset,
+		IPs:       make(map[string]PerIP, len(ipsCopy)),
+	}
+	
+	var totalTX, totalRX int64
+	for ip, s := range ipsCopy {
 		totalTX += s.TX
 		totalRX += s.RX
-		ids := clients(ip)
-		if ids == nil {
-			ids = []int64{}
-		}
 		out.IPs[ip] = PerIP{
 			TXBytes: s.TX, RXBytes: s.RX, TotalBytes: s.TX + s.RX,
-			TXHuman:     shell.FormatBytes(s.TX),
-			RXHuman:     shell.FormatBytes(s.RX),
-			TotalHuman:  shell.FormatBytes(s.TX + s.RX),
-			ClientsOnIP: refCount(ip),
-			ClientIDs:   ids,
-			Updated:     s.Updated,
+			TXHuman:    shell.FormatBytes(s.TX),
+			RXHuman:    shell.FormatBytes(s.RX),
+			TotalHuman: shell.FormatBytes(s.TX + s.RX),
+			Updated:    s.Updated,
 		}
 	}
-	totalTX += m.state.OrphanedTX
-	totalRX += m.state.OrphanedRX
+	totalTX += orphanedTX
+	totalRX += orphanedRX
 	out.TotalTXBytes = totalTX
 	out.TotalRXBytes = totalRX
 	out.TotalBytes = totalTX + totalRX
@@ -301,30 +315,44 @@ func (m *Monitor) GetAll(refCount func(string) int, clients func(string) []int64
 	out.TotalRX = shell.FormatBytes(totalRX)
 	out.Total = shell.FormatBytes(totalTX + totalRX)
 	out.IPCount = len(out.IPs)
+
+	for ip, p := range out.IPs {
+		p.ClientsOnIP = refCount(ip)
+		ids := clients(ip)
+		if ids == nil {
+			ids = []int64{}
+		}
+		p.ClientIDs = ids
+		out.IPs[ip] = p
+	}
+
 	return out
 }
 
 func (m *Monitor) GetIP(ip string, refCount func(string) int, clients func(string) []int64) (PerIP, []int64, string, bool) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	s, ok := m.state.IPs[ip]
+	month := m.state.Month
+	m.mu.Unlock()
+
 	ids := clients(ip)
 	if ids == nil {
 		ids = []int64{}
 	}
-	s, ok := m.state.IPs[ip]
+
 	if !ok {
-		return PerIP{IP: ip, ClientIDs: ids}, ids, m.state.Month, false
+		return PerIP{IP: ip, ClientIDs: ids}, ids, month, false
 	}
 	return PerIP{
-		IP:          ip,
-		TXBytes:     s.TX, RXBytes: s.RX, TotalBytes: s.TX + s.RX,
+		IP:      ip,
+		TXBytes: s.TX, RXBytes: s.RX, TotalBytes: s.TX + s.RX,
 		TXHuman:     shell.FormatBytes(s.TX),
 		RXHuman:     shell.FormatBytes(s.RX),
 		TotalHuman:  shell.FormatBytes(s.TX + s.RX),
 		ClientsOnIP: refCount(ip),
 		ClientIDs:   ids,
 		Updated:     s.Updated,
-	}, ids, m.state.Month, true
+	}, ids, month, true
 }
 
 func (m *Monitor) Reset() string {
@@ -334,14 +362,8 @@ func (m *Monitor) Reset() string {
 	cp := m.state
 	cp.IPs = make(map[string]ipStats)
 	m.mu.Unlock()
-	
+
 	m.save(cp)
 	log.Println("Traffic data manually reset")
 	return cp.Month
-}
-
-func (m *Monitor) Month() string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.state.Month
 }

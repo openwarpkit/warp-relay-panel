@@ -13,22 +13,28 @@ import (
 )
 
 type Map struct {
-	mu     sync.Mutex
-	m      map[string]map[int64]struct{}
-	path   string
-	dirty  bool
-	notify chan struct{}
-	stop   chan struct{}
+	mu        sync.Mutex
+	m         map[string]map[int64]struct{}
+	cache     map[string][]int64
+	path      string
+	dirty     bool
+	notify    chan struct{}
+	stop      chan struct{}
+	wg        sync.WaitGroup
+	writeMu   sync.Mutex
+	closeOnce sync.Once
 }
 
 func New(path string) *Map {
 	r := &Map{
 		m:      make(map[string]map[int64]struct{}),
+		cache:  make(map[string][]int64),
 		path:   path,
 		notify: make(chan struct{}, 1),
 		stop:   make(chan struct{}),
 	}
 	r.load()
+	r.wg.Add(1)
 	go r.saveWorker()
 	return r
 }
@@ -50,6 +56,7 @@ func (r *Map) load() {
 			set[c] = struct{}{}
 		}
 		r.m[ip] = set
+		r.cache[ip] = nil // will be built on demand
 	}
 	log.Printf("refcount loaded: %d IPs", len(r.m))
 }
@@ -63,6 +70,7 @@ func (r *Map) triggerSave() {
 }
 
 func (r *Map) saveWorker() {
+	defer r.wg.Done()
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -84,11 +92,16 @@ func (r *Map) saveWorker() {
 			if len(set) == 0 {
 				continue
 			}
+			if cached, ok := r.cache[ip]; ok && cached != nil {
+				out[ip] = cached
+				continue
+			}
 			ids := make([]int64, 0, len(set))
 			for id := range set {
 				ids = append(ids, id)
 			}
 			slices.Sort(ids)
+			r.cache[ip] = ids
 			out[ip] = ids
 		}
 		r.dirty = false
@@ -100,11 +113,17 @@ func (r *Map) saveWorker() {
 
 // Close gracefully stops the background worker and forces a final save.
 func (r *Map) Close() {
-	close(r.stop)
+	r.closeOnce.Do(func() {
+		close(r.stop)
+	})
+	r.wg.Wait()
 	r.ForceSave()
 }
 
 func (r *Map) writeToDisk(out map[string][]int64) {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
 	if err := os.MkdirAll(filepath.Dir(r.path), 0o750); err != nil {
 		log.Printf("refcount: mkdir error: %v", err)
 		return
@@ -155,11 +174,16 @@ func (r *Map) ForceSave() {
 		if len(set) == 0 {
 			continue
 		}
+		if cached, ok := r.cache[ip]; ok && cached != nil {
+			out[ip] = cached
+			continue
+		}
 		ids := make([]int64, 0, len(set))
 		for id := range set {
 			ids = append(ids, id)
 		}
 		slices.Sort(ids)
+		r.cache[ip] = ids
 		out[ip] = ids
 	}
 	r.dirty = false
@@ -176,8 +200,10 @@ func (r *Map) Add(ip string, clientID int64, oldIP string) bool {
 	if oldIP != "" {
 		if set, ok := r.m[oldIP]; ok {
 			delete(set, clientID)
+			r.cache[oldIP] = nil
 			if len(set) == 0 {
 				delete(r.m, oldIP)
+				delete(r.cache, oldIP)
 				canRemoveOld = true
 			}
 		}
@@ -186,6 +212,7 @@ func (r *Map) Add(ip string, clientID int64, oldIP string) bool {
 		r.m[ip] = make(map[int64]struct{})
 	}
 	r.m[ip][clientID] = struct{}{}
+	r.cache[ip] = nil
 	r.triggerSave()
 	return canRemoveOld
 }
@@ -198,6 +225,7 @@ func (r *Map) RemoveClient(ip string, clientID int64) bool {
 	set, ok := r.m[ip]
 	if !ok || len(set) == 0 {
 		delete(r.m, ip)
+		delete(r.cache, ip)
 		r.triggerSave()
 		return true
 	}
@@ -208,8 +236,10 @@ func (r *Map) RemoveClient(ip string, clientID int64) bool {
 			delete(set, k)
 		}
 	}
+	r.cache[ip] = nil
 	if len(set) == 0 {
 		delete(r.m, ip)
+		delete(r.cache, ip)
 		r.triggerSave()
 		return true
 	}
@@ -222,6 +252,7 @@ func (r *Map) SetAll(entries map[string][]int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.m = make(map[string]map[int64]struct{}, len(entries))
+	r.cache = make(map[string][]int64, len(entries))
 	for ip, cids := range entries {
 		set := make(map[int64]struct{}, len(cids))
 		for _, c := range cids {
@@ -241,13 +272,24 @@ func (r *Map) Count(ip string) int {
 func (r *Map) ClientsFor(ip string) []int64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if cached, ok := r.cache[ip]; ok && cached != nil {
+		out := make([]int64, len(cached))
+		copy(out, cached)
+		return out
+	}
+
 	set := r.m[ip]
 	out := make([]int64, 0, len(set))
 	for k := range set {
 		out = append(out, k)
 	}
 	slices.Sort(out)
-	return out
+	r.cache[ip] = out
+
+	ret := make([]int64, len(out))
+	copy(ret, out)
+	return ret
 }
 
 // All returns a copy of the entire map for the /refcount endpoint.
@@ -259,12 +301,22 @@ func (r *Map) All() map[string][]int64 {
 		if len(set) == 0 {
 			continue
 		}
+		if cached, ok := r.cache[ip]; ok && cached != nil {
+			cp := make([]int64, len(cached))
+			copy(cp, cached)
+			out[ip] = cp
+			continue
+		}
 		ids := make([]int64, 0, len(set))
 		for id := range set {
 			ids = append(ids, id)
 		}
 		slices.Sort(ids)
-		out[ip] = ids
+		r.cache[ip] = ids
+
+		cp := make([]int64, len(ids))
+		copy(cp, ids)
+		out[ip] = cp
 	}
 	return out
 }

@@ -1,14 +1,14 @@
 # WARP Relay Panel v1.3.0
 
 Панель управления whitelist и rate-limit'ами для WARP Relay серверов.
-Бесплатный хостинг на **Vercel + Supabase**, native Go-агент v2.1.0+ на relay'ях.
+Бесплатный хостинг API-панели (Docker/FastAPI + Supabase), native Go-агент v2.1.0+ на relay'ях.
 
 ---
 
 ## Архитектура
 
 ```
-Telegram Bot  ──HTTP──▶  Vercel (FastAPI)  ──HTTP──▶  Relay Agent 1 (full)
+Telegram Bot  ──HTTP──▶  Docker (FastAPI)  ──HTTP──▶  Relay Agent 1 (full)
                          Supabase (PostgreSQL)  ────▶  Relay Agent 2 (full)
                               ▲                 ────▶  Relay Agent N (min)
                               │
@@ -18,7 +18,7 @@ Telegram Bot  ──HTTP──▶  Vercel (FastAPI)  ──HTTP──▶  Relay 
 
 | Компонент | Где | Стоимость |
 |-----------|-----|-----------|
-| API-панель | Vercel serverless | Бесплатно |
+| API-панель | Docker container | Ваш VPS / Serverless |
 | База данных | Supabase PostgreSQL | Бесплатно (500 MB) |
 | Relay Agent (Go) | На каждом relay-сервере (~7 MB бинарь) | VPS |
 | Telegram Bot | Сервер | VPS |
@@ -32,18 +32,21 @@ Telegram Bot  ──HTTP──▶  Vercel (FastAPI)  ──HTTP──▶  Relay 
 
 ## Быстрый старт
 
-### 1. Панель (Vercel + Supabase) — 5 минут
+### 1. Панель (Docker + Supabase) — 5 минут
 
 **Supabase:**
 1. Создать проект на [supabase.com](https://supabase.com).
 2. **SQL Editor** → вставить [supabase_schema.sql](supabase_schema.sql) → Run. Скрипт идемпотентный — безопасно прогонять повторно.
 3. Скопировать **Project URL** и **service_role key**.
 
-**Vercel — деплой одной кнопкой:**
+**Docker — локальный запуск:**
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/nellimonix/warp-relay-panel&repository-name=warp-relay-panel)
+```bash
+docker build -t warp-relay-panel .
+docker run -d -p 8000:8000 --env-file .env warp-relay-panel
+```
 
-После деплоя → **Settings → Environment Variables** → задать:
+После сборки настройте переменные окружения в `.env`:
 
 | Переменная | Значение |
 |------------|----------|
@@ -68,14 +71,14 @@ sudo bash /opt/warp-relay-panel/relay-agent/deploy/setup.sh        # full
 sudo bash /opt/warp-relay-panel/relay-agent/deploy/setup-min.sh    # min
 ```
 
-Скрипт спросит `Agent secret` (тот же `AGENT_SECRET` что на Vercel) и порт (default 7580). Скачает свежий бинарь из [releases/latest](https://github.com/nellimonix/warp-relay-panel/releases/latest), настроит iptables/ipset/tc, заведёт systemd unit, включит автовосстановление правил при перезагрузке.
+Скрипт спросит `Agent secret` (тот же `AGENT_SECRET`, что в конфигурации панели) и порт (default 7580). Скачает свежий бинарь из [releases/latest](https://github.com/nellimonix/warp-relay-panel/releases/latest), настроит iptables/ipset/tc, заведёт systemd unit, включит автовосстановление правил при перезагрузке.
 
 Override owner/repo для форка: `AGENT_RELEASE_REPO=user/repo bash setup.sh`.
 
 ### 3. Добавить relay в панель
 
 ```bash
-PANEL="https://your-project.vercel.app"
+PANEL="http://your-panel-ip:8000"
 KEY="your-api-key"
 
 # Full-relay
@@ -100,7 +103,7 @@ curl -X POST ${PANEL}/api/clients \
   -d '{"label": "Иван"}'
 
 # Ответ: {"id": 1, "token": "a1b2c3d4e5f67890", ...}
-# Ссылка: https://your-project.vercel.app/activate/a1b2c3d4e5f67890
+# Ссылка: http://your-panel-ip:8000/activate/a1b2c3d4e5f67890
 ```
 
 ### 5. Синхронизация
@@ -176,7 +179,7 @@ ufw allow from PANEL_IP to any port 7580
 ufw deny 7580
 ```
 
-Если фиксированного IP нет (Vercel serverless) — защита через `AGENT_SECRET` (`X-Agent-Key` header).
+Для повышения безопасности запросы защищены через `AGENT_SECRET` (`X-Agent-Key` header).
 
 ### Шифрование в базе
 
@@ -341,7 +344,7 @@ pytest api/tests/
 ```python
 import aiohttp
 
-PANEL_URL = "https://your-project.vercel.app"
+PANEL_URL = "http://your-panel-ip:8000"
 API_KEY = "your-api-key"
 HEADERS = {"X-API-Key": API_KEY, "Content-Type": "application/json"}
 
@@ -401,7 +404,7 @@ async def set_rate_limit(ip: str, mbps: float, ttl_seconds: int | None = None) -
 
 ```
 warp-relay-panel/
-├── api/                              # Vercel serverless (Python FastAPI)
+├── api/                              # Backend панели (Python FastAPI)
 │   ├── index.py                      # FastAPI (роуты, активация, blacklist, rate-limits)
 │   ├── database.py                   # Supabase операции (атомарные RPC)
 │   ├── relay_client.py               # HTTP-клиент к relay-агентам
@@ -425,8 +428,7 @@ warp-relay-panel/
 │   ├── release-agent.yml             # build & release бинарей по тегу agent-v*
 │   └── docker-build.yml
 ├── supabase_schema.sql               # SQL для создания таблиц + RPC (источник истины)
-├── vercel.json                       # Конфигурация Vercel
-├── requirements.txt                  # Python зависимости (Vercel)
+├── requirements.txt                  # Python зависимости
 └── .env.example                      # Переменные окружения
 ```
 
@@ -456,7 +458,7 @@ warp-relay-panel/
 - Исправлено удаление осиротевших IP из ipset.
 
 ### v1.2.1
-- Обновление relay через API (fire-and-forget, без таймаутов Vercel).
+- Обновление relay через API (fire-and-forget).
 - Статус последнего обновления в `/health` → `last_update`.
 - Timezone МСК на всех relay (трафик сбрасывается по московскому времени).
 

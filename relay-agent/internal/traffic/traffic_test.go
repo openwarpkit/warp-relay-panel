@@ -18,13 +18,13 @@ func TestTrafficSaveAndLoad(t *testing.T) {
 
 	// Create monitor, it should load empty state
 	m := New(dbPath, 1*time.Second, nil)
-	
+
 	// Add some dummy traffic directly
 	m.mu.Lock()
 	m.state.IPs["1.2.3.4"] = ipStats{TX: 100, RX: 200, Updated: "now"}
 	m.save(m.state)
 	m.mu.Unlock()
-	
+
 	// Check if file is written
 	if _, err := os.Stat(dbPath); err != nil {
 		t.Fatalf("save() did not write file: %v", err)
@@ -50,14 +50,14 @@ func TestTrafficReset(t *testing.T) {
 
 	dbPath := filepath.Join(tmpDir, "traffic.json")
 	m := New(dbPath, 1*time.Second, nil)
-	
+
 	m.mu.Lock()
 	m.state.IPs["1.2.3.4"] = ipStats{TX: 100, RX: 200, Updated: "now"}
 	m.save(m.state)
 	m.mu.Unlock()
-	
+
 	m.Reset()
-	
+
 	s, _, _, ok := m.GetIP("1.2.3.4", func(ip string) int { return 0 }, func(ip string) []int64 { return nil })
 	if ok || s.TXBytes != 0 {
 		t.Fatalf("expected IP 1.2.3.4 to be removed after Reset()")
@@ -111,7 +111,7 @@ func FuzzTrafficLoad(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		tmpFile := filepath.Join(t.TempDir(), "traffic_fuzz.json")
 		_ = os.WriteFile(tmpFile, data, 0o644)
-		
+
 		m := New(tmpFile, 1*time.Hour, nil)
 		// Should not panic. Check some basic methods.
 		m.GetIP("1.2.3.4", func(ip string) int { return 1 }, func(ip string) []int64 { return []int64{1} })
