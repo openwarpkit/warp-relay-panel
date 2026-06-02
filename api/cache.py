@@ -6,10 +6,12 @@ is to reduce load on hot endpoints within a single instance.
 
 import time
 from typing import Any, Callable
+from collections import OrderedDict
 
 _DEFAULT_TTL = 15.0  # seconds
 
-_store: dict[str, tuple[float, Any]] = {}
+# OrderedDict to simulate LRU. maxsize is 1000.
+_store: OrderedDict[str, tuple[float, Any]] = OrderedDict()
 
 
 def get(key: str) -> Any | None:
@@ -20,18 +22,22 @@ def get(key: str) -> Any | None:
     if time.time() >= expires_at:
         _store.pop(key, None)
         return None
+    
+    # move to end (mark as recently used)
+    _store.move_to_end(key)
     return value
 
 
 def set(key: str, value: Any, ttl: float = _DEFAULT_TTL) -> None:
+    if key in _store:
+        _store.pop(key) # remove so we can push to end
+        
     _store[key] = (time.time() + ttl, value)
     
-    # Occasional cleanup to prevent unbounded memory leak
-    if len(_store) > 1000:
-        now = time.time()
-        expired = [k for k, (exp, _) in _store.items() if now >= exp]
-        for k in expired:
-            _store.pop(k, None)
+    # Enforce strict maximum size (LRU eviction)
+    while len(_store) > 1000:
+        # pop from the beginning (oldest / least recently used)
+        _store.popitem(last=False)
 
 
 def invalidate(prefix: str) -> int:
