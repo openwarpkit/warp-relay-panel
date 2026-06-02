@@ -155,7 +155,7 @@ func (m *Monitor) Collect(countFunc func(string) int) {
 	m.mu.Lock()
 	resetState := m.checkMonthReset()
 
-	now := nowMSK().Format(time.RFC3339)
+	var now string
 	changed := false
 	current := make(map[connKey][2]uint64, len(flows))
 
@@ -196,6 +196,9 @@ func (m *Monitor) Collect(countFunc func(string) int) {
 			s := m.state.IPs[f.SrcIP]
 			s.TX += dtx
 			s.RX += drx
+			if now == "" {
+				now = nowMSK().Format(time.RFC3339)
+			}
 			s.Updated = now
 			m.state.IPs[f.SrcIP] = s
 			changed = true
