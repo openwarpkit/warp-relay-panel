@@ -137,21 +137,15 @@ func (s *Server) handleWhitelistSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go s.doSync(req.Clients, req.RateLimits)
-	writeJSON(w, 200, map[string]interface{}{
-		"accepted":             true,
-		"received":             total,
-		"received_rate_limits": totalRL,
-		"message":              "Sync started in background",
-		"check_status":         "GET /health → last_sync",
-	})
+	result := s.doSync(req.Clients, req.RateLimits)
+	writeJSON(w, 200, result)
 }
 
-// doSync - background processing of sync payload.
+// doSync - processing of sync payload.
 // rlEntries == nil - missing "rate_limits" field in payload (old panel
 // or manual curl) -> don't touch shaping (to not accidentally remove limits).
 // rlEntries != nil - even if empty -> diff-replace (full synchronization).
-func (s *Server) doSync(entries []syncEntry, rlEntries *[]syncRateLimitEntry) {
+func (s *Server) doSync(entries []syncEntry, rlEntries *[]syncRateLimitEntry) map[string]interface{} {
 	defer s.SyncInProgress.Store(false)
 	defer func() {
 		if r := recover(); r != nil {
@@ -160,15 +154,6 @@ func (s *Server) doSync(entries []syncEntry, rlEntries *[]syncRateLimitEntry) {
 	}()
 
 	startedAt := time.Now().In(time.FixedZone("MSK", 3*3600)).Format(time.RFC3339)
-	statusInit := map[string]interface{}{
-		"ok": nil, "in_progress": true,
-		"total":      len(entries),
-		"started_at": startedAt,
-	}
-	if rlEntries != nil {
-		statusInit["total_rate_limits"] = len(*rlEntries)
-	}
-	s.saveSyncStatus(statusInit)
 
 	valid := []syncEntry{}
 	invalid := 0
@@ -231,7 +216,8 @@ func (s *Server) doSync(entries []syncEntry, rlEntries *[]syncRateLimitEntry) {
 		log.Printf("Sync complete: %d IPs, %d clients, %d invalid (rate_limits not in payload — skipped)",
 			len(uniqueIPs), len(valid), invalid)
 	}
-	s.saveSyncStatus(statusFin)
+	
+	return statusFin
 }
 
 // syncRateLimits applies batch + removes stale (not in payload).
