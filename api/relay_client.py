@@ -140,47 +140,11 @@ async def remove_ip(ip: str) -> dict:
 
 
 async def full_sync(relay_id: int | None = None) -> dict:
-    """
-    Sends whitelist + rate-limits to relay agents. The agent processes data
-    in the background (fire-and-forget) to avoid Vercel timeouts.
-    The real result is checked via /health -> last_sync.
-    """
-    clients = db.list_clients(include_blocked=False)
-
-    banned_ips = {ban["ip"] for ban in db.list_ip_bans()}
-
-    client_entries = []
+    """Sync whitelist + rate-limits to full relays; payload from get_sync_payload RPC."""
+    payload = db.get_sync_payload()
+    client_entries = payload["clients"]
+    rate_limit_entries = payload["rate_limits"]
     skipped_banned = 0
-    for c in clients:
-        ip = c.get("current_ip")
-        if ip:
-            try:
-                ip = _validate_ipv4(ip)
-                if ip in banned_ips:
-                    skipped_banned += 1
-                    logger.info("Sync skip: client #%d IP %s is blacklisted", c["id"], ip)
-                    continue
-                client_entries.append({"ip": ip, "client_id": c["id"]})
-            except ValueError:
-                logger.warning("Skipping non-IPv4: %s", ip)
-
-    # Rate-limits: all current DB records. Agent applies them in batch
-    # after ipset.SetAll. Not sent for banned IPs.
-    rate_limit_entries = []
-    for rl in db.list_rate_limits():
-        ip = rl.get("ip")
-        if not ip or ip in banned_ips:
-            continue
-        try:
-            ip = _validate_ipv4(ip)
-        except ValueError:
-            continue
-        entry = {"ip": ip, "mbps": float(rl["mbps"])}
-        if rl.get("expires_at"):
-            entry["expires_at"] = rl["expires_at"]
-        if rl.get("client_id") is not None:
-            entry["client_id"] = rl["client_id"]
-        rate_limit_entries.append(entry)
 
     if relay_id:
         relays = [r for r in db.list_relays() if r["id"] == relay_id and r.get("agent_type", "full") == "full"]
