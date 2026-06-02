@@ -274,7 +274,9 @@ func (r *Map) ClientsFor(ip string) []int64 {
 	defer r.mu.Unlock()
 	
 	if cached, ok := r.cache[ip]; ok && cached != nil {
-		return cached
+		out := make([]int64, len(cached))
+		copy(out, cached)
+		return out
 	}
 
 	set := r.m[ip]
@@ -284,7 +286,10 @@ func (r *Map) ClientsFor(ip string) []int64 {
 	}
 	slices.Sort(out)
 	r.cache[ip] = out
-	return out
+	
+	ret := make([]int64, len(out))
+	copy(ret, out)
+	return ret
 }
 
 // All returns a copy of the entire map for the /refcount endpoint.
@@ -297,7 +302,9 @@ func (r *Map) All() map[string][]int64 {
 			continue
 		}
 		if cached, ok := r.cache[ip]; ok && cached != nil {
-			out[ip] = cached
+			cp := make([]int64, len(cached))
+			copy(cp, cached)
+			out[ip] = cp
 			continue
 		}
 		ids := make([]int64, 0, len(set))
@@ -306,7 +313,10 @@ func (r *Map) All() map[string][]int64 {
 		}
 		slices.Sort(ids)
 		r.cache[ip] = ids
-		out[ip] = ids
+		
+		cp := make([]int64, len(ids))
+		copy(cp, ids)
+		out[ip] = cp
 	}
 	return out
 }
