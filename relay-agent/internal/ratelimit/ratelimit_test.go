@@ -35,11 +35,11 @@ func TestManagerLoadSave(t *testing.T) {
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	dbPath := filepath.Join(tmpDir, "ratelimit.json")
-	
+
 	// Create manager, it will create empty state
 	m := New(dbPath, 10, 20, nil)
 	defer m.Close()
-	
+
 	m.mu.Lock()
 	m.m["1.2.3.4"] = Limit{Mbps: 10.0, Mark: 10, ExpiresAt: "never"}
 	m.used[10] = true
@@ -57,7 +57,7 @@ func TestManagerLoadSave(t *testing.T) {
 	// Reload
 	m2 := New(dbPath, 10, 20, nil)
 	defer m2.Close()
-	
+
 	m2.mu.Lock()
 	l, ok := m2.m["1.2.3.4"]
 	m2.mu.Unlock()
@@ -121,7 +121,7 @@ func FuzzRatelimitLoad(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		tmpFile := filepath.Join(t.TempDir(), "ratelimit_fuzz.json")
 		_ = os.WriteFile(tmpFile, data, 0o644)
-		
+
 		m := New(tmpFile, 10, 999, nil)
 		// Should not panic on corrupted JSON.
 		m.Get("1.1.1.1")

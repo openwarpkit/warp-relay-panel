@@ -38,7 +38,7 @@ func TestParseInt64(t *testing.T) {
 
 func TestSnapshot(t *testing.T) {
 	m := New(1*time.Second, "/tmp")
-	
+
 	snap := m.Snapshot()
 	if snap.CPUCount <= 0 {
 		t.Errorf("expected CPUCount > 0, got %d", snap.CPUCount)

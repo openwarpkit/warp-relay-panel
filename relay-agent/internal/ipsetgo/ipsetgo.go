@@ -136,4 +136,3 @@ func isEnoent(err error) bool {
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "no such file") || strings.Contains(s, "not added") || strings.Contains(s, "does not exist")
 }
-

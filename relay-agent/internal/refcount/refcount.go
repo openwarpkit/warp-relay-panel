@@ -13,9 +13,9 @@ import (
 )
 
 type Map struct {
-	mu     sync.Mutex
-	m      map[string]map[int64]struct{}
-	cache  map[string][]int64
+	mu        sync.Mutex
+	m         map[string]map[int64]struct{}
+	cache     map[string][]int64
 	path      string
 	dirty     bool
 	notify    chan struct{}
@@ -272,7 +272,7 @@ func (r *Map) Count(ip string) int {
 func (r *Map) ClientsFor(ip string) []int64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	
+
 	if cached, ok := r.cache[ip]; ok && cached != nil {
 		out := make([]int64, len(cached))
 		copy(out, cached)
@@ -286,7 +286,7 @@ func (r *Map) ClientsFor(ip string) []int64 {
 	}
 	slices.Sort(out)
 	r.cache[ip] = out
-	
+
 	ret := make([]int64, len(out))
 	copy(ret, out)
 	return ret
@@ -313,7 +313,7 @@ func (r *Map) All() map[string][]int64 {
 		}
 		slices.Sort(ids)
 		r.cache[ip] = ids
-		
+
 		cp := make([]int64, len(ids))
 		copy(cp, ids)
 		out[ip] = cp

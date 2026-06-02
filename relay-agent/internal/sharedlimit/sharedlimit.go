@@ -99,7 +99,7 @@ func (m *Manager) reconcile() {
 		go func(ips []string) {
 			removed := m.rl.RemoveBatch(ips)
 			log.Printf("sharedlimit: batch -%d (idle)", len(removed))
-			
+
 			if len(removed) > 0 {
 				m.mu.Lock()
 				for _, limit := range removed {
@@ -137,7 +137,7 @@ func (m *Manager) Loop(ctx context.Context) {
 	log.Printf("sharedlimit: started - limit=%.1f Mbps, dst=%s, ports=%d, scan=%s, idle_grace=%s",
 		m.cfg.LimitMbps, m.cfg.DstIP, len(m.cfg.Ports),
 		m.cfg.ScanInterval, m.cfg.IdleGrace)
-		
+
 	// Initial full sync
 	m.reconcile()
 

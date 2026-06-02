@@ -23,11 +23,11 @@ func TestIsFilteredIP(t *testing.T) {
 		ip       string
 		filtered bool
 	}{
-		{"162.159.1.1", true},   // Cloudflare edge
-		{"127.0.0.1", true},     // Loopback
-		{"10.0.0.1", true},      // Private
-		{"192.168.1.1", true},   // Private
-		{"8.8.8.8", false},      // Public
+		{"162.159.1.1", true}, // Cloudflare edge
+		{"127.0.0.1", true},   // Loopback
+		{"10.0.0.1", true},    // Private
+		{"192.168.1.1", true}, // Private
+		{"8.8.8.8", false},    // Public
 		{"invalid", false},
 	}
 

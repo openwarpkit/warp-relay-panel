@@ -48,19 +48,19 @@ type Limit struct {
 }
 
 type Manager struct {
-	mu       sync.Mutex
-	path     string
-	markMin  int
-	markMax  int
-	m        map[string]Limit // ip -> Limit
-	used     map[int]bool     // mark → in-use
-	ct       *conntrackgo.Client
-	useNft   bool // false -> legacy path
-	dirty    bool
-	notify   chan struct{}
-	stop     chan struct{}
-	wg       sync.WaitGroup
-	shellMu  sync.Mutex
+	mu      sync.Mutex
+	path    string
+	markMin int
+	markMax int
+	m       map[string]Limit // ip -> Limit
+	used    map[int]bool     // mark → in-use
+	ct      *conntrackgo.Client
+	useNft  bool // false -> legacy path
+	dirty   bool
+	notify  chan struct{}
+	stop    chan struct{}
+	wg      sync.WaitGroup
+	shellMu sync.Mutex
 }
 
 func New(path string, markMin, markMax int, ct *conntrackgo.Client) *Manager {

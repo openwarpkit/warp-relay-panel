@@ -10,7 +10,7 @@ func TestEnvParsing(t *testing.T) {
 	_ = os.Setenv("TEST_INT", "42")
 	_ = os.Setenv("TEST_FLOAT", "3.14")
 	_ = os.Setenv("TEST_INVALID_INT", "abc")
-	
+
 	defer func() {
 		_ = os.Unsetenv("TEST_STR")
 		_ = os.Unsetenv("TEST_INT")
@@ -45,14 +45,14 @@ func TestEnvParsing(t *testing.T) {
 
 func TestParsePorts(t *testing.T) {
 	ports := parsePorts("500, 1000,abc, 70000, -5")
-	
+
 	if len(ports) != 2 {
 		t.Fatalf("expected 2 ports, got %d", len(ports))
 	}
 	if ports[0] != 500 || ports[1] != 1000 {
 		t.Errorf("unexpected ports: %v", ports)
 	}
-	
+
 	// Test empty string fallback to defaults
 	defs := parsePorts("")
 	if len(defs) == 0 {
@@ -63,7 +63,7 @@ func TestParsePorts(t *testing.T) {
 func TestLoad(t *testing.T) {
 	_ = os.Setenv("AGENT_SECRET", "supersecret")
 	defer func() { _ = os.Unsetenv("AGENT_SECRET") }()
-	
+
 	cfg := Load()
 	if cfg.AgentSecret != "supersecret" {
 		t.Errorf("expected supersecret, got %s", cfg.AgentSecret)

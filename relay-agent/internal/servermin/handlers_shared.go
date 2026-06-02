@@ -6,9 +6,9 @@ import "net/http"
 func (s *Server) handleShaped(w http.ResponseWriter, r *http.Request) {
 	cfg := s.SharedLimit.Cfg()
 	writeJSON(w, 200, map[string]interface{}{
-		"items":          s.SharedLimit.Shaped(),
-		"count":          s.SharedLimit.Count(),
-		"limit_mbps":     cfg.LimitMbps,
+		"items":         s.SharedLimit.Shaped(),
+		"count":         s.SharedLimit.Count(),
+		"limit_mbps":    cfg.LimitMbps,
 		"scan_interval": int(cfg.ScanInterval.Seconds()),
 		"idle_grace":    int(cfg.IdleGrace.Seconds()),
 	})

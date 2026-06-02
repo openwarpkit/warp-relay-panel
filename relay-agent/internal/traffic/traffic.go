@@ -33,8 +33,8 @@ type fileFmt struct {
 }
 
 type connKey struct {
-	src, dst       string
-	sport, dport   uint16
+	src, dst     string
+	sport, dport uint16
 }
 
 type Monitor struct {
@@ -116,10 +116,10 @@ func (m *Monitor) save(state fileFmt) {
 		return
 	}
 	if err := f.Close(); err != nil {
-        _ = os.Remove(tmpPath)
-        log.Printf("traffic: save error (close tmp): %v", err)
-        return
-    }
+		_ = os.Remove(tmpPath)
+		log.Printf("traffic: save error (close tmp): %v", err)
+		return
+	}
 	if err := os.Rename(tmpPath, m.path); err != nil {
 		_ = os.Remove(tmpPath)
 		log.Printf("traffic: save error (rename): %v", err)
@@ -132,7 +132,7 @@ func (m *Monitor) checkMonthReset() *fileFmt {
 		log.Printf("Monthly reset (MSK): %s → %s", m.state.Month, cur)
 		m.state = m.empty()
 		m.lastConn = make(map[connKey][2]uint64)
-		
+
 		cp := m.state
 		cp.IPs = make(map[string]ipStats)
 		return &cp
@@ -285,10 +285,10 @@ func (m *Monitor) GetAll(refCount func(string) int, clients func(string) []int64
 		totalRX += s.RX
 		out.IPs[ip] = PerIP{
 			TXBytes: s.TX, RXBytes: s.RX, TotalBytes: s.TX + s.RX,
-			TXHuman:     shell.FormatBytes(s.TX),
-			RXHuman:     shell.FormatBytes(s.RX),
-			TotalHuman:  shell.FormatBytes(s.TX + s.RX),
-			Updated:     s.Updated,
+			TXHuman:    shell.FormatBytes(s.TX),
+			RXHuman:    shell.FormatBytes(s.RX),
+			TotalHuman: shell.FormatBytes(s.TX + s.RX),
+			Updated:    s.Updated,
 		}
 	}
 	totalTX += m.state.OrphanedTX
@@ -325,13 +325,13 @@ func (m *Monitor) GetIP(ip string, refCount func(string) int, clients func(strin
 	if ids == nil {
 		ids = []int64{}
 	}
-	
+
 	if !ok {
 		return PerIP{IP: ip, ClientIDs: ids}, ids, month, false
 	}
 	return PerIP{
-		IP:          ip,
-		TXBytes:     s.TX, RXBytes: s.RX, TotalBytes: s.TX + s.RX,
+		IP:      ip,
+		TXBytes: s.TX, RXBytes: s.RX, TotalBytes: s.TX + s.RX,
 		TXHuman:     shell.FormatBytes(s.TX),
 		RXHuman:     shell.FormatBytes(s.RX),
 		TotalHuman:  shell.FormatBytes(s.TX + s.RX),
@@ -348,7 +348,7 @@ func (m *Monitor) Reset() string {
 	cp := m.state
 	cp.IPs = make(map[string]ipStats)
 	m.mu.Unlock()
-	
+
 	m.save(cp)
 	log.Println("Traffic data manually reset")
 	return cp.Month
