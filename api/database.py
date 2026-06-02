@@ -31,19 +31,17 @@ def _db() -> Client:
     return _client
 
 
-def _fetch_all_paginated(query_builder_fn) -> list:
-    all_rows = []
+def _iter_all_paginated(query_builder_fn):
     offset = 0
     while True:
         query = query_builder_fn(offset, _PAGE_SIZE)
         result = query.execute()
         if not result.data:
             break
-        all_rows.extend(result.data)
+        yield from result.data
         if len(result.data) < _PAGE_SIZE:
             break
         offset += _PAGE_SIZE
-    return all_rows
 
 
 def _safe_decrypt(enc: Optional[str]) -> Optional[str]:
@@ -102,15 +100,24 @@ def get_client_labels(ids: list[int]) -> dict[int, str]:
     return {row["id"]: row.get("label", "") for row in (result.data or [])}
 
 
-def list_clients(include_blocked: bool = True) -> list[dict]:
-    def _build(offset: int, limit: int):
-        q = _db().table("clients").select("*").order("id").range(offset, offset + limit - 1)
-        if not include_blocked:
-            q = q.eq("is_blocked", False)
-        return q
+def list_clients_paginated(page: int = 0, per_page: int = 50, include_blocked: bool = True) -> dict:
+    query = _db().table("clients").select("*", count="exact")
+    if not include_blocked:
+        query = query.eq("is_blocked", False)
 
-    rows = _fetch_all_paginated(_build)
-    return [_decrypt_client(r) for r in rows]
+    offset = page * per_page
+    result = (
+        query.order("id")
+        .range(offset, offset + per_page - 1)
+        .execute()
+    )
+    items = [_decrypt_client(r) for r in (result.data or [])]
+    total = result.count or 0
+    return {
+        "items": items, "total": total,
+        "page": page, "per_page": per_page,
+        "total_pages": max(1, (total + per_page - 1) // per_page),
+    }
 
 
 def count_clients_on_ip(ip: str, exclude_client_id: int | None = None) -> int:
@@ -263,14 +270,11 @@ def get_all_active_ips() -> list[str]:
             .range(offset, offset + limit - 1)
         )
 
-    rows = _fetch_all_paginated(_build)
-    ips = []
-    for r in rows:
+    for r in _iter_all_paginated(_build):
         try:
-            ips.append(decrypt_ip(r["current_ip_enc"]))
+            yield decrypt_ip(r["current_ip_enc"])
         except Exception:
             pass
-    return ips
 
 
 
@@ -380,13 +384,12 @@ def list_ip_bans() -> list[dict]:
             .order("created_at", desc=True)
             .range(offset, offset + limit - 1)
         )
-    rows = _fetch_all_paginated(_build)
     return [{
         "id": row["id"],
         "ip": _safe_decrypt(row["ip_enc"]),
         "reason": row["reason"],
         "created_at": row["created_at"],
-    } for row in rows]
+    } for row in _iter_all_paginated(_build)]
 
 
 def list_ip_bans_paginated(page: int = 0, per_page: int = 20,
@@ -565,15 +568,15 @@ def get_rate_limit(ip: str) -> Optional[dict]:
     }
 
 
-def list_rate_limits() -> list[dict]:
-    def _build(offset: int, limit: int):
-        return (
-            _db().table("rate_limits").select("*")
-            .order("created_at", desc=True)
-            .range(offset, offset + limit - 1)
-        )
-    rows = _fetch_all_paginated(_build)
-    return [{
+def list_rate_limits_paginated(page: int = 0, per_page: int = 50) -> dict:
+    query = _db().table("rate_limits").select("*", count="exact")
+    offset = page * per_page
+    result = (
+        query.order("created_at", desc=True)
+        .range(offset, offset + per_page - 1)
+        .execute()
+    )
+    items = [{
         "id": row["id"],
         "ip": _safe_decrypt(row["ip_enc"]),
         "mbps": float(row["mbps"]),
@@ -581,7 +584,13 @@ def list_rate_limits() -> list[dict]:
         "expires_at": row.get("expires_at"),
         "client_id": row.get("client_id"),
         "created_at": row["created_at"],
-    } for row in rows]
+    } for row in (result.data or [])]
+    total = result.count or 0
+    return {
+        "items": items, "total": total,
+        "page": page, "per_page": per_page,
+        "total_pages": max(1, (total + per_page - 1) // per_page),
+    }
 
 
 def list_expired_rate_limits() -> list[dict]:

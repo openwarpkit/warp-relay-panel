@@ -85,15 +85,37 @@ Activation link: `${PANEL_URL}/activate/${token}`.
 ---
 
 ### `GET /api/clients`
-List of all clients (with pagination inside — downloads all).
+List clients with pagination.
 
 **Query params:**
 
 | Param | Type | Default | Description |
 |---|---|---|---|
 | `include_blocked` | bool | `true` | Include blocked clients |
+| `page` | int | `0` | Page number |
+| `per_page` | int | `50` | Items per page |
 
-**Response 200:** array of client objects.
+**Response 200:** paginated object:
+```json
+{
+  "items": [
+    {
+      "id": 1,
+      "token": "a1b2c3d4e5f67890",
+      "label": "John",
+      "current_ip": "1.2.3.4",
+      "previous_ip": "5.6.7.8",
+      "last_activated_at": "2026-05-15T10:30:00+00:00",
+      "is_blocked": false,
+      "created_at": "2026-04-01T12:00:00+00:00"
+    }
+  ],
+  "total": 150,
+  "page": 0,
+  "per_page": 50,
+  "total_pages": 3
+}
+```
 
 ---
 
@@ -466,7 +488,35 @@ Set rate-limit for IP. Applied to all full-relays (push to agents + DB save).
 ---
 
 ### `GET /api/rate-limits`
-List all rate-limits.
+List all rate-limits with pagination.
+
+**Query params:**
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `page` | int | `0` | Page number |
+| `per_page` | int | `50` | Items per page |
+
+**Response 200:** paginated object:
+```json
+{
+  "items": [
+    {
+      "id": 5,
+      "ip": "1.2.3.4",
+      "mbps": 50.0,
+      "reason": "fair-use",
+      "expires_at": "2026-05-15T13:30:00+00:00",
+      "client_id": 1,
+      "created_at": "2026-05-15T12:30:00+00:00"
+    }
+  ],
+  "total": 150,
+  "page": 0,
+  "per_page": 50,
+  "total_pages": 3
+}
+```
 
 ---
 

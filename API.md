@@ -85,28 +85,36 @@ Healthcheck панели.
 ---
 
 ### `GET /api/clients`
-Список всех клиентов (с пагинацией внутри — выгружает все).
+Список клиентов с пагинацией.
 
 **Query params:**
 
 | Param | Тип | Default | Описание |
 |---|---|---|---|
 | `include_blocked` | bool | `true` | Включать заблокированных |
+| `page` | int | `0` | Номер страницы |
+| `per_page` | int | `50` | Размер страницы |
 
-**Response 200:** массив объектов клиента:
+**Response 200:** объект с пагинацией:
 ```json
-[
-  {
-    "id": 1,
-    "token": "a1b2c3d4e5f67890",
-    "label": "Иван",
-    "current_ip": "1.2.3.4",
-    "previous_ip": "5.6.7.8",
-    "last_activated_at": "2026-05-15T10:30:00+00:00",
-    "is_blocked": false,
-    "created_at": "2026-04-01T12:00:00+00:00"
-  }
-]
+{
+  "items": [
+    {
+      "id": 1,
+      "token": "a1b2c3d4e5f67890",
+      "label": "Иван",
+      "current_ip": "1.2.3.4",
+      "previous_ip": "5.6.7.8",
+      "last_activated_at": "2026-05-15T10:30:00+00:00",
+      "is_blocked": false,
+      "created_at": "2026-04-01T12:00:00+00:00"
+    }
+  ],
+  "total": 150,
+  "page": 0,
+  "per_page": 50,
+  "total_pages": 3
+}
 ```
 
 `current_ip` / `previous_ip` могут быть `null` или `"decrypt_error"` (если ENCRYPTION_KEY менялся).
@@ -720,9 +728,35 @@ Health-check всех relay'ев параллельно.
 ---
 
 ### `GET /api/rate-limits`
-Список всех rate-limits.
+Список всех rate-limits с пагинацией.
 
-**Response 200:** массив объектов rate_limit.
+**Query params:**
+
+| Param | Тип | Default | Описание |
+|---|---|---|---|
+| `page` | int | `0` | Номер страницы |
+| `per_page` | int | `50` | Размер страницы |
+
+**Response 200:** объект с пагинацией:
+```json
+{
+  "items": [
+    {
+      "id": 5,
+      "ip": "1.2.3.4",
+      "mbps": 50.0,
+      "reason": "fair-use",
+      "expires_at": "2026-05-15T13:30:00+00:00",
+      "client_id": 1,
+      "created_at": "2026-05-15T12:30:00+00:00"
+    }
+  ],
+  "total": 150,
+  "page": 0,
+  "per_page": 50,
+  "total_pages": 3
+}
+```
 
 ---
 

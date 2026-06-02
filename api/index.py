@@ -27,7 +27,7 @@ from pydantic import BaseModel
 
 from .database import (
     create_client_record, get_client_by_token, get_client_by_id,
-    list_clients, activate_client, activate_client_by_id,
+    list_clients_paginated, activate_client, activate_client_by_id,
     block_client, delete_client, get_client_full,
     get_activation_logs, delete_activation_logs, get_all_active_ips,
     get_client_labels,
@@ -35,7 +35,7 @@ from .database import (
     add_ip_ban, remove_ip_ban, remove_ip_ban_by_ip, list_ip_bans,
     get_ip_ban,
     add_rate_limit, remove_rate_limit_by_ip, get_rate_limit,
-    list_rate_limits, list_expired_rate_limits, get_sync_payload,
+    list_rate_limits_paginated, list_expired_rate_limits, get_sync_payload,
 )
 from . import relay_client
 from .warp_networks import WARP_NETWORKS as _WARP_NETWORKS
@@ -300,8 +300,8 @@ async def api_create_client(data: ClientCreate):
     return create_client_record(label=data.label)
 
 @app.get("/api/clients", dependencies=[Depends(require_api_key)])
-async def api_list_clients(include_blocked: bool = True):
-    return list_clients(include_blocked=include_blocked)
+async def api_list_clients(include_blocked: bool = True, page: int = 0, per_page: int = 50):
+    return list_clients_paginated(page=page, per_page=per_page, include_blocked=include_blocked)
 
 
 @app.post("/api/clients/labels", dependencies=[Depends(require_api_key)])
@@ -680,8 +680,8 @@ async def api_remove_rate_limit(ip: str):
 
 
 @app.get("/api/rate-limits", dependencies=[Depends(require_api_key)])
-async def api_list_rate_limits():
-    return list_rate_limits()
+async def api_list_rate_limits(page: int = 0, per_page: int = 50):
+    return list_rate_limits_paginated(page=page, per_page=per_page)
 
 
 @app.get("/api/rate-limits/expired", dependencies=[Depends(require_api_key)])
