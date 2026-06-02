@@ -44,7 +44,6 @@ type Monitor struct {
 	interval time.Duration
 	state    fileFmt
 	lastConn map[connKey][2]uint64
-	saveMap  map[string]ipStats
 	ct       *conntrackgo.Client
 }
 
@@ -53,7 +52,6 @@ func New(path string, interval time.Duration, ct *conntrackgo.Client) *Monitor {
 		path:     path,
 		interval: interval,
 		lastConn: make(map[connKey][2]uint64),
-		saveMap:  make(map[string]ipStats),
 		ct:       ct,
 	}
 	m.load()
@@ -208,19 +206,11 @@ func (m *Monitor) Collect(countFunc func(string) int) {
 	var stateCopy *fileFmt
 	if changed {
 		cp := m.state
-		if m.saveMap == nil {
-			m.saveMap = make(map[string]ipStats, len(m.state.IPs))
-		} else {
-			for k := range m.saveMap {
-				if _, ok := m.state.IPs[k]; !ok {
-					delete(m.saveMap, k)
-				}
-			}
-		}
+		newMap := make(map[string]ipStats, len(m.state.IPs))
 		for k, v := range m.state.IPs {
-			m.saveMap[k] = v
+			newMap[k] = v
 		}
-		cp.IPs = m.saveMap
+		cp.IPs = newMap
 		stateCopy = &cp
 	}
 	m.mu.Unlock()
