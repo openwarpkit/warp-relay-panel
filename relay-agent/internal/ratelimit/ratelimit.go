@@ -396,24 +396,36 @@ func isExistsErr(stderr string) bool {
 // Set creates or updates a limit. Atomicity: on update preserve mark.
 func (m *Manager) Set(ip string, mbps float64, expiresAt string, clientID *int64) (Limit, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	var mark int
+	existed := false
 	if existing, ok := m.m[ip]; ok {
 		mark = existing.Mark
-		m.removeTC(ip, mark)
+		existed = true
 	} else {
 		var err error
 		mark, err = m.allocateMark()
 		if err != nil {
+			m.mu.Unlock()
 			return Limit{}, err
 		}
+		m.m[ip] = Limit{Mark: mark}
 	}
+	m.mu.Unlock()
 
-	if err := m.applyTC(ip, mbps, mark); err != nil {
-		if _, existed := m.m[ip]; !existed {
+	m.shellMu.Lock()
+	if existed {
+		m.removeTC(ip, mark)
+	}
+	err := m.applyTC(ip, mbps, mark)
+	m.shellMu.Unlock()
+
+	m.mu.Lock()
+	if err != nil {
+		if !existed {
+			delete(m.m, ip)
 			m.releaseMark(mark)
 		}
+		m.mu.Unlock()
 		return Limit{}, err
 	}
 
@@ -426,6 +438,8 @@ func (m *Manager) Set(ip string, mbps float64, expiresAt string, clientID *int64
 	}
 	m.m[ip] = l
 	m.triggerSave()
+	m.mu.Unlock()
+
 	log.Printf("Rate-limit applied: %s = %.2f Mbps (mark=%d, expires=%s)", ip, mbps, mark, expiresAt)
 	out := l
 	out.IP = ip
@@ -512,6 +526,7 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 			m.used[mark] = true
 			pl.mark = mark
 			pl.isNew = true
+			m.m[it.IP] = Limit{Mark: mark}
 		}
 		plans = append(plans, pl)
 	}
@@ -535,6 +550,7 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 		m.mu.Lock()
 		for _, pl := range plans {
 			if pl.isNew {
+				delete(m.m, pl.item.IP)
 				m.used[pl.mark] = false
 			}
 		}
@@ -625,15 +641,23 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 
 func (m *Manager) Remove(ip string) (Limit, bool) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	l, ok := m.m[ip]
 	if !ok {
+		m.mu.Unlock()
 		return Limit{}, false
 	}
 	delete(m.m, ip)
+	m.mu.Unlock()
+
+	m.shellMu.Lock()
 	m.removeTC(ip, l.Mark)
+	m.shellMu.Unlock()
+
+	m.mu.Lock()
 	m.releaseMark(l.Mark)
 	m.triggerSave()
+	m.mu.Unlock()
+
 	log.Printf("Rate-limit removed: %s (mark=%d)", ip, l.Mark)
 	out := l
 	out.IP = ip
@@ -672,10 +696,10 @@ func (m *Manager) RemoveBatch(ips []string) []Limit {
 	plans := make([]p, 0, len(ips))
 	for _, ip := range ips {
 		l, ok := m.m[ip]
-		if !ok {
-			continue
+		if ok {
+			plans = append(plans, p{ip: ip, mark: l.Mark, l: l})
+			delete(m.m, ip)
 		}
-		plans = append(plans, p{ip, l.Mark, l})
 	}
 	m.mu.Unlock()
 	if len(plans) == 0 {
@@ -713,11 +737,8 @@ func (m *Manager) RemoveBatch(ips []string) []Limit {
 	m.mu.Lock()
 	removed := make([]Limit, 0, len(plans))
 	for _, pl := range plans {
-		if _, ok := m.m[pl.ip]; ok {
-			delete(m.m, pl.ip)
-			m.releaseMark(pl.mark)
-			removed = append(removed, pl.l)
-		}
+		m.releaseMark(pl.mark)
+		removed = append(removed, pl.l)
 	}
 	m.triggerSave()
 	m.mu.Unlock()
