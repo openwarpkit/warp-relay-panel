@@ -89,7 +89,7 @@ func Load() Config {
 		WarpPorts:          parsePorts(env("WARP_PORTS", "")),
 	}
 	if cfg.AgentSecret == "change-me" {
-		log.Println("WARNING: Using default AGENT_SECRET ('change-me'). This is insecure!")
+		log.Fatalf("FATAL: Using default AGENT_SECRET ('change-me'). This is insecure and not allowed!")
 	}
 	return cfg
 }
