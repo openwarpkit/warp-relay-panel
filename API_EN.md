@@ -4,8 +4,8 @@ Document for integrating with the panel from external projects (bot, frontend, s
 
 ## General
 
-- **Base URL panel:** `https://your-project.vercel.app`
-- **Auth:** header `X-API-Key: <key>` for all `/api/*` endpoints. Key — env `API_KEY` on Vercel.
+- **Base URL panel:** `http://your-panel-ip:8000`
+- **Auth:** header `X-API-Key: <key>` for all `/api/*` endpoints. Key is defined in `.env`.
 - **Content-Type:** `application/json` (where there's a body).
 - **Encoding:** UTF-8.
 - **Time:** ISO 8601 (`2026-05-15T12:34:56+00:00`). In relay-agent responses — sometimes MSK (`+03:00`).

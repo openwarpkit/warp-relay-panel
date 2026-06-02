@@ -20,9 +20,6 @@ env
 .env.*
 !.env.example
 
-# Vercel
-.vercel
-vercel.json
 
 # Docs / misc
 README.md
