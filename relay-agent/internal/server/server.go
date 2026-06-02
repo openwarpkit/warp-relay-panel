@@ -82,7 +82,7 @@ func (s *Server) Routes() http.Handler {
 
 func (s *Server) limitBodyMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.Body = http.MaxBytesReader(w, r.Body, 5*1024*1024)
+		r.Body = http.MaxBytesReader(w, r.Body, 20*1024*1024)
 		next.ServeHTTP(w, r)
 	})
 }
