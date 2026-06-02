@@ -13,9 +13,15 @@ logger = logging.getLogger("relay_client")
 AGENT_TIMEOUT = 10.0
 SYNC_TIMEOUT = 30.0  # For /whitelist/sync (large payload)
 
-_http_client = httpx.AsyncClient(
-    limits=httpx.Limits(max_keepalive_connections=20, max_connections=100)
-)
+_http_client: httpx.AsyncClient = None
+
+def _get_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=100)
+        )
+    return _http_client
 
 
 def _validate_ipv4(ip: str) -> str:
@@ -41,7 +47,7 @@ async def _agent_request(relay: dict, method: str, path: str,
                          timeout: float = AGENT_TIMEOUT) -> tuple[bool, dict]:
     url = f"{_agent_url(relay)}{path}"
     try:
-        resp = await _http_client.request(
+        resp = await _get_client().request(
             method, url,
             headers=_agent_headers(relay),
             json=json_data,
