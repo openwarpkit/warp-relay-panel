@@ -22,7 +22,7 @@ import string
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Request, HTTPException, Depends, Header
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from .database import (
@@ -502,6 +502,8 @@ _TPL_ERROR = string.Template(_load("error.html"))
 _TPL_IP_BANNED = string.Template(_load("ip_banned.html"))
 _TPL_WARP_DETECTED = string.Template(_load("warp_detected.html"))
 _TPL_BOT = _load("bot.html")
+_TPL_LANDING = string.Template(_load("landing.html"))
+_TPL_404 = string.Template(_load("404.html"))
 
 
 ERROR_MAP = {
@@ -568,6 +570,20 @@ def _rate_limit_block_html(rate_limit: dict | None) -> str:
         f'<span>Rate limit: <b>{mbps} Mbps</b> ({until})</span>'
         '</div>'
     )
+
+
+# LANDING (public)
+
+@app.get("/")
+async def landing():
+    return HTMLResponse(_TPL_LANDING.safe_substitute(style=_BASE_STYLE))
+
+
+@app.exception_handler(404)
+async def not_found(request: Request, exc):
+    if request.url.path.startswith("/api"):
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
+    return HTMLResponse(_TPL_404.safe_substitute(style=_BASE_STYLE), status_code=404)
 
 
 # ACTIVATION (public)
