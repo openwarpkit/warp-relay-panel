@@ -81,11 +81,11 @@ func New() *Client {
 		}
 	}
 	c.enableAccounting()
-	
+
 	c.wg.Add(2)
 	go c.listenWorker()
 	go c.reconcileWorker()
-	
+
 	return c
 }
 
@@ -139,7 +139,7 @@ func (c *Client) listenWorker() {
 		// under high UDP connection storms. If ENOBUFS still occurs, listenWorker will catch it
 		// from errChan, close the private socket, and self-heal by reconnecting and re-dumping state.
 		if err := conn.SetReadBuffer(4 * 1024 * 1024); err != nil {
-			log.Fatalf("conntrack: FATAL: failed to set 4MB read buffer (sysctl net.core.rmem_max too small?): %v", err)
+			log.Printf("conntrack: WARNING: failed to set 4MB read buffer (sysctl net.core.rmem_max too small?): %v", err)
 		}
 
 		// Initial sync
@@ -151,7 +151,7 @@ func (c *Client) listenWorker() {
 				c.shards[i].mu.Unlock()
 			}
 			for _, f := range flows {
-				if f.TupleOrig.Proto.Protocol == protoUDP && f.TupleOrig.IP.SourceAddress.Is4() {
+				if f.TupleOrig.Proto.Protocol == protoUDP && f.TupleOrig.IP.SourceAddress.Is4() && f.TupleOrig.IP.DestinationAddress.Is4() {
 					k := FlowKey{
 						SrcIP:   f.TupleOrig.IP.SourceAddress.As4(),
 						DstIP:   f.TupleOrig.IP.DestinationAddress.As4(),
@@ -187,7 +187,7 @@ func (c *Client) listenWorker() {
 				if !ok {
 					break loop
 				}
-				if ev.Flow == nil || ev.Flow.TupleOrig.Proto.Protocol != protoUDP || !ev.Flow.TupleOrig.IP.SourceAddress.Is4() {
+				if ev.Flow == nil || ev.Flow.TupleOrig.Proto.Protocol != protoUDP || !ev.Flow.TupleOrig.IP.SourceAddress.Is4() || !ev.Flow.TupleOrig.IP.DestinationAddress.Is4() {
 					continue
 				}
 				k := FlowKey{
@@ -259,7 +259,7 @@ func (c *Client) reconcileOnce() {
 
 	activeKernel := make(map[FlowKey]conntrack.Flow, len(flows))
 	for _, f := range flows {
-		if f.TupleOrig.Proto.Protocol == protoUDP {
+		if f.TupleOrig.Proto.Protocol == protoUDP && f.TupleOrig.IP.SourceAddress.Is4() && f.TupleOrig.IP.DestinationAddress.Is4() {
 			k := FlowKey{
 				SrcIP:   f.TupleOrig.IP.SourceAddress.As4(),
 				DstIP:   f.TupleOrig.IP.DestinationAddress.As4(),
@@ -522,7 +522,7 @@ func (c *Client) ActiveUDPClients(dstIP string, ports map[uint16]bool) (map[stri
 			if !ports[f.TupleOrig.Proto.DestinationPort] {
 				continue
 			}
-			
+
 			if !f.TupleReply.IP.SourceAddress.Is4() {
 				continue
 			}
@@ -538,9 +538,9 @@ func (c *Client) ActiveUDPClients(dstIP string, ports map[uint16]bool) (map[stri
 			} else {
 				src = srcVal.(string)
 			}
-            if isFilteredIP(src) {
-                continue
-            }
+			if isFilteredIP(src) {
+				continue
+			}
 			out[src] = struct{}{}
 		}
 		shard.mu.RUnlock()
