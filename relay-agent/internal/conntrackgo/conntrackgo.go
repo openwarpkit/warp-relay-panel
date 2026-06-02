@@ -55,8 +55,9 @@ func (k FlowKey) Hash() uint32 {
 }
 
 type flowShard struct {
-	mu    sync.RWMutex
-	flows map[FlowKey]conntrack.Flow
+	mu         sync.RWMutex
+	flows      map[FlowKey]conntrack.Flow
+	ipStrCache sync.Map
 }
 
 type Client struct {
@@ -272,6 +273,7 @@ func (c *Client) reconcileOnce() {
 	for i := 0; i < NumShards; i++ {
 		shard := c.shards[i]
 		shard.mu.Lock()
+		activeIPs := make(map[[4]byte]struct{}, len(shard.flows)*2)
 		for k := range shard.flows {
 			if kFlow, ok := activeKernel[k]; ok {
 				flow := shard.flows[k]
@@ -279,11 +281,21 @@ func (c *Client) reconcileOnce() {
 				flow.CountersReply = kFlow.CountersReply
 				flow.Status = kFlow.Status
 				shard.flows[k] = flow
+				activeIPs[k.SrcIP] = struct{}{}
+				activeIPs[k.DstIP] = struct{}{}
 			} else {
 				delete(shard.flows, k)
 			}
 		}
 		shard.mu.Unlock()
+
+		shard.ipStrCache.Range(func(key, value interface{}) bool {
+			ip4 := key.([4]byte)
+			if _, ok := activeIPs[ip4]; !ok {
+				shard.ipStrCache.Delete(key)
+			}
+			return true
+		})
 	}
 }
 
@@ -306,8 +318,24 @@ func (c *Client) SnapshotUDP() ([]UDPFlow, error) {
 		shard := c.shards[i]
 		shard.mu.RLock()
 		for _, f := range shard.flows {
-			src := f.TupleOrig.IP.SourceAddress.String()
-			dst := f.TupleOrig.IP.DestinationAddress.String()
+			src4 := f.TupleOrig.IP.SourceAddress.As4()
+			srcVal, ok := shard.ipStrCache.Load(src4)
+			var src string
+			if !ok {
+				src = f.TupleOrig.IP.SourceAddress.String()
+				shard.ipStrCache.Store(src4, src)
+			} else {
+				src = srcVal.(string)
+			}
+			dst4 := f.TupleOrig.IP.DestinationAddress.As4()
+			dstVal, ok := shard.ipStrCache.Load(dst4)
+			var dst string
+			if !ok {
+				dst = f.TupleOrig.IP.DestinationAddress.String()
+				shard.ipStrCache.Store(dst4, dst)
+			} else {
+				dst = dstVal.(string)
+			}
 			sport := f.TupleOrig.Proto.SourcePort
 			dport := f.TupleOrig.Proto.DestinationPort
 			if isFilteredIP(src) {
@@ -340,7 +368,15 @@ func (c *Client) AssuredUDPSrcs() (map[string]struct{}, error) {
 			if !f.Status.Assured() {
 				continue
 			}
-			src := f.TupleOrig.IP.SourceAddress.String()
+			src4 := f.TupleOrig.IP.SourceAddress.As4()
+			srcVal, ok := shard.ipStrCache.Load(src4)
+			var src string
+			if !ok {
+				src = f.TupleOrig.IP.SourceAddress.String()
+				shard.ipStrCache.Store(src4, src)
+			} else {
+				src = srcVal.(string)
+			}
 			if strings.HasPrefix(src, "162.159.") {
 				continue
 			}
@@ -493,7 +529,15 @@ func (c *Client) ActiveUDPClients(dstIP string, ports map[uint16]bool) (map[stri
 			if f.TupleReply.IP.SourceAddress.As4() != targetDst4 {
 				continue
 			}
-			src := f.TupleOrig.IP.SourceAddress.String()
+			src4 := f.TupleOrig.IP.SourceAddress.As4()
+			srcVal, ok := shard.ipStrCache.Load(src4)
+			var src string
+			if !ok {
+				src = f.TupleOrig.IP.SourceAddress.String()
+				shard.ipStrCache.Store(src4, src)
+			} else {
+				src = srcVal.(string)
+			}
             if isFilteredIP(src) {
                 continue
             }
