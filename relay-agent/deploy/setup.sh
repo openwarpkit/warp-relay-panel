@@ -25,6 +25,11 @@ read -p "Agent secret (shared with panel): " AGENT_SECRET
 read -p "Agent port [7580]: " AGENT_PORT
 AGENT_PORT=${AGENT_PORT:-7580}
 
+# Startup-resync needs all three; leave blank to skip (agent pulls whitelist on start).
+read -p "Panel URL (e.g. https://panel.example.com): " PANEL_URL
+read -p "Panel API key (X-API-Key): " PANEL_API_KEY
+read -p "Relay ID (this relay's id in panel): " RELAY_ID
+
 INSTALL_DIR="/opt/warp-relay-agent"
 TAG="WR_RULE"
 BIN_NAME="warp-relay-agent"
@@ -182,10 +187,9 @@ RULES_WATCHDOG_INTERVAL=30
 METRICS_SAMPLE_INTERVAL=1
 TRAFFIC_INTERVAL=30
 
-# Fill manually AFTER registering relay in panel:
-PANEL_URL=
-PANEL_API_KEY=
-RELAY_ID=
+PANEL_URL=${PANEL_URL}
+PANEL_API_KEY=${PANEL_API_KEY}
+RELAY_ID=${RELAY_ID}
 
 REPO_DIR=${REPO_DIR}
 
