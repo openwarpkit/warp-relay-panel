@@ -39,10 +39,12 @@ type connKey struct {
 
 type Monitor struct {
 	mu       sync.Mutex
+	saveMu   sync.Mutex
 	path     string
 	interval time.Duration
 	state    fileFmt
 	lastConn map[connKey][2]uint64
+	saveMap  map[string]ipStats
 	ct       *conntrackgo.Client
 }
 
@@ -51,6 +53,7 @@ func New(path string, interval time.Duration, ct *conntrackgo.Client) *Monitor {
 		path:     path,
 		interval: interval,
 		lastConn: make(map[connKey][2]uint64),
+		saveMap:  make(map[string]ipStats),
 		ct:       ct,
 	}
 	m.load()
@@ -86,6 +89,8 @@ func (m *Monitor) empty() fileFmt {
 }
 
 func (m *Monitor) save(state fileFmt) {
+	m.saveMu.Lock()
+	defer m.saveMu.Unlock()
 	if err := os.MkdirAll(filepath.Dir(m.path), 0o750); err != nil {
 		log.Printf("traffic: mkdir error: %v", err)
 		return
@@ -200,10 +205,19 @@ func (m *Monitor) Collect(countFunc func(string) int) {
 	var stateCopy *fileFmt
 	if changed {
 		cp := m.state
-		cp.IPs = make(map[string]ipStats, len(m.state.IPs))
-		for k, v := range m.state.IPs {
-			cp.IPs[k] = v
+		if m.saveMap == nil {
+			m.saveMap = make(map[string]ipStats, len(m.state.IPs))
+		} else {
+			for k := range m.saveMap {
+				if _, ok := m.state.IPs[k]; !ok {
+					delete(m.saveMap, k)
+				}
+			}
 		}
+		for k, v := range m.state.IPs {
+			m.saveMap[k] = v
+		}
+		cp.IPs = m.saveMap
 		stateCopy = &cp
 	}
 	m.mu.Unlock()
