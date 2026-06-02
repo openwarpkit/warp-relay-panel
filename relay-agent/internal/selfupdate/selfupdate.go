@@ -127,7 +127,7 @@ func (u *Updater) fetchLatestRelease() (tag, assetURL string, err error) {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return "", "", fmt.Errorf("github api status %d: %s", resp.StatusCode, truncate(string(body), 200))
 	}
 

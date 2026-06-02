@@ -37,6 +37,7 @@ type Server struct {
 
 func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
+	r.Use(s.limitBodyMiddleware)
 	r.Use(s.authMiddleware)
 
 	r.Get("/health", s.handleHealth)
@@ -77,6 +78,13 @@ func (s *Server) Routes() http.Handler {
 	})
 
 	return r
+}
+
+func (s *Server) limitBodyMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, 5*1024*1024)
+		next.ServeHTTP(w, r)
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, body interface{}) {
