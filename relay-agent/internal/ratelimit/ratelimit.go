@@ -487,9 +487,10 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 	m.mu.Lock()
 	// 1. Allocate marks for new IPs, reuse for existing ones.
 	type plan struct {
-		item  SetItem
-		mark  int
-		isNew bool
+		item    SetItem
+		mark    int
+		isNew   bool
+		oldMbps float64
 	}
 	plans := make([]plan, 0, len(items))
 	errs := make(map[string]error)
@@ -501,6 +502,7 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 		pl.item = it
 		if existing, ok := m.m[it.IP]; ok {
 			pl.mark = existing.Mark
+			pl.oldMbps = existing.Mbps
 		} else {
 			// Find next free mark O(1) per iteration
 			mark := 0
@@ -551,8 +553,11 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 		for _, pl := range plans {
 			if pl.isNew {
 				fmt.Fprintf(&rNftBuf, "delete element ip warp_shaper ip2mark { %s }\n", pl.item.IP)
+				fmt.Fprintf(&rTcBuf, "class del dev %s classid 1:%d\n", iface, pl.mark)
+			} else {
+				fmt.Fprintf(&rTcBuf, "class replace dev %s parent 1: classid 1:%d htb rate %.2fmbit ceil %.2fmbit burst 16k\n",
+					iface, pl.mark, pl.oldMbps, pl.oldMbps)
 			}
-			fmt.Fprintf(&rTcBuf, "class del dev %s classid 1:%d\n", iface, pl.mark)
 		}
 		if rTcBuf.Len() > 0 {
 			shell.RunStdin("tc -batch -", rTcBuf.String(), 10*time.Second)
