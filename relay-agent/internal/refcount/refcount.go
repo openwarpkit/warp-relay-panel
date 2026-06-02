@@ -16,11 +16,13 @@ type Map struct {
 	mu     sync.Mutex
 	m      map[string]map[int64]struct{}
 	cache  map[string][]int64
-	path   string
-	dirty  bool
-	notify chan struct{}
-	stop   chan struct{}
-	wg     sync.WaitGroup
+	path      string
+	dirty     bool
+	notify    chan struct{}
+	stop      chan struct{}
+	wg        sync.WaitGroup
+	writeMu   sync.Mutex
+	closeOnce sync.Once
 }
 
 func New(path string) *Map {
@@ -111,12 +113,17 @@ func (r *Map) saveWorker() {
 
 // Close gracefully stops the background worker and forces a final save.
 func (r *Map) Close() {
-	close(r.stop)
+	r.closeOnce.Do(func() {
+		close(r.stop)
+	})
 	r.wg.Wait()
 	r.ForceSave()
 }
 
 func (r *Map) writeToDisk(out map[string][]int64) {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
 	if err := os.MkdirAll(filepath.Dir(r.path), 0o750); err != nil {
 		log.Printf("refcount: mkdir error: %v", err)
 		return
