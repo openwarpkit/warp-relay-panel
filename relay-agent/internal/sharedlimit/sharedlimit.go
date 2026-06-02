@@ -79,7 +79,7 @@ func (m *Manager) reconcile() {
 		}
 		m.seen[ip] = now
 	}
-	// 2. Remove idle IPs (only from seen - limit is removed after unlock).
+	// 2. Collect idle IPs
 	toRemove := make([]string, 0)
 	for ip, lastSeen := range m.seen {
 		if _, stillActive := active[ip]; stillActive {
@@ -87,7 +87,6 @@ func (m *Manager) reconcile() {
 		}
 		if now.Sub(lastSeen) > m.cfg.IdleGrace {
 			toRemove = append(toRemove, ip)
-			delete(m.seen, ip)
 		}
 	}
 	m.mu.Unlock()
@@ -99,6 +98,14 @@ func (m *Manager) reconcile() {
 	if len(toRemove) > 0 {
 		removed := m.rl.RemoveBatch(toRemove)
 		log.Printf("sharedlimit: batch -%d (idle)", len(removed))
+		
+		if len(removed) > 0 {
+			m.mu.Lock()
+			for _, limit := range removed {
+				delete(m.seen, limit.IP)
+			}
+			m.mu.Unlock()
+		}
 	}
 }
 
@@ -180,7 +187,12 @@ func (m *Manager) Loop(ctx context.Context) {
 				}
 				if len(pending) >= 10000 {
 					// Emergency Flush: Drop batch immediately to avoid OOM or dropped IPs
-					debounceTimer.Stop()
+					if !debounceTimer.Stop() {
+						select {
+						case <-debounceTimer.C:
+						default:
+						}
+					}
 					timerActive = false
 					unique := make([]string, 0, len(pending))
 					for ip := range pending {
