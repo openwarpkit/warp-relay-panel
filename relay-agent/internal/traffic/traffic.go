@@ -264,9 +264,7 @@ type Summary struct {
 
 func (m *Monitor) GetAll(refCount func(string) int, clients func(string) []int64) Summary {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if resetState := m.checkMonthReset(); resetState != nil {
-		// Asynchronous save in a goroutine because GetAll is read-only path
 		go m.save(*resetState)
 	}
 	out := Summary{
@@ -278,17 +276,11 @@ func (m *Monitor) GetAll(refCount func(string) int, clients func(string) []int64
 	for ip, s := range m.state.IPs {
 		totalTX += s.TX
 		totalRX += s.RX
-		ids := clients(ip)
-		if ids == nil {
-			ids = []int64{}
-		}
 		out.IPs[ip] = PerIP{
 			TXBytes: s.TX, RXBytes: s.RX, TotalBytes: s.TX + s.RX,
 			TXHuman:     shell.FormatBytes(s.TX),
 			RXHuman:     shell.FormatBytes(s.RX),
 			TotalHuman:  shell.FormatBytes(s.TX + s.RX),
-			ClientsOnIP: refCount(ip),
-			ClientIDs:   ids,
 			Updated:     s.Updated,
 		}
 	}
@@ -301,19 +293,34 @@ func (m *Monitor) GetAll(refCount func(string) int, clients func(string) []int64
 	out.TotalRX = shell.FormatBytes(totalRX)
 	out.Total = shell.FormatBytes(totalTX + totalRX)
 	out.IPCount = len(out.IPs)
+	m.mu.Unlock()
+
+	for ip, p := range out.IPs {
+		p.ClientsOnIP = refCount(ip)
+		ids := clients(ip)
+		if ids == nil {
+			ids = []int64{}
+		}
+		p.ClientIDs = ids
+		out.IPs[ip] = p
+	}
+
 	return out
 }
 
 func (m *Monitor) GetIP(ip string, refCount func(string) int, clients func(string) []int64) (PerIP, []int64, string, bool) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	s, ok := m.state.IPs[ip]
+	month := m.state.Month
+	m.mu.Unlock()
+
 	ids := clients(ip)
 	if ids == nil {
 		ids = []int64{}
 	}
-	s, ok := m.state.IPs[ip]
+	
 	if !ok {
-		return PerIP{IP: ip, ClientIDs: ids}, ids, m.state.Month, false
+		return PerIP{IP: ip, ClientIDs: ids}, ids, month, false
 	}
 	return PerIP{
 		IP:          ip,
@@ -324,7 +331,7 @@ func (m *Monitor) GetIP(ip string, refCount func(string) int, clients func(strin
 		ClientsOnIP: refCount(ip),
 		ClientIDs:   ids,
 		Updated:     s.Updated,
-	}, ids, m.state.Month, true
+	}, ids, month, true
 }
 
 func (m *Monitor) Reset() string {
