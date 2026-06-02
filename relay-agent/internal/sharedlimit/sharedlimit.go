@@ -260,10 +260,8 @@ func (m *Manager) Reset() {
 	m.seen = make(map[string]time.Time, 64)
 	m.mu.Unlock()
 
-	for _, ip := range ips {
-		m.rl.Remove(ip)
-	}
-	log.Printf("sharedlimit: reset (%d removed)", len(ips))
+	removed := m.rl.RemoveBatch(ips)
+	log.Printf("sharedlimit: reset (%d removed)", len(removed))
 }
 
 // Config for /health and /shaped endpoints (readonly view).
