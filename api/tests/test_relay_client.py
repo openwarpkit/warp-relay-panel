@@ -2,6 +2,7 @@ import pytest
 import respx
 import httpx
 from unittest.mock import patch
+import api.relay_client as rc
 from api.relay_client import add_ip, remove_ip, full_sync, get_traffic_all_relays
 
 @pytest.fixture
@@ -52,10 +53,9 @@ async def test_remove_ip(mock_db_relays, mock_db_mark):
 
 @pytest.mark.asyncio
 @respx.mock
-@patch("api.database.list_clients", return_value=[{"id": 1, "current_ip": "10.0.0.1"}])
-@patch("api.database.list_ip_bans", return_value=[])
-@patch("api.database.list_rate_limits", return_value=[])
-async def test_full_sync(m1, m2, m3, mock_db_relays, mock_db_mark):
+@patch("api.database.get_sync_payload",
+       return_value={"clients": [{"ip": "10.0.0.1", "client_id": 1}], "rate_limits": []})
+async def test_full_sync(m_payload, mock_db_relays, mock_db_mark):
     respx.post("http://1.2.3.4:7580/whitelist/sync").mock(
         return_value=httpx.Response(200, json={"ok": True, "accepted": True, "received": 1})
     )
@@ -81,8 +81,48 @@ async def test_get_traffic_all_relays():
         )
         
         result = await get_traffic_all_relays()
-        
+
         assert "r1" in result
         assert result["r1"]["ips"]["10.0.0.1"]["tx_bytes"] == 100
         assert "r2" in result
         assert result["r2"]["ok"] is False
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_pool_timeout_recycles_client(mock_db_relays, mock_db_mark):
+    rc._consecutive_timeouts = 0
+    before = await rc._get_client()
+    respx.post("http://1.2.3.4:7580/whitelist/update").mock(
+        side_effect=httpx.PoolTimeout("pool exhausted")
+    )
+    result = await add_ip("10.0.0.1", "10.0.0.2", 1)
+    assert result["r1"]["ok"] is False
+    assert "timeout" in result["r1"]["error"]
+    assert rc._http_client is not before
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_consecutive_timeouts_recycle(mock_db_relays, mock_db_mark, monkeypatch):
+    monkeypatch.setattr(rc, "_RECYCLE_AFTER", 2)
+    rc._consecutive_timeouts = 0
+    before = await rc._get_client()
+    respx.post("http://1.2.3.4:7580/whitelist/update").mock(
+        side_effect=httpx.ReadTimeout("read")
+    )
+    await add_ip("10.0.0.1", None, 1)
+    assert rc._http_client is before
+    await add_ip("10.0.0.1", None, 1)
+    assert rc._http_client is not before
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_success_resets_timeout_counter(mock_db_relays, mock_db_mark):
+    rc._consecutive_timeouts = 5
+    respx.post("http://1.2.3.4:7580/whitelist/update").mock(
+        return_value=httpx.Response(200, json={"ok": True})
+    )
+    await add_ip("10.0.0.1", None, 1)
+    assert rc._consecutive_timeouts == 0

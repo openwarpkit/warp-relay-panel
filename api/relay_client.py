@@ -5,6 +5,7 @@ HTTP client for relay agents.
 import asyncio
 import ipaddress
 import logging
+import socket
 import httpx
 from . import database as db
 
@@ -13,15 +14,45 @@ logger = logging.getLogger("relay_client")
 AGENT_TIMEOUT = 10.0
 SYNC_TIMEOUT = 30.0  # For /whitelist/sync (large payload)
 
-_http_client: httpx.AsyncClient = None
+_LIMITS = httpx.Limits(
+    max_keepalive_connections=20,
+    max_connections=100,
+    keepalive_expiry=30.0,
+)
+_TIMEOUT = httpx.Timeout(AGENT_TIMEOUT, connect=5.0, pool=5.0)
+_RECYCLE_AFTER = 8
 
-def _get_client() -> httpx.AsyncClient:
+_http_client: httpx.AsyncClient | None = None
+_client_lock = asyncio.Lock()
+_consecutive_timeouts = 0
+
+
+def _new_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(limits=_LIMITS, timeout=_TIMEOUT)
+
+
+async def _get_client() -> httpx.AsyncClient:
     global _http_client
     if _http_client is None or _http_client.is_closed:
-        _http_client = httpx.AsyncClient(
-            limits=httpx.Limits(max_keepalive_connections=20, max_connections=100)
-        )
+        async with _client_lock:
+            if _http_client is None or _http_client.is_closed:
+                _http_client = _new_client()
     return _http_client
+
+
+async def _recycle_client(stale: httpx.AsyncClient | None) -> None:
+    global _http_client, _consecutive_timeouts
+    async with _client_lock:
+        if _http_client is not stale:
+            return
+        old, _http_client = _http_client, _new_client()
+        _consecutive_timeouts = 0
+    if old is not None:
+        try:
+            await old.aclose()
+        except Exception:
+            pass
+    logger.warning("recycled httpx client (outbound pool wedged)")
 
 
 def _validate_ipv4(ip: str) -> str:
@@ -42,14 +73,21 @@ def _agent_headers(relay: dict) -> dict:
     return {"X-Agent-Key": secret, "Content-Type": "application/json"}
 
 
-import socket
+def _resolve_host(host: str) -> str:
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        return socket.gethostbyname(host)
+
 
 async def _agent_request(relay: dict, method: str, path: str,
                          json_data: dict = None,
                          timeout: float = AGENT_TIMEOUT) -> tuple[bool, dict]:
+    global _consecutive_timeouts
     host = relay['host']
     try:
-        resolved_ip = socket.gethostbyname(host)
+        resolved_ip = await asyncio.to_thread(_resolve_host, host)
         ip_obj = ipaddress.ip_address(resolved_ip)
         if ip_obj.is_loopback or ip_obj.is_private or ip_obj.is_link_local:
             msg = f"[{relay['name']}] SSRF blocked: {host} resolved to local IP {resolved_ip}"
@@ -65,22 +103,32 @@ async def _agent_request(relay: dict, method: str, path: str,
     headers = _agent_headers(relay)
     headers["Host"] = host
 
+    client = await _get_client()
     try:
-        resp = await _get_client().request(
+        resp = await client.request(
             method, url,
             headers=headers,
             json=json_data,
             timeout=timeout,
         )
         data = resp.json()
+        _consecutive_timeouts = 0
         if resp.status_code >= 400:
             logger.warning("[%s] %s %s → %d: %s",
                            relay["name"], method, path, resp.status_code, data)
             return False, data
         return True, data
+    except httpx.PoolTimeout:
+        msg = f"[{relay['name']}] timeout: {method} {path}"
+        logger.error("%s (pool exhausted)", msg)
+        await _recycle_client(client)
+        return False, {"error": msg}
     except httpx.TimeoutException:
         msg = f"[{relay['name']}] timeout: {method} {path}"
         logger.error(msg)
+        _consecutive_timeouts += 1
+        if _consecutive_timeouts >= _RECYCLE_AFTER:
+            await _recycle_client(client)
         return False, {"error": msg}
     except Exception as e:
         msg = f"[{relay['name']}] error: {e}"
