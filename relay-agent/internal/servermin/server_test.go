@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/nellimonix/warp-relay-panel/relay-agent/internal/config"
+	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/config"
 )
 
 func TestAuthMiddleware(t *testing.T) {

@@ -10,14 +10,14 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/nellimonix/warp-relay-panel/relay-agent/internal/config"
-	"github.com/nellimonix/warp-relay-panel/relay-agent/internal/conntrackgo"
-	"github.com/nellimonix/warp-relay-panel/relay-agent/internal/metrics"
-	"github.com/nellimonix/warp-relay-panel/relay-agent/internal/ratelimit"
-	"github.com/nellimonix/warp-relay-panel/relay-agent/internal/refcount"
-	"github.com/nellimonix/warp-relay-panel/relay-agent/internal/selfupdate"
-	"github.com/nellimonix/warp-relay-panel/relay-agent/internal/traffic"
-	"github.com/nellimonix/warp-relay-panel/relay-agent/internal/watchdog"
+	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/config"
+	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/conntrackgo"
+	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/metrics"
+	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/ratelimit"
+	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/refcount"
+	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/selfupdate"
+	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/traffic"
+	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/watchdog"
 )
 
 type Server struct {

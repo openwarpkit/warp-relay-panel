@@ -37,7 +37,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 GO_AGENT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_DIR="$(cd "${GO_AGENT_DIR}/.." && pwd)"
 
-RELEASE_REPO="${AGENT_RELEASE_REPO:-nellimonix/warp-relay-panel}"
+RELEASE_REPO="${AGENT_RELEASE_REPO:-openwarpkit/warp-relay-panel}"
 
 # ═══════════════════════════════════════
 # 1. PACKAGES (no ipset - not needed for min)

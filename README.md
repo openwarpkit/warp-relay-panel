@@ -65,13 +65,13 @@ docker run -d -p 8000:8000 --env-file .env warp-relay-panel
 ```bash
 ssh root@RELAY_IP
 
-git clone https://github.com/nellimonix/warp-relay-panel.git /opt/warp-relay-panel
+git clone https://github.com/openwarpkit/warp-relay-panel.git /opt/warp-relay-panel
 sudo bash /opt/warp-relay-panel/relay-agent/deploy/setup.sh        # full
 # или
 sudo bash /opt/warp-relay-panel/relay-agent/deploy/setup-min.sh    # min
 ```
 
-Скрипт спросит `Agent secret` (тот же `AGENT_SECRET`, что в конфигурации панели) и порт (default 7580). Скачает свежий бинарь из [releases/latest](https://github.com/nellimonix/warp-relay-panel/releases/latest), настроит iptables/ipset/tc, заведёт systemd unit, включит автовосстановление правил при перезагрузке.
+Скрипт спросит `Agent secret` (тот же `AGENT_SECRET`, что в конфигурации панели) и порт (default 7580). Скачает свежий бинарь из [releases/latest](https://github.com/openwarpkit/warp-relay-panel/releases/latest), настроит iptables/ipset/tc, заведёт systemd unit, включит автовосстановление правил при перезагрузке.
 
 Override owner/repo для форка: `AGENT_RELEASE_REPO=user/repo bash setup.sh`.
 

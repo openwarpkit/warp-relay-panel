@@ -20,7 +20,7 @@ import (
 
 // DefaultReleaseRepo - owner/repo on GitHub, from where we pull binaries.
 // Override via env AGENT_RELEASE_REPO=user/repo.
-const DefaultReleaseRepo = "nellimonix/warp-relay-panel"
+const DefaultReleaseRepo = "openwarpkit/warp-relay-panel"
 
 type Status struct {
 	OK         bool          `json:"ok"`

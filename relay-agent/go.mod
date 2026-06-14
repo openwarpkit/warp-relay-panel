@@ -1,4 +1,4 @@
-module github.com/nellimonix/warp-relay-panel/relay-agent
+module github.com/openwarpkit/warp-relay-panel/relay-agent
 
 go 1.23.0
 

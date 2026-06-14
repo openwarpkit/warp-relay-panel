@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nellimonix/warp-relay-panel/relay-agent/internal/conntrackgo"
-	"github.com/nellimonix/warp-relay-panel/relay-agent/internal/ratelimit"
+	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/conntrackgo"
+	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/ratelimit"
 	"github.com/ti-mo/conntrack"
 )
 

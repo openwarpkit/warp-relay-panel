@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nellimonix/warp-relay-panel/relay-agent/internal/ipsetgo"
-	"github.com/nellimonix/warp-relay-panel/relay-agent/internal/shell"
+	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/ipsetgo"
+	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/shell"
 )
 
 func (s *Server) loadStatusFile(path string) interface{} {

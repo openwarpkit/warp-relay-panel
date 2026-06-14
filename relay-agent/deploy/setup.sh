@@ -38,7 +38,7 @@ GO_AGENT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"   # …/relay-agent
 REPO_DIR="$(cd "${GO_AGENT_DIR}/.." && pwd)"     # …/warp-relay-panel
 
 # owner/repo for downloading binaries. Override: AGENT_RELEASE_REPO=user/repo
-RELEASE_REPO="${AGENT_RELEASE_REPO:-nellimonix/warp-relay-panel}"
+RELEASE_REPO="${AGENT_RELEASE_REPO:-openwarpkit/warp-relay-panel}"
 
 # ═══════════════════════════════════════
 # 1. PACKAGES

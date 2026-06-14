@@ -12,7 +12,7 @@ import (
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/process"
 
-	"github.com/nellimonix/warp-relay-panel/relay-agent/internal/shell"
+	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/shell"
 )
 
 type NetworkSpeed struct {

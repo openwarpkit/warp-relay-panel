@@ -65,13 +65,13 @@ Binaries come from GitHub Releases — nothing is built on the VPS:
 ```bash
 ssh root@RELAY_IP
 
-git clone https://github.com/nellimonix/warp-relay-panel.git /opt/warp-relay-panel
+git clone https://github.com/openwarpkit/warp-relay-panel.git /opt/warp-relay-panel
 sudo bash /opt/warp-relay-panel/relay-agent/deploy/setup.sh        # full
 # or
 sudo bash /opt/warp-relay-panel/relay-agent/deploy/setup-min.sh    # min
 ```
 
-The script will ask for the `Agent secret` (same as `AGENT_SECRET` in the panel configuration) and port (default 7580). It downloads the fresh binary from [releases/latest](https://github.com/nellimonix/warp-relay-panel/releases/latest), configures iptables/ipset/tc, creates a systemd unit, and enables auto-restore of rules on reboot.
+The script will ask for the `Agent secret` (same as `AGENT_SECRET` in the panel configuration) and port (default 7580). It downloads the fresh binary from [releases/latest](https://github.com/openwarpkit/warp-relay-panel/releases/latest), configures iptables/ipset/tc, creates a systemd unit, and enables auto-restore of rules on reboot.
 
 Override owner/repo for fork: `AGENT_RELEASE_REPO=user/repo bash setup.sh`.
 

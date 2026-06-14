@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nellimonix/warp-relay-panel/relay-agent/internal/conntrackgo"
-	"github.com/nellimonix/warp-relay-panel/relay-agent/internal/shell"
+	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/conntrackgo"
+	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/shell"
 )
 
 var msk = time.FixedZone("MSK", 3*3600)

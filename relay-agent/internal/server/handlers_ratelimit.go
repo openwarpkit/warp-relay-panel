@@ -6,7 +6,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/nellimonix/warp-relay-panel/relay-agent/internal/shell"
+	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/shell"
 )
 
 type rateLimitReq struct {

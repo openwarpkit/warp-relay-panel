@@ -31,7 +31,7 @@ sudo bash deploy/setup.sh        # full
 sudo bash deploy/setup-min.sh    # min
 ```
 
-Скрипт ставит пакеты, настраивает iptables/ipset/tc, скачивает свежий бинарь из `nellimonix/warp-relay-panel/releases/latest`, создаёт systemd unit. Override owner/repo: `AGENT_RELEASE_REPO=user/repo bash setup.sh`.
+Скрипт ставит пакеты, настраивает iptables/ipset/tc, скачивает свежий бинарь из `openwarpkit/warp-relay-panel/releases/latest`, создаёт systemd unit. Override owner/repo: `AGENT_RELEASE_REPO=user/repo bash setup.sh`.
 
 ## Самообновление
 
