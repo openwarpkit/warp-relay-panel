@@ -71,15 +71,17 @@ func (m *Manager) reconcile() {
 	now := time.Now()
 
 	m.mu.Lock()
-	// 1. Collect list of new IPs under one lock (without accessing rl).
+	// 1. New = active IP without a current limit. Keyed on rl (source of
+	// truth), not seen: an IP still in seen but dropped from rl must be
+	// re-applied, else it runs unshaped.
 	newIPs := make([]string, 0)
 	for ip := range active {
-		if _, ok := m.seen[ip]; !ok {
+		if !m.rl.Has(ip) {
 			newIPs = append(newIPs, ip)
 		}
 		m.seen[ip] = now
 	}
-	// 2. Collect idle IPs
+	// 2. Idle: queue removal and drop from seen (bounds seen growth).
 	toRemove := make([]string, 0)
 	for ip, lastSeen := range m.seen {
 		if _, stillActive := active[ip]; stillActive {
@@ -87,6 +89,7 @@ func (m *Manager) reconcile() {
 		}
 		if now.Sub(lastSeen) > m.cfg.IdleGrace {
 			toRemove = append(toRemove, ip)
+			delete(m.seen, ip)
 		}
 	}
 	m.mu.Unlock()
@@ -99,14 +102,6 @@ func (m *Manager) reconcile() {
 		go func(ips []string) {
 			removed := m.rl.RemoveBatch(ips)
 			log.Printf("sharedlimit: batch -%d (idle)", len(removed))
-
-			if len(removed) > 0 {
-				m.mu.Lock()
-				for _, limit := range removed {
-					delete(m.seen, limit.IP)
-				}
-				m.mu.Unlock()
-			}
 		}(toRemove)
 	}
 }

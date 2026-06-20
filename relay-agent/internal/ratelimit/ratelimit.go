@@ -330,8 +330,10 @@ func (m *Manager) applyTC(ip string, mbps float64, mark int) error {
 	}
 
 	// HTB-class per IP - needed in both backends for individual rate.
+	// tc parses classid minor as hex; cls_flow routes by the numeric mark,
+	// so the minor must equal the mark value -> %x, not %d.
 	rc, _, err := shell.Run(
-		fmt.Sprintf("tc class add dev %s parent 1: classid 1:%d htb rate %.2fmbit ceil %.2fmbit burst 16k 2>&1", iface, mark, mbps, mbps),
+		fmt.Sprintf("tc class add dev %s parent 1: classid 1:%x htb rate %.2fmbit ceil %.2fmbit burst 16k 2>&1", iface, mark, mbps, mbps),
 		5*time.Second,
 	)
 	if rc != 0 && !isExistsErr(err) {
@@ -343,7 +345,7 @@ func (m *Manager) applyTC(ip string, mbps float64, mark int) error {
 	// per-IP fw filters are needed (legacy design).
 	if !m.useNft {
 		rc, _, err := shell.Run(
-			fmt.Sprintf("tc filter add dev %s protocol ip parent 1:0 prio 1 handle %d fw flowid 1:%d 2>&1", iface, mark, mark),
+			fmt.Sprintf("tc filter add dev %s protocol ip parent 1:0 prio 1 handle %d fw flowid 1:%x 2>&1", iface, mark, mark),
 			5*time.Second,
 		)
 		if rc != 0 && !isExistsErr(err) {
@@ -379,7 +381,7 @@ func (m *Manager) removeTC(ip string, mark int) {
 			5*time.Second)
 	}
 	shell.Run(
-		fmt.Sprintf("tc class del dev %s classid 1:%d 2>/dev/null", iface, mark),
+		fmt.Sprintf("tc class del dev %s classid 1:%x 2>/dev/null", iface, mark),
 		5*time.Second)
 	// Reset mark on current conntrack-flows - netlink.
 	// maxAge=5s - same snapshot, see applyTC.
@@ -536,7 +538,7 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 		if pl.isNew {
 			fmt.Fprintf(&nftBuf, "add element ip warp_shaper ip2mark { %s : 0x%x }\n", pl.item.IP, pl.mark)
 		}
-		fmt.Fprintf(&tcBuf, "class replace dev %s parent 1: classid 1:%d htb rate %.2fmbit ceil %.2fmbit burst 16k\n",
+		fmt.Fprintf(&tcBuf, "class replace dev %s parent 1: classid 1:%x htb rate %.2fmbit ceil %.2fmbit burst 16k\n",
 			iface, pl.mark, pl.item.Mbps, pl.item.Mbps)
 	}
 
@@ -553,9 +555,9 @@ func (m *Manager) SetBatch(items []SetItem) ([]Limit, map[string]error) {
 		for _, pl := range plans {
 			if pl.isNew {
 				fmt.Fprintf(&rNftBuf, "delete element ip warp_shaper ip2mark { %s }\n", pl.item.IP)
-				fmt.Fprintf(&rTcBuf, "class del dev %s classid 1:%d\n", iface, pl.mark)
+				fmt.Fprintf(&rTcBuf, "class del dev %s classid 1:%x\n", iface, pl.mark)
 			} else {
-				fmt.Fprintf(&rTcBuf, "class replace dev %s parent 1: classid 1:%d htb rate %.2fmbit ceil %.2fmbit burst 16k\n",
+				fmt.Fprintf(&rTcBuf, "class replace dev %s parent 1: classid 1:%x htb rate %.2fmbit ceil %.2fmbit burst 16k\n",
 					iface, pl.mark, pl.oldMbps, pl.oldMbps)
 			}
 		}
@@ -706,7 +708,7 @@ func (m *Manager) RemoveBatch(ips []string) []Limit {
 	srcToMark := make(map[string]uint32, len(plans))
 	for _, pl := range plans {
 		fmt.Fprintf(&nftBuf, "delete element ip warp_shaper ip2mark { %s }\n", pl.ip)
-		fmt.Fprintf(&tcBuf, "class del dev %s classid 1:%d\n", iface, pl.mark)
+		fmt.Fprintf(&tcBuf, "class del dev %s classid 1:%x\n", iface, pl.mark)
 		srcToMark[pl.ip] = 0 // reset mark on conntrack flow
 	}
 
@@ -779,6 +781,13 @@ func (m *Manager) Count() int {
 	return len(m.m)
 }
 
+func (m *Manager) Has(ip string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.m[ip]
+	return ok
+}
+
 // RestoreAll reapplies all limits to tc/(nft|iptables). Called on agent start
 // and by watchdog.
 //
@@ -816,7 +825,7 @@ func (m *Manager) RestoreAll() (applied []string, failed []string) {
 		srcToMark := make(map[string]uint32, len(all))
 		for _, e := range all {
 			fmt.Fprintf(&nftBuf, "add element ip warp_shaper ip2mark { %s : 0x%x }\n", e.ip, e.mark)
-			fmt.Fprintf(&tcBuf, "class replace dev %s parent 1: classid 1:%d htb rate %.2fmbit ceil %.2fmbit burst 16k\n",
+			fmt.Fprintf(&tcBuf, "class replace dev %s parent 1: classid 1:%x htb rate %.2fmbit ceil %.2fmbit burst 16k\n",
 				iface, e.mark, e.mbps, e.mbps)
 			// #nosec G115 -- mark is within safe 10..999 range
 			srcToMark[e.ip] = uint32(e.mark)
@@ -882,7 +891,8 @@ func (m *Manager) RestoreAll() (applied []string, failed []string) {
 	return
 }
 
-var classRe = regexp.MustCompile(`class htb 1:(\d+)`)
+// tc prints the classid minor in hex (e.g. `class htb 1:fb`).
+var classRe = regexp.MustCompile(`class htb 1:([0-9a-f]+)`)
 
 // nftIPRe - IPv4 in `nft list map ip warp_shaper ip2mark` output.
 // Format: `elements = { 1.2.3.4 : 0x0000000a, ... }` (optional with timeouts).
@@ -908,8 +918,8 @@ func (m *Manager) Verify() []string {
 	for _, line := range strings.Split(out, "\n") {
 		match := classRe.FindStringSubmatch(line)
 		if match != nil {
-			if n, err := strconv.Atoi(match[1]); err == nil {
-				existing[n] = true
+			if n, err := strconv.ParseInt(match[1], 16, 32); err == nil {
+				existing[int(n)] = true
 			}
 		}
 	}
