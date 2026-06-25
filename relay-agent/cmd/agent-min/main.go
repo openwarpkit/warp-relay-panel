@@ -52,6 +52,7 @@ func main() {
 		filepath.Join(cfg.DataDir, "traffic.json"),
 		time.Duration(cfg.TrafficInterval)*time.Second,
 		ct,
+		!cfg.MinTrafficPerIP,
 	)
 	rl := ratelimit.New(
 		filepath.Join(cfg.DataDir, "rate_limits.json"),
@@ -105,11 +106,13 @@ func main() {
 
 	var wg sync.WaitGroup
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		tm.Loop(ctx, sl.HasIP)
-	}()
+	if cfg.MinTrafficPerIP {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tm.Loop(ctx, sl.HasIP)
+		}()
+	}
 
 	wg.Add(1)
 	go func() {

@@ -49,6 +49,7 @@ func main() {
 		filepath.Join(cfg.DataDir, "traffic.json"),
 		time.Duration(cfg.TrafficInterval)*time.Second,
 		ct,
+		false,
 	)
 	rl := ratelimit.New(
 		filepath.Join(cfg.DataDir, "rate_limits.json"),
