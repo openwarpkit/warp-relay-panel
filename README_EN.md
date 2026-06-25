@@ -1,7 +1,7 @@
 # WARP Relay Panel v1.3.0
 
 Control panel for whitelist and rate-limits of WARP Relay servers.
-Free hosting of API panel (Docker/FastAPI + Supabase), native Go agent v2.1.0+ on relays.
+Self-hosted API panel (Docker/FastAPI + PostgreSQL), native Go agent v2.1.0+ on relays.
 
 ---
 
@@ -9,8 +9,10 @@ Free hosting of API panel (Docker/FastAPI + Supabase), native Go agent v2.1.0+ o
 
 ```
 Telegram Bot  ──HTTP──▶  Docker (FastAPI)  ──HTTP──▶  Relay Agent 1 (full)
-                         Supabase (PostgreSQL)  ────▶  Relay Agent 2 (full)
-                              ▲                 ────▶  Relay Agent N (min)
+                         PostgreSQL (sibling   ────▶  Relay Agent 2 (full)
+                         container on the same ────▶  Relay Agent N (min)
+                         VPS)
+                              ▲
                               │
                        Client via link
                        (identified by IPv4)
@@ -18,8 +20,8 @@ Telegram Bot  ──HTTP──▶  Docker (FastAPI)  ──HTTP──▶  Relay 
 
 | Component | Where | Cost |
 |-----------|-----|-----------|
-| API Panel | Docker container | Your VPS / Serverless |
-| Database | Supabase PostgreSQL | Free (500 MB) |
+| API Panel | Docker container | Your VPS |
+| Database | PostgreSQL (Docker, same VPS) | Your VPS |
 | Relay Agent (Go) | On each relay server (~7 MB binary) | VPS |
 | Telegram Bot | Server | VPS |
 
@@ -32,31 +34,32 @@ Telegram Bot  ──HTTP──▶  Docker (FastAPI)  ──HTTP──▶  Relay 
 
 ## Quick Start
 
-### 1. Panel (Docker + Supabase) — 5 minutes
+### 1. Panel + PostgreSQL (docker-compose) — 5 minutes
 
-**Supabase:**
-1. Create a project at [supabase.com](https://supabase.com).
-2. **SQL Editor** → paste [supabase_schema.sql](supabase_schema.sql) → Run. The script is idempotent — safe to run multiple times.
-3. Copy **Project URL** and **service_role key**.
-
-**Docker — local run:**
+The panel and the DB come up from a single `docker-compose.yml`: the panel image
+is pulled from ghcr, Postgres starts alongside and applies
+[db/schema.sql](db/schema.sql) automatically on first boot. Full guide
+(from-scratch start and data migration from Supabase) — see [DEPLOY.md](DEPLOY.md).
 
 ```bash
-docker build -t warp-relay-panel .
-docker run -d -p 8000:8000 --env-file .env warp-relay-panel
+git clone https://github.com/openwarpkit/warp-relay-panel.git /opt/warp-relay-panel
+cd /opt/warp-relay-panel
+cp .env.example .env        # fill in the values (see table below)
+docker compose up -d
 ```
 
-After building, set the environment variables in `.env`:
+Environment variables in `.env`:
 
 | Variable | Value |
 |------------|----------|
-| `SUPABASE_URL` | `https://xxx.supabase.co` |
-| `SUPABASE_KEY` | `eyJ...service-role-key...` |
+| `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` | Postgres db name / user / password |
+| `DATABASE_URL` | connection string (built from `POSTGRES_*` in compose, host = `db`) |
 | `ENCRYPTION_KEY` | Generate: `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
 | `API_KEY` | Any secret key for the bot |
 | `AGENT_SECRET` | Shared secret for relay agents |
 
-→ **Redeploy** to apply variables.
+> ⚠ When migrating from Supabase, keep the **same** `ENCRYPTION_KEY`, otherwise
+> previously stored IPs cannot be decrypted.
 
 ### 2. Relay Server — 1 command
 
@@ -406,7 +409,7 @@ async def set_rate_limit(ip: str, mbps: float, ttl_seconds: int | None = None) -
 warp-relay-panel/
 ├── api/                              # Panel backend (Python FastAPI)
 │   ├── index.py                      # FastAPI (routes, activation, blacklist, rate-limits)
-│   ├── database.py                   # Supabase ops (atomic RPCs)
+│   ├── database.py                   # PostgreSQL (async psycopg3 + pool)
 │   ├── relay_client.py               # HTTP-client to relay agents
 │   ├── crypto.py                     # IP encryption (Fernet)
 │   └── cache.py                      # In-memory TTL cache
@@ -427,7 +430,9 @@ warp-relay-panel/
 ├── .github/workflows/
 │   ├── release-agent.yml             # build & release binaries on tag agent-v*
 │   └── docker-build.yml
-├── supabase_schema.sql               # SQL to create tables + RPC (source of truth)
+├── db/schema.sql                     # SQL: tables + functions (source of truth)
+├── docker-compose.yml                # panel + postgres
+├── DEPLOY.md                         # from-scratch start + data migration
 ├── requirements.txt                  # Python deps
 └── .env.example                      # Environment variables
 ```
@@ -442,7 +447,7 @@ warp-relay-panel/
 - Removed old Python relay-agent (completely on Go v2.1.0+).
 - Removed deprecated DB fields: `clients.note`, `clients.activations_today`, `clients.activations_reset_date`, `activation_log.user_agent`.
 - Removed daily activation limit (`MAX_ACTIVATIONS_PER_DAY`).
-- All migrations collapsed into a single `supabase_schema.sql` (source of truth), including RPCs.
+- All migrations collapsed into a single `db/schema.sql` (source of truth), including SQL functions.
 
 ### v2.1.0 — Go-agent
 - Full rewrite of relay-agent from Python to Go (single static binary ~7 MB).
@@ -454,7 +459,7 @@ warp-relay-panel/
 ### v1.2.2
 - Background whitelist sync via `/whitelist/sync`.
 - Last sync status in `/health` → `last_sync`.
-- Pagination for Supabase fetches.
+- Pagination for DB fetches.
 - Fixed removing orphaned IPs from ipset.
 
 ### v1.2.1

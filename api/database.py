@@ -1,9 +1,9 @@
 """
-Supabase database operations.
+PostgreSQL database operations (async psycopg3 + connection pool).
 All IP addresses are stored encrypted (Fernet AES).
 SHA-256 hash is used for IP search.
 
-Hot-path operations - atomic RPCs (see supabase_schema.sql):
+Hot-path operations - atomic SQL functions (see db/schema.sql):
 activate_client_atomic, block_client_atomic, delete_client_atomic,
 get_client_full_with_bans, add_ip_ban_idempotent, get_sync_payload,
 find_clients_by_ip, count_clients_on_ip, dashboard_stats.
@@ -11,37 +11,77 @@ find_clients_by_ip, count_clients_on_ip, dashboard_stats.
 
 import os
 import uuid
-from datetime import datetime, timezone
+import ipaddress
+import socket
+from datetime import datetime
 from typing import Optional
-from supabase import create_client, Client
+
+from psycopg_pool import AsyncConnectionPool
+from psycopg.rows import dict_row
+
 from .crypto import encrypt_ip, decrypt_ip, hash_ip
 from . import cache
 
-_client: Optional[Client] = None
-_PAGE_SIZE = 10000
+_pool: Optional[AsyncConnectionPool] = None
 
 
-def _db() -> Client:
-    global _client
-    if _client is None:
-        _client = create_client(
-            os.environ["SUPABASE_URL"],
-            os.environ["SUPABASE_KEY"],
+def _get_pool() -> AsyncConnectionPool:
+    global _pool
+    if _pool is None:
+        _pool = AsyncConnectionPool(
+            os.environ["DATABASE_URL"],
+            min_size=int(os.environ.get("DB_POOL_MIN", "1")),
+            max_size=int(os.environ.get("DB_POOL_MAX", "10")),
+            kwargs={"row_factory": dict_row},
+            open=False,
         )
-    return _client
+    return _pool
 
 
-def _iter_all_paginated(query_builder_fn):
-    offset = 0
-    while True:
-        query = query_builder_fn(offset, _PAGE_SIZE)
-        result = query.execute()
-        if not result.data:
-            break
-        yield from result.data
-        if len(result.data) < _PAGE_SIZE:
-            break
-        offset += _PAGE_SIZE
+async def open_pool() -> None:
+    pool = _get_pool()
+    await pool.open()
+    await pool.wait()
+
+
+async def close_pool() -> None:
+    global _pool
+    if _pool is not None:
+        await _pool.close()
+        _pool = None
+
+
+async def ping() -> bool:
+    async with _get_pool().connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT 1")
+            await cur.fetchone()
+    return True
+
+
+async def _all(sql: str, params=None) -> list[dict]:
+    async with _get_pool().connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(sql, params)
+            return await cur.fetchall()
+
+
+async def _one(sql: str, params=None) -> Optional[dict]:
+    async with _get_pool().connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(sql, params)
+            return await cur.fetchone()
+
+
+async def _exec(sql: str, params=None) -> int:
+    async with _get_pool().connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(sql, params)
+            return cur.rowcount
+
+
+def _iso(value):
+    return value.isoformat() if isinstance(value, datetime) else value
 
 
 def _safe_decrypt(enc: Optional[str]) -> Optional[str]:
@@ -54,13 +94,13 @@ def _safe_decrypt(enc: Optional[str]) -> Optional[str]:
 
 
 
-def get_dashboard_stats() -> dict:
+async def get_dashboard_stats() -> dict:
     try:
-        result = _db().rpc("dashboard_stats", {}).execute()
-        if result.data:
-            return result.data[0] if isinstance(result.data, list) else result.data
+        row = await _one("SELECT dashboard_stats() AS r")
+        if row and row["r"]:
+            return row["r"]
     except Exception as e:
-        print(f"[dashboard_stats] RPC error: {e}")
+        print(f"[dashboard_stats] error: {e}")
     return {
         "total_clients": 0, "active_clients": 0, "blocked_clients": 0,
         "total_relays": 0, "active_relays": 0, "ip_bans": 0,
@@ -68,51 +108,49 @@ def get_dashboard_stats() -> dict:
 
 
 
-def create_client_record(label: str = "") -> dict:
+async def create_client_record(label: str = "") -> dict:
     token = uuid.uuid4().hex[:16]
-    result = _db().table("clients").insert({"token": token, "label": label}).execute()
-    if not result.data:
+    row = await _one(
+        "INSERT INTO clients (token, label) VALUES (%s, %s) RETURNING id, token, label",
+        (token, label),
+    )
+    if not row:
         raise ValueError("Failed to create client record")
-    row = result.data[0]
     return {"id": row["id"], "token": row["token"], "label": label}
 
 
-def get_client_by_token(token: str) -> Optional[dict]:
-    result = _db().table("clients").select("*").eq("token", token).execute()
-    if not result.data:
-        return None
-    return _decrypt_client(result.data[0])
+async def get_client_by_token(token: str) -> Optional[dict]:
+    row = await _one("SELECT * FROM clients WHERE token = %s", (token,))
+    return _decrypt_client(row) if row else None
 
 
-def get_client_by_id(client_id: int) -> Optional[dict]:
-    result = _db().table("clients").select("*").eq("id", client_id).execute()
-    if not result.data:
-        return None
-    return _decrypt_client(result.data[0])
+async def get_client_by_id(client_id: int) -> Optional[dict]:
+    row = await _one("SELECT * FROM clients WHERE id = %s", (client_id,))
+    return _decrypt_client(row) if row else None
 
 
-def get_client_labels(ids: list[int]) -> dict[int, str]:
-    """Batch-resolve client_id → label. Via RPC: array sent in JSON-body, no URL-limit."""
+async def get_client_labels(ids: list[int]) -> dict[int, str]:
+    """Batch-resolve client_id -> label. Array sent in query params, no URL limit."""
     if not ids:
         return {}
     unique_ids = list({int(i) for i in ids})
-    result = _db().rpc("get_client_labels", {"p_ids": unique_ids}).execute()
-    return {row["id"]: row.get("label", "") for row in (result.data or [])}
-
-
-def list_clients_paginated(page: int = 0, per_page: int = 50, include_blocked: bool = True) -> dict:
-    query = _db().table("clients").select("*", count="exact")
-    if not include_blocked:
-        query = query.eq("is_blocked", False)
-
-    offset = page * per_page
-    result = (
-        query.order("id")
-        .range(offset, offset + per_page - 1)
-        .execute()
+    rows = await _all(
+        "SELECT id, label FROM clients WHERE id = ANY(%s)", (unique_ids,)
     )
-    items = [_decrypt_client(r) for r in (result.data or [])]
-    total = result.count or 0
+    return {row["id"]: row.get("label", "") for row in rows}
+
+
+async def list_clients_paginated(page: int = 0, per_page: int = 50,
+                                 include_blocked: bool = True) -> dict:
+    where = "" if include_blocked else "WHERE is_blocked = FALSE"
+    offset = page * per_page
+    rows = await _all(
+        f"SELECT *, COUNT(*) OVER() AS _total FROM clients {where} "
+        "ORDER BY id LIMIT %s OFFSET %s",
+        (per_page, offset),
+    )
+    total = int(rows[0]["_total"]) if rows else 0
+    items = [_decrypt_client(r) for r in rows]
     return {
         "items": items, "total": total,
         "page": page, "per_page": per_page,
@@ -120,46 +158,40 @@ def list_clients_paginated(page: int = 0, per_page: int = 50, include_blocked: b
     }
 
 
-def count_clients_on_ip(ip: str, exclude_client_id: int | None = None) -> int:
+async def count_clients_on_ip(ip: str, exclude_client_id: int | None = None) -> int:
     ip_h = hash_ip(ip)
     try:
-        result = _db().rpc(
-            "count_clients_on_ip",
-            {"p_ip_hash": ip_h, "p_exclude_client_id": exclude_client_id},
-        ).execute()
-        if result.data is not None:
-            if isinstance(result.data, list):
-                return int(result.data[0] if len(result.data) > 0 else 0)
-            return int(result.data)
-        return 0
+        row = await _one(
+            "SELECT count_clients_on_ip(%s, %s) AS r",
+            (ip_h, exclude_client_id),
+        )
+        return int(row["r"]) if row and row["r"] is not None else 0
     except Exception as e:
-        print(f"[count_clients_on_ip] RPC error: {e}")
+        print(f"[count_clients_on_ip] error: {e}")
         return 0
 
 
 
-def activate_client(token: str, new_ip: str) -> dict:
-    """Activation by token. Atomic RPC: 5 round-trips -> 1."""
-    result = _db().rpc("activate_client_atomic", {
-        "p_token": token,
-        "p_new_ip_enc": encrypt_ip(new_ip),
-        "p_new_ip_hash": hash_ip(new_ip),
-    }).execute()
-    return _wrap_activation_response(result.data, new_ip)
+async def activate_client(token: str, new_ip: str) -> dict:
+    """Activation by token. Atomic SQL function."""
+    row = await _one(
+        "SELECT activate_client_atomic(%s, %s, %s) AS r",
+        (token, encrypt_ip(new_ip), hash_ip(new_ip)),
+    )
+    return _wrap_activation_response(row["r"] if row else None, new_ip)
 
 
-def activate_client_by_id(client_id: int, new_ip: str) -> dict:
+async def activate_client_by_id(client_id: int, new_ip: str) -> dict:
     """Manual activation by client_id and IP."""
-    result = _db().rpc("activate_client_by_id_atomic", {
-        "p_client_id": client_id,
-        "p_new_ip_enc": encrypt_ip(new_ip),
-        "p_new_ip_hash": hash_ip(new_ip),
-    }).execute()
-    return _wrap_activation_response(result.data, new_ip)
+    row = await _one(
+        "SELECT activate_client_by_id_atomic(%s, %s, %s) AS r",
+        (client_id, encrypt_ip(new_ip), hash_ip(new_ip)),
+    )
+    return _wrap_activation_response(row["r"] if row else None, new_ip)
 
 
 def _wrap_activation_response(data: dict, new_ip: str) -> dict:
-    """Adapts RPC JSONB response to the format expected by index.py."""
+    """Adapts the function's JSONB response to the format expected by index.py."""
     if not data or "error" in (data or {}):
         return data or {"error": "rpc_no_data"}
 
@@ -182,23 +214,21 @@ def _wrap_activation_response(data: dict, new_ip: str) -> dict:
 
 
 
-def block_client(client_id: int, blocked: bool = True) -> Optional[dict]:
+async def block_client(client_id: int, blocked: bool = True) -> Optional[dict]:
     """Returns updated client with current_ip_banned/previous_ip_banned/current_ip_shared."""
-    result = _db().rpc("block_client_atomic", {
-        "p_client_id": client_id, "p_blocked": blocked,
-    }).execute()
-    data = result.data
+    row = await _one(
+        "SELECT block_client_atomic(%s, %s) AS r", (client_id, blocked)
+    )
+    data = row["r"] if row else None
     if not data or "error" in data:
         return None
     return _decrypt_jsonb_client(data)
 
 
-def delete_client(client_id: int) -> Optional[dict]:
+async def delete_client(client_id: int) -> Optional[dict]:
     """Returns {id, current_ip, current_ip_shared} or None."""
-    result = _db().rpc("delete_client_atomic", {
-        "p_client_id": client_id,
-    }).execute()
-    data = result.data
+    row = await _one("SELECT delete_client_atomic(%s) AS r", (client_id,))
+    data = row["r"] if row else None
     if not data or "error" in data:
         return None
     return {
@@ -208,19 +238,17 @@ def delete_client(client_id: int) -> Optional[dict]:
     }
 
 
-def get_client_full(client_id: int) -> Optional[dict]:
-    """Client + ban flags + current rate-limit. 3 requests -> 1."""
-    result = _db().rpc("get_client_full_with_bans", {
-        "p_client_id": client_id,
-    }).execute()
-    data = result.data
+async def get_client_full(client_id: int) -> Optional[dict]:
+    """Client + ban flags + current rate-limit in one call."""
+    row = await _one("SELECT get_client_full_with_bans(%s) AS r", (client_id,))
+    data = row["r"] if row else None
     if not data or "error" in data:
         return None
     return _decrypt_jsonb_client(data)
 
 
 def _decrypt_jsonb_client(data: dict) -> dict:
-    """JSONB from RPC -> normal client dict with decrypted IPs."""
+    """JSONB from the function -> normal client dict with decrypted IPs."""
     return {
         "id": data["id"],
         "token": data.get("token"),
@@ -238,43 +266,35 @@ def _decrypt_jsonb_client(data: dict) -> dict:
 
 
 
-def delete_activation_logs(client_id: int) -> int:
-    result = (
-        _db().table("activation_log")
-        .delete().eq("client_id", client_id).execute()
-    )
-    return len(result.data or [])
+async def delete_activation_logs(client_id: int) -> int:
+    return await _exec("DELETE FROM activation_log WHERE client_id = %s", (client_id,))
 
 
-def get_activation_logs(client_id: int, limit: int = 50) -> list[dict]:
-    result = (
-        _db().table("activation_log")
-        .select("*").eq("client_id", client_id)
-        .order("created_at", desc=True).limit(limit).execute()
+async def get_activation_logs(client_id: int, limit: int = 50) -> list[dict]:
+    rows = await _all(
+        "SELECT id, ip_enc, created_at FROM activation_log "
+        "WHERE client_id = %s ORDER BY created_at DESC LIMIT %s",
+        (client_id, limit),
     )
     return [{
         "id": r["id"],
         "ip": _safe_decrypt(r.get("ip_enc")),
-        "created_at": r["created_at"],
-    } for r in result.data]
+        "created_at": _iso(r["created_at"]),
+    } for r in rows]
 
 
-def get_all_active_ips() -> list[str]:
-    def _build(offset: int, limit: int):
-        return (
-            _db().table("clients")
-            .select("current_ip_enc")
-            .eq("is_blocked", False)
-            .not_.is_("current_ip_enc", "null")
-            .order("id")
-            .range(offset, offset + limit - 1)
-        )
-
-    for r in _iter_all_paginated(_build):
+async def get_all_active_ips() -> list[str]:
+    rows = await _all(
+        "SELECT current_ip_enc FROM clients "
+        "WHERE is_blocked = FALSE AND current_ip_enc IS NOT NULL ORDER BY id"
+    )
+    out = []
+    for r in rows:
         try:
-            yield decrypt_ip(r["current_ip_enc"])
+            out.append(decrypt_ip(r["current_ip_enc"]))
         except Exception:
             pass
+    return out
 
 
 
@@ -285,24 +305,23 @@ def _decrypt_client(row: dict) -> dict:
         "label": row["label"],
         "current_ip": _safe_decrypt(row.get("current_ip_enc")),
         "previous_ip": _safe_decrypt(row.get("previous_ip_enc")),
-        "last_activated_at": row["last_activated_at"],
+        "last_activated_at": _iso(row["last_activated_at"]),
         "is_blocked": row["is_blocked"],
-        "created_at": row["created_at"],
+        "created_at": _iso(row["created_at"]),
     }
 
 
-def search_clients_by_ip(ip: str, include_log_history: bool = True) -> list[dict]:
+async def search_clients_by_ip(ip: str, include_log_history: bool = True) -> list[dict]:
     ip_h = hash_ip(ip)
     try:
-        result = _db().rpc(
-            "find_clients_by_ip",
-            {"p_ip_hash": ip_h, "p_include_log_history": include_log_history},
-        ).execute()
+        rows = await _all(
+            "SELECT * FROM find_clients_by_ip(%s, %s)",
+            (ip_h, include_log_history),
+        )
     except Exception as e:
-        print(f"[search_clients_by_ip] RPC error: {e}")
+        print(f"[search_clients_by_ip] error: {e}")
         return []
 
-    rows = result.data or []
     clients = []
     for row in rows:
         match_source = row.pop("match_source", None)
@@ -313,15 +332,14 @@ def search_clients_by_ip(ip: str, include_log_history: bool = True) -> list[dict
 
 
 
-def add_ip_ban(ip: str, reason: str = "") -> dict:
-    """Idempotent INSERT via RPC (no race-condition)."""
+async def add_ip_ban(ip: str, reason: str = "") -> dict:
+    """Idempotent INSERT via function (no race-condition)."""
     ip_h = hash_ip(ip)
-    result = _db().rpc("add_ip_ban_idempotent", {
-        "p_ip_hash": ip_h,
-        "p_ip_enc": encrypt_ip(ip),
-        "p_reason": reason,
-    }).execute()
-    data = result.data or {}
+    row = await _one(
+        "SELECT add_ip_ban_idempotent(%s, %s, %s) AS r",
+        (ip_h, encrypt_ip(ip), reason),
+    )
+    data = row["r"] if row else {}
     return {
         "id": data.get("id"),
         "ip": ip,
@@ -330,88 +348,81 @@ def add_ip_ban(ip: str, reason: str = "") -> dict:
     }
 
 
-def remove_ip_ban(ban_id: int) -> bool:
-    result = _db().table("ip_blacklist").delete().eq("id", ban_id).execute()
-    return len(result.data) > 0
+async def remove_ip_ban(ban_id: int) -> bool:
+    return await _exec("DELETE FROM ip_blacklist WHERE id = %s", (ban_id,)) > 0
 
 
-def remove_ip_ban_by_ip(ip: str) -> bool:
+async def remove_ip_ban_by_ip(ip: str) -> bool:
     ip_h = hash_ip(ip)
-    result = _db().table("ip_blacklist").delete().eq("ip_hash", ip_h).execute()
-    return len(result.data) > 0
+    return await _exec("DELETE FROM ip_blacklist WHERE ip_hash = %s", (ip_h,)) > 0
 
 
-def is_ip_banned(ip: str) -> bool:
+async def is_ip_banned(ip: str) -> bool:
     ip_h = hash_ip(ip)
-    result = (
-        _db().table("ip_blacklist").select("id", count="exact")
-        .eq("ip_hash", ip_h).execute()
+    row = await _one(
+        "SELECT EXISTS(SELECT 1 FROM ip_blacklist WHERE ip_hash = %s) AS r", (ip_h,)
     )
-    return (result.count or 0) > 0
+    return bool(row["r"]) if row else False
 
 
-def get_ip_ban(ip: str) -> Optional[dict]:
+async def get_ip_ban(ip: str) -> Optional[dict]:
     ip_h = hash_ip(ip)
-    result = _db().table("ip_blacklist").select("*").eq("ip_hash", ip_h).execute()
-    if not result.data:
+    row = await _one("SELECT * FROM ip_blacklist WHERE ip_hash = %s", (ip_h,))
+    if not row:
         return None
-    row = result.data[0]
     return {
         "id": row["id"],
         "ip": _safe_decrypt(row["ip_enc"]),
         "reason": row["reason"],
-        "created_at": row["created_at"],
+        "created_at": _iso(row["created_at"]),
     }
 
 
-def get_ip_ban_by_id(ban_id: int) -> Optional[dict]:
-    result = _db().table("ip_blacklist").select("*").eq("id", ban_id).execute()
-    if not result.data:
+async def get_ip_ban_by_id(ban_id: int) -> Optional[dict]:
+    row = await _one("SELECT * FROM ip_blacklist WHERE id = %s", (ban_id,))
+    if not row:
         return None
-    row = result.data[0]
     return {
         "id": row["id"],
         "ip": _safe_decrypt(row["ip_enc"]),
         "reason": row["reason"],
-        "created_at": row["created_at"],
+        "created_at": _iso(row["created_at"]),
     }
 
 
-def list_ip_bans() -> list[dict]:
-    def _build(offset: int, limit: int):
-        return (
-            _db().table("ip_blacklist").select("*")
-            .order("created_at", desc=True)
-            .range(offset, offset + limit - 1)
-        )
+async def list_ip_bans() -> list[dict]:
+    rows = await _all("SELECT * FROM ip_blacklist ORDER BY created_at DESC")
     return [{
         "id": row["id"],
         "ip": _safe_decrypt(row["ip_enc"]),
         "reason": row["reason"],
-        "created_at": row["created_at"],
-    } for row in _iter_all_paginated(_build)]
+        "created_at": _iso(row["created_at"]),
+    } for row in rows]
 
 
-def list_ip_bans_paginated(page: int = 0, per_page: int = 20,
-                           search: str | None = None) -> dict:
-    query = _db().table("ip_blacklist").select("*", count="exact")
+async def list_ip_bans_paginated(page: int = 0, per_page: int = 20,
+                                 search: str | None = None) -> dict:
+    offset = page * per_page
     if search and search.strip():
         ip_h = hash_ip(search.strip())
-        query = query.eq("ip_hash", ip_h)
-
-    offset = page * per_page
-    result = (
-        query.order("created_at", desc=True)
-        .range(offset, offset + per_page - 1)
-        .execute()
-    )
+        rows = await _all(
+            "SELECT *, COUNT(*) OVER() AS _total FROM ip_blacklist "
+            "WHERE ip_hash = %s ORDER BY created_at DESC LIMIT %s OFFSET %s",
+            (ip_h, per_page, offset),
+        )
+    else:
+        rows = await _all(
+            "SELECT *, COUNT(*) OVER() AS _total FROM ip_blacklist "
+            "ORDER BY created_at DESC LIMIT %s OFFSET %s",
+            (per_page, offset),
+        )
+    total = int(rows[0]["_total"]) if rows else 0
     items = [{
         "id": row["id"],
         "ip": _safe_decrypt(row["ip_enc"]),
         "reason": row["reason"],
-        "created_at": row["created_at"],
-    } for row in (result.data or [])]
-    total = result.count or 0
+        "created_at": _iso(row["created_at"]),
+    } for row in rows]
     return {
         "items": items, "total": total,
         "page": page, "per_page": per_page,
@@ -424,9 +435,8 @@ def list_ip_bans_paginated(page: int = 0, per_page: int = 20,
 _RELAYS_CACHE_TTL = float(os.environ.get("RELAYS_CACHE_TTL", "15"))
 
 
-def add_relay(name: str, host: str, agent_port: int = 7580,
-              agent_secret: str = "", agent_type: str = "full") -> dict:
-    import socket
+async def add_relay(name: str, host: str, agent_port: int = 7580,
+                    agent_secret: str = "", agent_type: str = "full") -> dict:
     try:
         resolved_ip = socket.gethostbyname(host)
         ip = ipaddress.ip_address(resolved_ip)
@@ -437,23 +447,22 @@ def add_relay(name: str, host: str, agent_port: int = 7580,
     except ValueError as e:
         if "Invalid host" in str(e):
             raise
-        pass
 
     if agent_type not in ("full", "min"):
         raise ValueError(f"agent_type must be 'full' or 'min', got: {agent_type}")
-    data = {
-        "name": name, "host": host,
-        "agent_port": agent_port, "agent_secret": agent_secret,
-        "agent_type": agent_type,
-    }
-    result = _db().table("relays").insert(data).execute()
-    if not result.data:
+
+    row = await _one(
+        "INSERT INTO relays (name, host, agent_port, agent_secret, agent_type) "
+        "VALUES (%s, %s, %s, %s, %s) RETURNING *",
+        (name, host, agent_port, agent_secret, agent_type),
+    )
+    if not row:
         raise ValueError("Failed to add relay")
     cache.invalidate("relays:")
-    return result.data[0]
+    return row
 
 
-def list_relays(fields: str = "full") -> list[dict]:
+async def list_relays(fields: str = "full") -> list[dict]:
     """fields='full' | 'basic'. Cached for RELAYS_CACHE_TTL seconds."""
     key = f"relays:{fields}"
     cached_value = cache.get(key)
@@ -461,15 +470,15 @@ def list_relays(fields: str = "full") -> list[dict]:
         return cached_value
 
     if fields == "basic":
-        cols = "id,name,host,agent_port,is_active,is_synced,last_health_at"
+        cols = "id, name, host, agent_port, is_active, is_synced, last_health_at"
     else:
         cols = "*"
-    result = _db().table("relays").select(cols).order("id").execute()
-    cache.set(key, result.data, ttl=_RELAYS_CACHE_TTL)
-    return result.data
+    rows = await _all(f"SELECT {cols} FROM relays ORDER BY id")
+    cache.set(key, rows, ttl=_RELAYS_CACHE_TTL)
+    return rows
 
 
-def get_active_relays(agent_type: str | None = None) -> list[dict]:
+async def get_active_relays(agent_type: str | None = None) -> list[dict]:
     """
     agent_type=None   -> all active (for health-check, traffic, update_all)
     agent_type='full' -> only full (for whitelist/rate-limit fan-out)
@@ -479,113 +488,111 @@ def get_active_relays(agent_type: str | None = None) -> list[dict]:
     cached_value = cache.get(key)
     if cached_value is not None:
         return cached_value
-    q = _db().table("relays").select("*").eq("is_active", True)
     if agent_type:
-        q = q.eq("agent_type", agent_type)
-    result = q.execute()
-    cache.set(key, result.data, ttl=_RELAYS_CACHE_TTL)
-    return result.data
+        rows = await _all(
+            "SELECT * FROM relays WHERE is_active = TRUE AND agent_type = %s ORDER BY id",
+            (agent_type,),
+        )
+    else:
+        rows = await _all("SELECT * FROM relays WHERE is_active = TRUE ORDER BY id")
+    cache.set(key, rows, ttl=_RELAYS_CACHE_TTL)
+    return rows
 
 
-def delete_relay(relay_id: int) -> bool:
-    result = _db().table("relays").delete().eq("id", relay_id).execute()
+async def delete_relay(relay_id: int) -> bool:
+    deleted = await _exec("DELETE FROM relays WHERE id = %s", (relay_id,)) > 0
     cache.invalidate("relays:")
-    return len(result.data) > 0
+    return deleted
 
 
-def toggle_relay(relay_id: int, active: bool) -> Optional[dict]:
-    _db().table("relays").update({"is_active": active}).eq("id", relay_id).execute()
+async def toggle_relay(relay_id: int, active: bool) -> Optional[dict]:
+    row = await _one(
+        "UPDATE relays SET is_active = %s WHERE id = %s RETURNING *",
+        (active, relay_id),
+    )
     cache.invalidate("relays:")
-    result = _db().table("relays").select("*").eq("id", relay_id).execute()
-    return result.data[0] if result.data else None
+    return row
 
 
-def mark_relay_synced(relay_id: int, synced: bool):
-    _db().table("relays").update({"is_synced": synced}).eq("id", relay_id).execute()
-    cache.invalidate("relays:")
-
-
-def update_relay_health(relay_id: int, health_data: dict):
-    _db().table("relays").update({
-        "last_health": health_data,
-        "last_health_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", relay_id).execute()
+async def mark_relay_synced(relay_id: int, synced: bool):
+    await _exec("UPDATE relays SET is_synced = %s WHERE id = %s", (synced, relay_id))
     cache.invalidate("relays:")
 
 
+async def update_relay_health(relay_id: int, health_data: dict):
+    from psycopg.types.json import Jsonb
+    await _exec(
+        "UPDATE relays SET last_health = %s, last_health_at = NOW() WHERE id = %s",
+        (Jsonb(health_data), relay_id),
+    )
+    cache.invalidate("relays:")
 
-def add_rate_limit(ip: str, mbps: float,
-                   expires_at: Optional[str] = None,
-                   reason: str = "",
-                   client_id: Optional[int] = None) -> dict:
+
+
+async def add_rate_limit(ip: str, mbps: float,
+                         expires_at: Optional[str] = None,
+                         reason: str = "",
+                         client_id: Optional[int] = None) -> dict:
     """UPSERT in rate_limits. Returns the final record."""
     ip_h = hash_ip(ip)
-    payload = {
-        "ip_hash": ip_h,
-        "ip_enc": encrypt_ip(ip),
-        "mbps": float(mbps),
-        "reason": reason or "",
-        "expires_at": expires_at,
-        "client_id": client_id,
-    }
-    result = (
-        _db().table("rate_limits")
-        .upsert(payload, on_conflict="ip_hash")
-        .execute()
+    row = await _one(
+        "INSERT INTO rate_limits (ip_hash, ip_enc, mbps, reason, expires_at, client_id) "
+        "VALUES (%s, %s, %s, %s, %s::timestamptz, %s) "
+        "ON CONFLICT (ip_hash) DO UPDATE SET "
+        "  ip_enc = EXCLUDED.ip_enc, mbps = EXCLUDED.mbps, reason = EXCLUDED.reason, "
+        "  expires_at = EXCLUDED.expires_at, client_id = EXCLUDED.client_id "
+        "RETURNING id, mbps, reason, expires_at, client_id, created_at",
+        (ip_h, encrypt_ip(ip), float(mbps), reason or "", expires_at, client_id),
     )
-    row = result.data[0]
     return {
         "id": row["id"],
         "ip": ip,
         "mbps": float(row["mbps"]),
         "reason": row.get("reason", ""),
-        "expires_at": row.get("expires_at"),
+        "expires_at": _iso(row.get("expires_at")),
         "client_id": row.get("client_id"),
-        "created_at": row.get("created_at"),
+        "created_at": _iso(row.get("created_at")),
     }
 
 
-def remove_rate_limit_by_ip(ip: str) -> bool:
+async def remove_rate_limit_by_ip(ip: str) -> bool:
     ip_h = hash_ip(ip)
-    result = _db().table("rate_limits").delete().eq("ip_hash", ip_h).execute()
-    return len(result.data) > 0
+    return await _exec("DELETE FROM rate_limits WHERE ip_hash = %s", (ip_h,)) > 0
 
 
-def get_rate_limit(ip: str) -> Optional[dict]:
+async def get_rate_limit(ip: str) -> Optional[dict]:
     ip_h = hash_ip(ip)
-    result = _db().table("rate_limits").select("*").eq("ip_hash", ip_h).execute()
-    if not result.data:
+    row = await _one("SELECT * FROM rate_limits WHERE ip_hash = %s", (ip_h,))
+    if not row:
         return None
-    row = result.data[0]
     return {
         "id": row["id"],
         "ip": _safe_decrypt(row["ip_enc"]),
         "mbps": float(row["mbps"]),
         "reason": row.get("reason", ""),
-        "expires_at": row.get("expires_at"),
+        "expires_at": _iso(row.get("expires_at")),
         "client_id": row.get("client_id"),
-        "created_at": row["created_at"],
+        "created_at": _iso(row["created_at"]),
     }
 
 
-def list_rate_limits_paginated(page: int = 0, per_page: int = 50) -> dict:
-    query = _db().table("rate_limits").select("*", count="exact")
+async def list_rate_limits_paginated(page: int = 0, per_page: int = 50) -> dict:
     offset = page * per_page
-    result = (
-        query.order("created_at", desc=True)
-        .range(offset, offset + per_page - 1)
-        .execute()
+    rows = await _all(
+        "SELECT *, COUNT(*) OVER() AS _total FROM rate_limits "
+        "ORDER BY created_at DESC LIMIT %s OFFSET %s",
+        (per_page, offset),
     )
+    total = int(rows[0]["_total"]) if rows else 0
     items = [{
         "id": row["id"],
         "ip": _safe_decrypt(row["ip_enc"]),
         "mbps": float(row["mbps"]),
         "reason": row.get("reason", ""),
-        "expires_at": row.get("expires_at"),
+        "expires_at": _iso(row.get("expires_at")),
         "client_id": row.get("client_id"),
-        "created_at": row["created_at"],
-    } for row in (result.data or [])]
-    total = result.count or 0
+        "created_at": _iso(row["created_at"]),
+    } for row in rows]
     return {
         "items": items, "total": total,
         "page": page, "per_page": per_page,
@@ -593,35 +600,33 @@ def list_rate_limits_paginated(page: int = 0, per_page: int = 50) -> dict:
     }
 
 
-def list_expired_rate_limits() -> list[dict]:
+async def list_expired_rate_limits() -> list[dict]:
     """For user's external scheduler: everything to remove."""
     try:
-        result = _db().rpc("get_expired_rate_limits", {}).execute()
+        rows = await _all("SELECT * FROM get_expired_rate_limits()")
     except Exception as e:
-        print(f"[list_expired_rate_limits] RPC error: {e}")
+        print(f"[list_expired_rate_limits] error: {e}")
         return []
-    rows = result.data or []
     return [{
         "id": r["id"],
         "ip": _safe_decrypt(r["ip_enc"]),
         "mbps": float(r["mbps"]),
-        "expires_at": r["expires_at"],
+        "expires_at": _iso(r["expires_at"]),
         "client_id": r.get("client_id"),
     } for r in rows]
 
 
 # SYNC PAYLOAD (for startup-resync agent)
 
-def get_sync_payload() -> dict:
+async def get_sync_payload() -> dict:
     """Full payload for the agent: clients + rate_limits.
     IPs are decrypted on the Python side."""
     try:
-        result = _db().rpc("get_sync_payload", {}).execute()
+        rows = await _all("SELECT * FROM get_sync_payload()")
     except Exception as e:
-        print(f"[get_sync_payload] RPC error: {e}")
+        print(f"[get_sync_payload] error: {e}")
         return {"clients": [], "rate_limits": []}
 
-    rows = result.data or []
     clients = []
     rl_seen: dict[str, dict] = {}
 
@@ -635,7 +640,7 @@ def get_sync_payload() -> dict:
             rl_seen[ip] = {
                 "ip": ip,
                 "mbps": float(r["rate_limit_mbps"]),
-                "expires_at": r.get("rate_limit_expires_at"),
+                "expires_at": _iso(r.get("rate_limit_expires_at")),
                 "client_id": r["client_id"],
             }
 

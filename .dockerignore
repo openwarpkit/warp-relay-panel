@@ -29,8 +29,9 @@ LICENSE
 # Relay agent (деплоится отдельно на relay-серверах)
 relay-agent
 
-# SQL (применяется вручную в Supabase)
-supabase_schema.sql
+# DB schema + compose (нужны на хосте postgres-контейнеру, не в образе панели)
+db
+docker-compose.yml
 
 # IDE
 .vscode

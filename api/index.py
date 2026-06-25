@@ -19,6 +19,7 @@ import os
 import pathlib
 import re
 import string
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Request, HTTPException, Depends, Header
@@ -37,14 +38,27 @@ from .database import (
     add_rate_limit, remove_rate_limit_by_ip, get_rate_limit,
     list_rate_limits_paginated, list_expired_rate_limits, get_sync_payload,
 )
-from . import relay_client
+from . import database, relay_client
 from .warp_networks import WARP_NETWORKS as _WARP_NETWORKS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("panel")
 
 API_VERSION = "1.3.0"
-app = FastAPI(title="WARP Relay Panel", version=API_VERSION)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await database.open_pool()
+    logger.info("DB pool opened")
+    try:
+        yield
+    finally:
+        await database.close_pool()
+        logger.info("DB pool closed")
+
+
+app = FastAPI(title="WARP Relay Panel", version=API_VERSION, lifespan=lifespan)
 
 
 
@@ -261,7 +275,7 @@ async def activate(token: str, request: Request):
 
     logger.info("Activate: token=%s...%s ip=%s", token[:6], token[-4:], client_ip)
 
-    result = activate_client(token, client_ip)
+    result = await activate_client(token, client_ip)
 
     if "error" in result:
         if result["error"] == "ip_banned":
@@ -299,11 +313,11 @@ async def activate(token: str, request: Request):
 
 @app.post("/api/clients", dependencies=[Depends(require_api_key)])
 async def api_create_client(data: ClientCreate):
-    return create_client_record(label=data.label)
+    return await create_client_record(label=data.label)
 
 @app.get("/api/clients", dependencies=[Depends(require_api_key)])
 async def api_list_clients(include_blocked: bool = True, page: int = 0, per_page: int = 50):
-    return list_clients_paginated(page=page, per_page=per_page, include_blocked=include_blocked)
+    return await list_clients_paginated(page=page, per_page=per_page, include_blocked=include_blocked)
 
 
 @app.post("/api/clients/labels", dependencies=[Depends(require_api_key)])
@@ -311,7 +325,7 @@ async def api_client_labels(data: ClientLabelsRequest):
     """Batch-resolve client_id → label.
 
     Returns {"<id>": "<label>"}; missing IDs → null."""
-    found = get_client_labels(data.ids)
+    found = await get_client_labels(data.ids)
     return {str(cid): found.get(cid) for cid in data.ids}
 
 
@@ -321,7 +335,7 @@ async def api_search_clients(ip: str, include_log_history: bool = True):
         raise HTTPException(400, "ip required")
 
     from .database import search_clients_by_ip
-    clients = search_clients_by_ip(ip.strip(), include_log_history=include_log_history)
+    clients = await search_clients_by_ip(ip.strip(), include_log_history=include_log_history)
 
     for c in clients:
         if c["current_ip"] == ip:
@@ -336,31 +350,31 @@ async def api_search_clients(ip: str, include_log_history: bool = True):
 
 @app.get("/api/clients/{client_id}", dependencies=[Depends(require_api_key)])
 async def api_get_client(client_id: int):
-    client = get_client_by_id(client_id)
+    client = await get_client_by_id(client_id)
     if not client:
         raise HTTPException(404, "Client not found")
     return client
 
 @app.get("/api/clients/{client_id}/logs", dependencies=[Depends(require_api_key)])
 async def api_client_logs(client_id: int, limit: int = 50):
-    client = get_client_by_id(client_id)
+    client = await get_client_by_id(client_id)
     if not client:
         raise HTTPException(404, "Client not found")
-    logs = get_activation_logs(client_id, limit)
+    logs = await get_activation_logs(client_id, limit)
     return {"client_id": client_id, "label": client["label"], "logs": logs}
 
 @app.delete("/api/clients/{client_id}/logs", dependencies=[Depends(require_api_key)])
 async def api_delete_client_logs(client_id: int):
-    client = get_client_by_id(client_id)
+    client = await get_client_by_id(client_id)
     if not client:
         raise HTTPException(404, "Client not found")
-    deleted = delete_activation_logs(client_id)
+    deleted = await delete_activation_logs(client_id)
     logger.info("Deleted %d activation logs for client #%d", deleted, client_id)
     return {"deleted": deleted, "client_id": client_id}
 
 @app.get("/api/clients/{client_id}/traffic", dependencies=[Depends(require_api_key)])
 async def api_client_traffic(client_id: int):
-    client = get_client_by_id(client_id)
+    client = await get_client_by_id(client_id)
     if not client:
         raise HTTPException(404, "Client not found")
     if not client["current_ip"]:
@@ -373,7 +387,7 @@ async def api_client_traffic(client_id: int):
 @app.get("/api/clients/{client_id}/full", dependencies=[Depends(require_api_key)])
 async def api_get_client_full(client_id: int):
     """Client + ban flags + current rate_limit. 1 RPC."""
-    client = get_client_full(client_id)
+    client = await get_client_full(client_id)
     if not client:
         raise HTTPException(404, "Client not found")
     return client
@@ -401,7 +415,7 @@ async def api_activate_client_manual(client_id: int, data: ClientManualActivate)
         return {"error": "warp_detected",
                 "detail": API_ERROR_MESSAGES["warp_detected"]}
 
-    result = activate_client_by_id(client_id, ip)
+    result = await activate_client_by_id(client_id, ip)
 
     if "error" in result:
         error_key = result["error"]
@@ -444,7 +458,7 @@ async def api_activate_client_manual(client_id: int, data: ClientManualActivate)
 @app.patch("/api/clients/{client_id}/block", dependencies=[Depends(require_api_key)])
 async def api_block_client(client_id: int, data: ClientBlock):
     """Block/unblock via atomic RPC."""
-    updated = block_client(client_id, data.blocked)
+    updated = await block_client(client_id, data.blocked)
     if not updated:
         raise HTTPException(404, "Client not found")
 
@@ -459,7 +473,7 @@ async def api_block_client(client_id: int, data: ClientBlock):
 @app.delete("/api/clients/{client_id}", dependencies=[Depends(require_api_key)])
 async def api_delete_client(client_id: int):
     """Deletion via atomic RPC: returns {id, current_ip, current_ip_shared}."""
-    result = delete_client(client_id)
+    result = await delete_client(client_id)
     if not result:
         raise HTTPException(404, "Client not found")
     if result["current_ip"] and not result["current_ip_shared"]:
@@ -473,7 +487,7 @@ async def api_delete_client(client_id: int):
 
 @app.post("/api/blacklist", dependencies=[Depends(require_api_key)])
 async def api_add_ip_ban(data: IPBanCreate):
-    result = add_ip_ban(data.ip, data.reason)
+    result = await add_ip_ban(data.ip, data.reason)
     if not result.get("already_exists"):
         await relay_client.remove_ip(data.ip)
         logger.info("IP banned: %s reason=%s", data.ip, data.reason)
@@ -482,14 +496,14 @@ async def api_add_ip_ban(data: IPBanCreate):
 @app.get("/api/blacklist", dependencies=[Depends(require_api_key)])
 async def api_list_ip_bans(page: int | None = None, per_page: int = 20, search: str | None = None):
     if page is None:
-        return list_ip_bans()
+        return await list_ip_bans()
     from .database import list_ip_bans_paginated
-    return list_ip_bans_paginated(page=page, per_page=per_page, search=search)
+    return await list_ip_bans_paginated(page=page, per_page=per_page, search=search)
 
 
 @app.delete("/api/blacklist/by-ip", dependencies=[Depends(require_api_key)])
 async def api_remove_ip_ban_by_ip(data: IPBanRemove):
-    ok = remove_ip_ban_by_ip(data.ip)
+    ok = await remove_ip_ban_by_ip(data.ip)
     if not ok:
         raise HTTPException(404, "IP not in blacklist")
     logger.info("IP unbanned: %s", data.ip)
@@ -497,7 +511,7 @@ async def api_remove_ip_ban_by_ip(data: IPBanRemove):
 
 @app.get("/api/blacklist/check/{ip}", dependencies=[Depends(require_api_key)])
 async def api_check_ip_ban(ip: str):
-    ban = get_ip_ban(ip)
+    ban = await get_ip_ban(ip)
     if ban:
         return {"banned": True, **ban}
     return {"banned": False, "ip": ip}
@@ -506,14 +520,14 @@ async def api_check_ip_ban(ip: str):
 @app.get("/api/blacklist/{ban_id}", dependencies=[Depends(require_api_key)])
 async def api_get_ip_ban(ban_id: int):
     from .database import get_ip_ban_by_id
-    ban = get_ip_ban_by_id(ban_id)
+    ban = await get_ip_ban_by_id(ban_id)
     if not ban:
         raise HTTPException(404, "Ban not found")
     return ban
 
 @app.delete("/api/blacklist/{ban_id}", dependencies=[Depends(require_api_key)])
 async def api_remove_ip_ban(ban_id: int):
-    ok = remove_ip_ban(ban_id)
+    ok = await remove_ip_ban(ban_id)
     if not ok:
         raise HTTPException(404, "Ban not found")
     return {"deleted": True, "id": ban_id}
@@ -522,7 +536,7 @@ async def api_remove_ip_ban(ban_id: int):
 
 @app.post("/api/relays", dependencies=[Depends(require_api_key)])
 async def api_add_relay(data: RelayCreate):
-    return add_relay(
+    return await add_relay(
         name=data.name, host=data.host,
         agent_port=data.agent_port, agent_secret=data.agent_secret,
         agent_type=data.agent_type,
@@ -531,26 +545,26 @@ async def api_add_relay(data: RelayCreate):
 @app.get("/api/relays", dependencies=[Depends(require_api_key)])
 async def api_list_relays(fields: str = "full"):
     """fields=basic - without last_health (lighter payload)."""
-    return list_relays(fields=fields)
+    return await list_relays(fields=fields)
 
 
 @app.delete("/api/relays/{relay_id}", dependencies=[Depends(require_api_key)])
 async def api_delete_relay(relay_id: int):
-    ok = delete_relay(relay_id)
+    ok = await delete_relay(relay_id)
     if not ok:
         raise HTTPException(404, "Relay not found")
     return {"deleted": True, "id": relay_id}
 
 @app.patch("/api/relays/{relay_id}/toggle", dependencies=[Depends(require_api_key)])
 async def api_toggle_relay(relay_id: int, data: RelayToggle):
-    relay = toggle_relay(relay_id, data.active)
+    relay = await toggle_relay(relay_id, data.active)
     if not relay:
         raise HTTPException(404, "Relay not found")
     return relay
 
 @app.get("/api/relays/{relay_id}/health", dependencies=[Depends(require_api_key)])
 async def api_relay_health(relay_id: int):
-    relays = list_relays()
+    relays = await list_relays()
     relay = next((r for r in relays if r["id"] == relay_id), None)
     if not relay:
         raise HTTPException(404, "Relay not found")
@@ -558,7 +572,7 @@ async def api_relay_health(relay_id: int):
 
 @app.get("/api/relays/{relay_id}/stats", dependencies=[Depends(require_api_key)])
 async def api_relay_stats(relay_id: int):
-    relays = list_relays()
+    relays = await list_relays()
     relay = next((r for r in relays if r["id"] == relay_id), None)
     if not relay:
         raise HTTPException(404, "Relay not found")
@@ -566,7 +580,7 @@ async def api_relay_stats(relay_id: int):
 
 @app.get("/api/relays/{relay_id}/traffic", dependencies=[Depends(require_api_key)])
 async def api_relay_traffic(relay_id: int, summary: bool = False, top: int | None = None):
-    relays = list_relays()
+    relays = await list_relays()
     relay = next((r for r in relays if r["id"] == relay_id), None)
     if not relay:
         raise HTTPException(404, "Relay not found")
@@ -586,7 +600,7 @@ async def api_health_all():
 
 @app.post("/api/relays/{relay_id}/update", dependencies=[Depends(require_api_key)])
 async def api_update_relay(relay_id: int):
-    relays = list_relays()
+    relays = await list_relays()
     relay = next((r for r in relays if r["id"] == relay_id), None)
     if not relay:
         raise HTTPException(404, "Relay not found")
@@ -608,15 +622,15 @@ async def api_traffic_all():
 async def api_stats():
     """Lightweight statistics via dashboard_stats RPC."""
     from .database import get_dashboard_stats
-    return get_dashboard_stats()
+    return await get_dashboard_stats()
 
 
 @app.get("/api/dashboard", dependencies=[Depends(require_api_key)])
 async def api_dashboard():
     """Main dashboard screen: relays(basic) + stats."""
     from .database import get_dashboard_stats
-    relays = list_relays(fields="basic")
-    stats = get_dashboard_stats()
+    relays = await list_relays(fields="basic")
+    stats = await get_dashboard_stats()
 
     stats["total_relays"] = len(relays)
     stats["active_relays"] = sum(1 for r in relays if r.get("is_active"))
@@ -630,7 +644,7 @@ async def api_set_rate_limit(data: RateLimitCreate):
     """
     Create/update rate-limit for an IP.
     expires_in_seconds=null means unlimited.
-    Saves in Supabase and pushes to all active relays.
+    Saves in Postgres and pushes to all active relays.
     """
     try:
         ip = str(ipaddress.ip_address(data.ip))
@@ -648,7 +662,7 @@ async def api_set_rate_limit(data: RateLimitCreate):
             + timedelta(seconds=data.expires_in_seconds)
         ).isoformat()
 
-    record = add_rate_limit(
+    record = await add_rate_limit(
         ip=ip, mbps=data.mbps,
         expires_at=expires_at, reason=data.reason,
         client_id=data.client_id,
@@ -664,7 +678,7 @@ async def api_set_rate_limit(data: RateLimitCreate):
 @app.delete("/api/rate-limits/by-ip", dependencies=[Depends(require_api_key)])
 async def api_remove_rate_limit_by_ip(data: RateLimitRemove):
     """Remove rate-limit by IP from DB and all relays."""
-    deleted = remove_rate_limit_by_ip(data.ip)
+    deleted = await remove_rate_limit_by_ip(data.ip)
     relay_results = await relay_client.remove_rate_limit(data.ip)
     if not deleted and not any(r.get("ok") for r in relay_results.values()):
         raise HTTPException(404, "Rate-limit not found")
@@ -674,7 +688,7 @@ async def api_remove_rate_limit_by_ip(data: RateLimitRemove):
 @app.delete("/api/rate-limits/{ip}", dependencies=[Depends(require_api_key)])
 async def api_remove_rate_limit(ip: str):
     """Remove rate-limit by IP from URL."""
-    deleted = remove_rate_limit_by_ip(ip)
+    deleted = await remove_rate_limit_by_ip(ip)
     relay_results = await relay_client.remove_rate_limit(ip)
     if not deleted and not any(r.get("ok") for r in relay_results.values()):
         raise HTTPException(404, "Rate-limit not found")
@@ -683,18 +697,18 @@ async def api_remove_rate_limit(ip: str):
 
 @app.get("/api/rate-limits", dependencies=[Depends(require_api_key)])
 async def api_list_rate_limits(page: int = 0, per_page: int = 50):
-    return list_rate_limits_paginated(page=page, per_page=per_page)
+    return await list_rate_limits_paginated(page=page, per_page=per_page)
 
 
 @app.get("/api/rate-limits/expired", dependencies=[Depends(require_api_key)])
 async def api_list_expired_rate_limits():
     """For external scheduler: everything to remove (expires_at < NOW)."""
-    return list_expired_rate_limits()
+    return await list_expired_rate_limits()
 
 
 @app.get("/api/rate-limits/{ip}", dependencies=[Depends(require_api_key)])
 async def api_get_rate_limit(ip: str):
-    rl = get_rate_limit(ip)
+    rl = await get_rate_limit(ip)
     if not rl:
         return {"ip": ip, "limited": False}
     return {"limited": True, **rl}
@@ -709,7 +723,7 @@ async def api_relay_whitelist_payload(relay_id: int):
     Full payload for the agent: decrypted client IPs + current rate_limits.
     Called by agent on startup to rebuild in-memory state.
     """
-    payload = get_sync_payload()
+    payload = await get_sync_payload()
     logger.info("Whitelist-payload requested by relay #%d: %d clients, %d rate_limits",
                 relay_id, len(payload["clients"]), len(payload["rate_limits"]))
     return payload
@@ -718,4 +732,9 @@ async def api_relay_whitelist_payload(relay_id: int):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": API_VERSION}
+    try:
+        await database.ping()
+        db_ok = True
+    except Exception:
+        db_ok = False
+    return {"status": "ok", "version": API_VERSION, "db": "ok" if db_ok else "down"}

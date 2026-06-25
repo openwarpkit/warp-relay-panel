@@ -7,9 +7,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Системные зависимости (для cryptography и httpx)
+# curl нужен только для HEALTHCHECK; psycopg[binary]/cryptography ставятся из wheel
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
         curl \
     && rm -rf /var/lib/apt/lists/*
 

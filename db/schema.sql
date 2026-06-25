@@ -1,6 +1,7 @@
 -- ═══════════════════════════════════════════════════════════════
--- WARP Relay Panel - single Supabase schema (source of truth)
--- Run in Supabase Dashboard -> SQL Editor.
+-- WARP Relay Panel - PostgreSQL schema (source of truth)
+-- Loaded automatically by the postgres container on first init
+-- (mounted into /docker-entrypoint-initdb.d/).
 -- Idempotent: safe to run multiple times.
 -- ═══════════════════════════════════════════════════════════════
 
@@ -104,30 +105,8 @@ CREATE INDEX IF NOT EXISTS idx_rate_limits_hash      ON rate_limits(ip_hash);
 CREATE INDEX IF NOT EXISTS idx_rate_limits_expires   ON rate_limits(expires_at) WHERE expires_at IS NOT NULL;
 
 
--- ═══════════════════════════════════════
--- RLS - access only via service_role key
--- ═══════════════════════════════════════
-ALTER TABLE clients        ENABLE ROW LEVEL SECURITY;
-ALTER TABLE relays         ENABLE ROW LEVEL SECURITY;
-ALTER TABLE activation_log ENABLE ROW LEVEL SECURITY;
-ALTER TABLE ip_blacklist   ENABLE ROW LEVEL SECURITY;
-ALTER TABLE rate_limits    ENABLE ROW LEVEL SECURITY;
-
-DROP POLICY IF EXISTS "Service role full access" ON clients;
-DROP POLICY IF EXISTS "Service role full access" ON relays;
-DROP POLICY IF EXISTS "Service role full access" ON activation_log;
-DROP POLICY IF EXISTS "Service role full access" ON ip_blacklist;
-DROP POLICY IF EXISTS "Service role full access" ON rate_limits;
-
-CREATE POLICY "Service role full access" ON clients        FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Service role full access" ON relays         FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Service role full access" ON activation_log FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Service role full access" ON ip_blacklist   FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Service role full access" ON rate_limits    FOR ALL USING (true) WITH CHECK (true);
-
-
 -- ═══════════════════════════════════════════════════════════════
--- RPC FUNCTIONS
+-- FUNCTIONS (atomic hot-paths, single round-trip)
 -- ═══════════════════════════════════════════════════════════════
 
 -- ═══════════════════════════════════════
@@ -464,8 +443,7 @@ $$;
 
 -- ═══════════════════════════════════════
 -- get_client_labels
--- Batch-resolve id -> label. Accepts array in JSON-body,
--- avoids URL length limits (unlike ?id=in.(...)).
+-- Batch-resolve id -> label.
 -- ═══════════════════════════════════════
 CREATE OR REPLACE FUNCTION get_client_labels(p_ids BIGINT[])
 RETURNS TABLE (id BIGINT, label TEXT)

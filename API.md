@@ -497,7 +497,7 @@ Batch-резолв `client_id` → `label`. Полезно для UI: по `clie
 | `agent_port` | int | нет | `7580` |
 | `agent_secret` | string | нет | `""` |
 
-> ⚠ **Внимание:** в текущей версии `RelayCreate` Pydantic-модель НЕ принимает `agent_type` — relay создаётся всегда с `agent_type="full"` (default в `add_relay()`). Чтобы создать min-relay, надо обновить модель или вставлять напрямую в Supabase. На уровне БД поле есть и используется фильтрами.
+> ⚠ **Внимание:** в текущей версии `RelayCreate` Pydantic-модель НЕ принимает `agent_type` — relay создаётся всегда с `agent_type="full"` (default в `add_relay()`). Чтобы создать min-relay, надо обновить модель или вставлять напрямую в БД (Postgres). На уровне БД поле есть и используется фильтрами.
 
 **Response 200:** объект relay из БД:
 ```json

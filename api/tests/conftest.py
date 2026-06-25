@@ -5,21 +5,15 @@ import pytest
 def mock_db():
     """
     Skeleton fixture for DB integration tests.
-    In the future, this can be configured to start a local postgres instance 
-    or connect to a test Supabase project.
-    
+    Runs only when TEST_DATABASE_URL points at a reachable Postgres
+    (e.g. a throwaway container).
+
     Usage:
-    export TEST_SUPABASE_URL="https://test.supabase.co"
-    export TEST_SUPABASE_KEY="test_key"
+    export TEST_DATABASE_URL="postgresql://warp:warp@127.0.0.1:5432/warp_test"
     """
-    if "TEST_SUPABASE_URL" not in os.environ:
-        pytest.skip("Integration tests disabled by default. Set TEST_SUPABASE_URL to run them.")
-    
-    # Original config overriding for tests
-    os.environ["SUPABASE_URL"] = os.environ["TEST_SUPABASE_URL"]
-    os.environ["SUPABASE_KEY"] = os.environ["TEST_SUPABASE_KEY"]
-    
-    # You could also set up setup/teardown for test data here
+    if "TEST_DATABASE_URL" not in os.environ:
+        pytest.skip("Integration tests disabled by default. Set TEST_DATABASE_URL to run them.")
+
+    os.environ["DATABASE_URL"] = os.environ["TEST_DATABASE_URL"]
+
     yield
-    
-    # cleanup

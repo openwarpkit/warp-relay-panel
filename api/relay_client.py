@@ -147,7 +147,7 @@ async def add_ip(new_ip: str, old_ip: str | None = None,
         logger.error("IP validation: %s", e)
         return {"error": str(e)}
 
-    relays = db.get_active_relays(agent_type="full")
+    relays = await db.get_active_relays(agent_type="full")
     if not relays:
         return {"error": "no_active_relays"}
 
@@ -160,7 +160,7 @@ async def add_ip(new_ip: str, old_ip: str | None = None,
         if client_id is not None:
             payload["client_id"] = client_id
         ok, data = await _agent_request(relay, "POST", "/whitelist/update", payload)
-        db.mark_relay_synced(relay["id"], ok)
+        await db.mark_relay_synced(relay["id"], ok)
         results[relay["name"]] = {"ok": ok, **data}
 
     await asyncio.gather(*[_process(r) for r in relays], return_exceptions=True)
@@ -175,12 +175,12 @@ async def remove_ip(ip: str) -> dict:
     except ValueError:
         return {"error": f"invalid ip: {ip}"}
 
-    relays = db.get_active_relays(agent_type="full")
+    relays = await db.get_active_relays(agent_type="full")
     results = {}
 
     async def _process(relay):
         ok, data = await _agent_request(relay, "POST", "/whitelist/remove", {"ip": ip})
-        db.mark_relay_synced(relay["id"], ok)
+        await db.mark_relay_synced(relay["id"], ok)
         results[relay["name"]] = {"ok": ok, **data}
 
     await asyncio.gather(*[_process(r) for r in relays], return_exceptions=True)
@@ -189,15 +189,15 @@ async def remove_ip(ip: str) -> dict:
 
 async def full_sync(relay_id: int | None = None) -> dict:
     """Sync whitelist + rate-limits to full relays; payload from get_sync_payload RPC."""
-    payload = db.get_sync_payload()
+    payload = await db.get_sync_payload()
     client_entries = payload["clients"]
     rate_limit_entries = payload["rate_limits"]
     skipped_banned = 0
 
     if relay_id:
-        relays = [r for r in db.list_relays() if r["id"] == relay_id and r.get("agent_type", "full") == "full"]
+        relays = [r for r in await db.list_relays() if r["id"] == relay_id and r.get("agent_type", "full") == "full"]
     else:
-        relays = db.get_active_relays(agent_type="full")
+        relays = await db.get_active_relays(agent_type="full")
 
     if not relays:
         return {"error": "no_relays"}
@@ -215,7 +215,7 @@ async def full_sync(relay_id: int | None = None) -> dict:
         )
         # Agent processes payload synchronously now.
         # Actual results are directly in data: synced, clients, invalid, rate_limits_applied
-        db.mark_relay_synced(relay["id"], ok and data.get("ok", False))
+        await db.mark_relay_synced(relay["id"], ok and data.get("ok", False))
         results[relay["name"]] = {
             "ok": ok and data.get("ok", False),
             "synced": data.get("synced", 0) if ok else 0,
@@ -237,7 +237,7 @@ async def full_sync(relay_id: int | None = None) -> dict:
 async def check_relay(relay: dict) -> dict:
     ok, data = await _agent_request(relay, "GET", "/health")
     if ok:
-        db.update_relay_health(relay["id"], data)
+        await db.update_relay_health(relay["id"], data)
     return {"ok": ok, **data}
 
 
@@ -279,7 +279,7 @@ async def get_relay_traffic(
 
 
 async def get_traffic_all_relays(client_ip: str | None = None) -> dict:
-    relays = db.get_active_relays()
+    relays = await db.get_active_relays()
     results = {}
 
     async def _fetch(relay):
@@ -291,7 +291,7 @@ async def get_traffic_all_relays(client_ip: str | None = None) -> dict:
 
 
 async def health_check_all() -> dict:
-    relays = db.get_active_relays()
+    relays = await db.get_active_relays()
     results = {}
 
     async def _check(relay):
@@ -309,7 +309,7 @@ async def update_relay(relay: dict) -> dict:
 
 
 async def update_all_relays() -> dict:
-    relays = db.get_active_relays()
+    relays = await db.get_active_relays()
     if not relays:
         return {"error": "no_active_relays"}
 
@@ -334,7 +334,7 @@ async def set_rate_limit(ip: str, mbps: float,
     except ValueError as e:
         return {"error": str(e)}
 
-    relays = db.get_active_relays(agent_type="full")
+    relays = await db.get_active_relays(agent_type="full")
     if not relays:
         return {"error": "no_active_relays"}
 
@@ -360,7 +360,7 @@ async def remove_rate_limit(ip: str) -> dict:
     except ValueError as e:
         return {"error": str(e)}
 
-    relays = db.get_active_relays(agent_type="full")
+    relays = await db.get_active_relays(agent_type="full")
     results = {}
 
     async def _process(relay):
