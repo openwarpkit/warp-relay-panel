@@ -255,7 +255,18 @@ async def get_relay_traffic(
     """
     summary=True -> return only totals without ips dict
     top=N -> return only N top-IP by total_bytes
+
+    Min-relays do not keep per-IP traffic (global shaping) - return empty
+    without hitting the agent.
     """
+    if relay.get("agent_type", "full") == "min":
+        return {
+            "ok": True, "relay": relay["name"], "agent_type": "min", "skipped": "min",
+            "ips": {}, "ip_count": 0,
+            "total_bytes": 0, "total_tx_bytes": 0, "total_rx_bytes": 0,
+            "total": "0 B", "total_tx": "0 B", "total_rx": "0 B",
+        }
+
     path = f"/traffic/{client_ip}" if client_ip else "/traffic"
     ok, data = await _agent_request(relay, "GET", path)
     
