@@ -101,6 +101,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"disk":                 s.Metrics.Disk(),
 		"traffic_month":        t.Month,
 		"traffic_total":        t.Total,
+		"traffic_tx":           t.TotalTX,
+		"traffic_rx":           t.TotalRX,
 		"traffic_ips":          t.IPCount,
 		"last_update":          s.loadStatusFile(s.Cfg.DataDir + "/update_status.json"),
 		"last_self_heal":       s.Watchdog.LastStatus(),
