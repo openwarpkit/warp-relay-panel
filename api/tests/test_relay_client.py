@@ -90,16 +90,22 @@ async def test_get_traffic_all_relays():
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_get_relay_traffic_min_skips_agent():
+async def test_get_relay_traffic_min_returns_totals():
     from api.relay_client import get_relay_traffic
     relay = {"id": 3, "host": "9.9.9.9", "agent_port": 7580,
              "agent_secret": "s", "name": "mr", "agent_type": "min"}
-    # No respx route registered: any HTTP attempt would raise. The short-circuit must not call the agent.
+    respx.get("http://9.9.9.9:7580/traffic").mock(
+        return_value=httpx.Response(200, json={
+            "ips": {}, "ip_count": 0,
+            "total_bytes": 123456, "total": "120.6 KB",
+            "total_tx": "60 KB", "total_rx": "60.6 KB"})
+    )
     result = await get_relay_traffic(relay)
     assert result["ok"] is True
-    assert result["skipped"] == "min"
     assert result["ips"] == {}
     assert result["ip_count"] == 0
+    assert result["total_bytes"] == 123456
+    assert result["total"] == "120.6 KB"
 
 
 @pytest.mark.asyncio
