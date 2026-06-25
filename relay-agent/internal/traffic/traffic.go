@@ -45,16 +45,22 @@ type Monitor struct {
 	state    fileFmt
 	lastConn map[connKey][2]uint64
 	ct       *conntrackgo.Client
+	disabled bool
 }
 
-func New(path string, interval time.Duration, ct *conntrackgo.Client) *Monitor {
+func New(path string, interval time.Duration, ct *conntrackgo.Client, disabled bool) *Monitor {
 	m := &Monitor{
 		path:     path,
 		interval: interval,
 		lastConn: make(map[connKey][2]uint64),
 		ct:       ct,
+		disabled: disabled,
 	}
-	m.load()
+	if disabled {
+		m.state = m.empty()
+	} else {
+		m.load()
+	}
 	return m
 }
 
@@ -141,6 +147,9 @@ func (m *Monitor) checkMonthReset() *fileFmt {
 }
 
 func (m *Monitor) Collect(countFunc func(string) int) {
+	if m.disabled {
+		return
+	}
 	// TTL = half period: traffic.Loop runs with m.interval (default 30s),
 	// so a 15s cache allows the HTTP /traffic handler to cheaply reuse
 	// the same snapshot without blocking the collector.

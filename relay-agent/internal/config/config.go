@@ -60,6 +60,7 @@ type Config struct {
 	WarpDstIP          string   // "" = auto-detect (engage.cloudflareclient.com)
 	WarpPorts          []uint16 // default - embed
 	WarpDstHostname    string   // auto-detect source (default engage.cloudflareclient.com)
+	MinTrafficPerIP    bool     // min-agent: per-IP traffic accounting (default off)
 }
 
 func Load() Config {
@@ -87,6 +88,7 @@ func Load() Config {
 		WarpDstIP:          env("WARP_DST_IP", ""),
 		WarpDstHostname:    env("WARP_DST_HOSTNAME", "engage.cloudflareclient.com"),
 		WarpPorts:          parsePorts(env("WARP_PORTS", "")),
+		MinTrafficPerIP:    envBool("MIN_TRAFFIC_PER_IP", false),
 	}
 	if cfg.AgentSecret == "change-me" {
 		log.Fatalf("FATAL: Using default AGENT_SECRET ('change-me'). This is insecure and not allowed!")
@@ -146,6 +148,18 @@ func envFloat(key string, def float64) float64 {
 	if v, ok := os.LookupEnv(key); ok && v != "" {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
 			return f
+		}
+	}
+	return def
+}
+
+func envBool(key string, def bool) bool {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		switch strings.ToLower(v) {
+		case "1", "true", "yes", "on":
+			return true
+		case "0", "false", "no", "off":
+			return false
 		}
 	}
 	return def
