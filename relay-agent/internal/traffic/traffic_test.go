@@ -17,7 +17,7 @@ func TestTrafficSaveAndLoad(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "traffic.json")
 
 	// Create monitor, it should load empty state
-	m := New(dbPath, 1*time.Second, nil)
+	m := New(dbPath, 1*time.Second, nil, ModePerIP)
 
 	// Add some dummy traffic directly
 	m.mu.Lock()
@@ -31,7 +31,7 @@ func TestTrafficSaveAndLoad(t *testing.T) {
 	}
 
 	// Create a new monitor pointing to the same file, it should load the saved state
-	m2 := New(dbPath, 1*time.Second, nil)
+	m2 := New(dbPath, 1*time.Second, nil, ModePerIP)
 	s, _, _, ok := m2.GetIP("1.2.3.4", func(ip string) int { return 1 }, func(ip string) []int64 { return []int64{1} })
 	if !ok {
 		t.Fatal("expected IP 1.2.3.4 to be loaded, but it wasn't")
@@ -49,7 +49,7 @@ func TestTrafficReset(t *testing.T) {
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	dbPath := filepath.Join(tmpDir, "traffic.json")
-	m := New(dbPath, 1*time.Second, nil)
+	m := New(dbPath, 1*time.Second, nil, ModePerIP)
 
 	m.mu.Lock()
 	m.state.IPs["1.2.3.4"] = ipStats{TX: 100, RX: 200, Updated: "now"}
@@ -64,10 +64,29 @@ func TestTrafficReset(t *testing.T) {
 	}
 }
 
+func TestTrafficAggregateTotals(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "traffic.json")
+	m := New(dbPath, 10*time.Minute, nil, ModeAggregate)
+
+	m.mu.Lock()
+	m.state.AggTX = 1000
+	m.state.AggRX = 2500
+	m.mu.Unlock()
+
+	s := m.GetAll(func(string) int { return 0 }, func(string) []int64 { return nil })
+	if s.IPCount != 0 || len(s.IPs) != 0 {
+		t.Fatalf("aggregate mode must expose no per-IP entries, got %d", s.IPCount)
+	}
+	if s.TotalTXBytes != 1000 || s.TotalRXBytes != 2500 || s.TotalBytes != 3500 {
+		t.Fatalf("expected TX=1000 RX=2500 total=3500, got TX=%d RX=%d total=%d",
+			s.TotalTXBytes, s.TotalRXBytes, s.TotalBytes)
+	}
+}
+
 func BenchmarkTrafficAdd(b *testing.B) {
 	tmpDir, _ := os.MkdirTemp("", "traffic-bench")
 	defer func() { _ = os.RemoveAll(tmpDir) }()
-	m := New(filepath.Join(tmpDir, "traffic.json"), 1*time.Hour, nil)
+	m := New(filepath.Join(tmpDir, "traffic.json"), 1*time.Hour, nil, ModePerIP)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -83,7 +102,7 @@ func BenchmarkTrafficAdd(b *testing.B) {
 func BenchmarkTrafficSave(b *testing.B) {
 	tmpDir, _ := os.MkdirTemp("", "traffic-bench")
 	defer func() { _ = os.RemoveAll(tmpDir) }()
-	m := New(filepath.Join(tmpDir, "traffic.json"), 1*time.Hour, nil)
+	m := New(filepath.Join(tmpDir, "traffic.json"), 1*time.Hour, nil, ModePerIP)
 
 	// Pre-fill state with 1000 IPs
 	m.mu.Lock()
@@ -112,7 +131,7 @@ func FuzzTrafficLoad(f *testing.F) {
 		tmpFile := filepath.Join(t.TempDir(), "traffic_fuzz.json")
 		_ = os.WriteFile(tmpFile, data, 0o644)
 
-		m := New(tmpFile, 1*time.Hour, nil)
+		m := New(tmpFile, 1*time.Hour, nil, ModePerIP)
 		// Should not panic. Check some basic methods.
 		m.GetIP("1.2.3.4", func(ip string) int { return 1 }, func(ip string) []int64 { return []int64{1} })
 		m.Reset()

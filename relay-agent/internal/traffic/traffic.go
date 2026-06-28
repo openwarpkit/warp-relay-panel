@@ -5,15 +5,26 @@ package traffic
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/conntrackgo"
 	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/shell"
+)
+
+// Modes for Monitor: per-IP accounting (full-agent), interface-counter
+// aggregate totals (min-agent), or no accounting.
+const (
+	ModePerIP     = "perip"
+	ModeAggregate = "aggregate"
+	ModeOff       = "off"
 )
 
 var msk = time.FixedZone("MSK", 3*3600)
@@ -30,6 +41,11 @@ type fileFmt struct {
 	OrphanedTX int64              `json:"orphaned_tx"`
 	OrphanedRX int64              `json:"orphaned_rx"`
 	LastReset  string             `json:"last_reset,omitempty"`
+	// Aggregate mode: running interface totals + last raw counter sample.
+	AggTX    int64  `json:"agg_tx,omitempty"`
+	AggRX    int64  `json:"agg_rx,omitempty"`
+	LastIfTX uint64 `json:"last_if_tx,omitempty"`
+	LastIfRX uint64 `json:"last_if_rx,omitempty"`
 }
 
 type connKey struct {
@@ -45,16 +61,25 @@ type Monitor struct {
 	state    fileFmt
 	lastConn map[connKey][2]uint64
 	ct       *conntrackgo.Client
+	mode     string
 }
 
-func New(path string, interval time.Duration, ct *conntrackgo.Client) *Monitor {
+func New(path string, interval time.Duration, ct *conntrackgo.Client, mode string) *Monitor {
+	if mode == "" {
+		mode = ModePerIP
+	}
 	m := &Monitor{
 		path:     path,
 		interval: interval,
 		lastConn: make(map[connKey][2]uint64),
 		ct:       ct,
+		mode:     mode,
 	}
-	m.load()
+	if mode == ModeOff {
+		m.state = m.empty()
+	} else {
+		m.load()
+	}
 	return m
 }
 
@@ -141,6 +166,9 @@ func (m *Monitor) checkMonthReset() *fileFmt {
 }
 
 func (m *Monitor) Collect(countFunc func(string) int) {
+	if m.mode != ModePerIP {
+		return
+	}
 	// TTL = half period: traffic.Loop runs with m.interval (default 30s),
 	// so a 15s cache allows the HTTP /traffic handler to cheaply reuse
 	// the same snapshot without blocking the collector.
@@ -223,23 +251,77 @@ func (m *Monitor) Collect(countFunc func(string) int) {
 }
 
 func (m *Monitor) Loop(ctx context.Context, countFunc func(string) int) {
-	log.Printf("traffic: started collector every %s", m.interval)
+	collect := m.Collect
+	if m.mode == ModeAggregate {
+		collect = func(func(string) int) { m.collectAggregate() }
+	}
+	log.Printf("traffic: started %s collector every %s", m.mode, m.interval)
 	t := time.NewTicker(m.interval)
 	defer t.Stop()
 
 	// First immediate collection on start
-	m.Collect(countFunc)
+	collect(countFunc)
 
 	for {
 		select {
 		case <-ctx.Done():
 			log.Println("traffic: shutdown signal received, saving final snapshot...")
-			m.Collect(countFunc)
+			collect(countFunc)
 			return
 		case <-t.C:
-			m.Collect(countFunc)
+			collect(countFunc)
 		}
 	}
+}
+
+func readIfaceCounter(iface, name string) (uint64, bool) {
+	// #nosec G304 -- iface comes from the default route, name is a constant
+	data, err := os.ReadFile(fmt.Sprintf("/sys/class/net/%s/statistics/%s", iface, name))
+	if err != nil {
+		return 0, false
+	}
+	v, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
+}
+
+// collectAggregate samples the default interface byte counters and accumulates
+// running TX/RX totals without any per-IP breakdown.
+func (m *Monitor) collectAggregate() {
+	iface := shell.DefaultIface()
+	if iface == "" {
+		return
+	}
+	rx, okRX := readIfaceCounter(iface, "rx_bytes")
+	tx, okTX := readIfaceCounter(iface, "tx_bytes")
+	if !okRX || !okTX {
+		return
+	}
+
+	m.mu.Lock()
+	m.checkMonthReset()
+	if m.state.LastIfRX != 0 || m.state.LastIfTX != 0 {
+		// reboot resets kernel counters -> cur<last, count cur as the delta.
+		if rx >= m.state.LastIfRX {
+			m.state.AggRX += int64(rx - m.state.LastIfRX)
+		} else {
+			m.state.AggRX += int64(rx)
+		}
+		if tx >= m.state.LastIfTX {
+			m.state.AggTX += int64(tx - m.state.LastIfTX)
+		} else {
+			m.state.AggTX += int64(tx)
+		}
+	}
+	m.state.LastIfRX = rx
+	m.state.LastIfTX = tx
+	cp := m.state
+	cp.IPs = make(map[string]ipStats)
+	m.mu.Unlock()
+
+	m.save(cp)
 }
 
 // PerIP is the public struct for endpoints.
@@ -278,9 +360,9 @@ func (m *Monitor) GetAll(refCount func(string) int, clients func(string) []int64
 	// Fast copy phase under lock
 	month := m.state.Month
 	lastReset := m.state.LastReset
-	orphanedTX := m.state.OrphanedTX
-	orphanedRX := m.state.OrphanedRX
-	
+	orphanedTX := m.state.OrphanedTX + m.state.AggTX
+	orphanedRX := m.state.OrphanedRX + m.state.AggRX
+
 	ipsCopy := make(map[string]ipStats, len(m.state.IPs))
 	for ip, s := range m.state.IPs {
 		ipsCopy[ip] = s

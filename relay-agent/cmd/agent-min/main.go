@@ -48,10 +48,15 @@ func main() {
 	ct := conntrackgo.New()
 	defer func() { _ = ct.Close() }()
 
+	trafInterval := time.Duration(cfg.TrafficInterval) * time.Second
+	if cfg.MinTrafficMode == traffic.ModeAggregate {
+		trafInterval = 10 * time.Minute
+	}
 	tm := traffic.New(
 		filepath.Join(cfg.DataDir, "traffic.json"),
-		time.Duration(cfg.TrafficInterval)*time.Second,
+		trafInterval,
 		ct,
+		cfg.MinTrafficMode,
 	)
 	rl := ratelimit.New(
 		filepath.Join(cfg.DataDir, "rate_limits.json"),
@@ -105,11 +110,13 @@ func main() {
 
 	var wg sync.WaitGroup
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		tm.Loop(ctx, sl.HasIP)
-	}()
+	if cfg.MinTrafficMode != traffic.ModeOff {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tm.Loop(ctx, sl.HasIP)
+		}()
+	}
 
 	wg.Add(1)
 	go func() {

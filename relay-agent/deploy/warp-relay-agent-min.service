@@ -15,7 +15,7 @@ LimitNOFILE=65536
 NoNewPrivileges=false
 
 ProtectSystem=strict
-ReadWritePaths=-/opt/warp-relay-agent -/etc/iptables -/etc/ipset.rules
+ReadWritePaths=-/opt/warp-relay-agent -/opt/warp-relay-panel -/etc/iptables -/etc/ipset.rules
 
 [Install]
 WantedBy=multi-user.target

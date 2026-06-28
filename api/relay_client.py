@@ -255,6 +255,9 @@ async def get_relay_traffic(
     """
     summary=True -> return only totals without ips dict
     top=N -> return only N top-IP by total_bytes
+
+    Min-relays return aggregate totals with an empty ips dict (the agent keeps
+    no per-IP data), so the JSON shape stays the same for consumers.
     """
     path = f"/traffic/{client_ip}" if client_ip else "/traffic"
     ok, data = await _agent_request(relay, "GET", path)
