@@ -45,6 +45,7 @@ type Config struct {
 	RulesWatchdogInterval int
 	MetricsSampleInterval int
 	IpsetPersistDebounce  float64
+	SelfSyncInterval      int // full-agent: periodic panel reconcile, sec (0 = off)
 
 	PanelURL    string
 	PanelAPIKey string
@@ -74,6 +75,7 @@ func Load() Config {
 		RulesWatchdogInterval: envInt("RULES_WATCHDOG_INTERVAL", 30),
 		MetricsSampleInterval: envInt("METRICS_SAMPLE_INTERVAL", 1),
 		IpsetPersistDebounce:  envFloat("IPSET_PERSIST_DEBOUNCE", 3.0),
+		SelfSyncInterval:      envInt("SELF_SYNC_INTERVAL", 600),
 
 		PanelURL:    strings.TrimRight(env("PANEL_URL", ""), "/"),
 		PanelAPIKey: env("PANEL_API_KEY", ""),

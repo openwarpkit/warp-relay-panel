@@ -121,6 +121,7 @@ func main() {
 	pc := panel.New(cfg.PanelURL, cfg.PanelAPIKey, cfg.RelayID)
 	if pc.Configured() {
 		go startupResync(pc, rc, rl, cfg)
+		go srv.SelfSyncLoop(ctx, pc, time.Duration(cfg.SelfSyncInterval)*time.Second)
 	} else {
 		log.Println("Startup-resync skipped (PANEL_URL/PANEL_API_KEY/RELAY_ID not set)")
 	}
