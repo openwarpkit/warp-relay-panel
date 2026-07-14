@@ -63,8 +63,16 @@ func main() {
 		cfg.RateLimitMarkMin, cfg.RateLimitMarkMax,
 		ct,
 	)
-	if applied, failed := rl.RestoreAll(); len(applied) > 0 || len(failed) > 0 {
-		log.Printf("Rate-limits restored on startup: %d applied, %d failed", len(applied), len(failed))
+	// Min must not RestoreAll from disk: inactive IPs have no idle tracker and
+	// permanently occupy fwmarks. Drop loaded state; sharedlimit re-seeds from
+	// live conntrack on the first reconcile.
+	if n := rl.Count(); n > 0 {
+		ips := make([]string, 0, n)
+		for _, l := range rl.All() {
+			ips = append(ips, l.IP)
+		}
+		removed := rl.RemoveBatch(ips)
+		log.Printf("Rate-limits: cleared %d disk entries (min seeds from conntrack)", len(removed))
 	}
 	ms := metrics.New(time.Duration(cfg.MetricsSampleInterval)*time.Second, cfg.DataDir)
 

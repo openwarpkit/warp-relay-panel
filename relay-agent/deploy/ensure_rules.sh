@@ -127,12 +127,19 @@ if [ "$FWD" != "1" ]; then
 fi
 
 # -- tc HTB root qdisc for rate-limits --
+# Default class 1:ffff (65535) stays outside mark pool 1..65000.
 IFACE=$(ip route | awk '/default/ {print $5; exit}')
 if [ -n "$IFACE" ]; then
     if ! tc qdisc show dev "$IFACE" 2>/dev/null | grep -q "qdisc htb 1:"; then
         echo -e "${Y}[ensure] HTB qdisc on $IFACE not found - creating${N}"
-        tc qdisc add dev "$IFACE" root handle 1: htb default 999 2>/dev/null
-        tc class add dev "$IFACE" parent 1: classid 1:999 htb rate 1000mbit 2>/dev/null
+        tc qdisc add dev "$IFACE" root handle 1: htb default 65535 2>/dev/null
+        tc class add dev "$IFACE" parent 1: classid 1:ffff htb rate 1000mbit 2>/dev/null
+    else
+        tc class add dev "$IFACE" parent 1: classid 1:ffff htb rate 1000mbit 2>/dev/null || true
+        if tc qdisc show dev "$IFACE" 2>/dev/null | grep -Eq 'default (0x)?999\b'; then
+            echo -e "${Y}[ensure] migrating HTB default class 999 -> 65535${N}"
+            tc qdisc change dev "$IFACE" root handle 1: htb default 65535 2>/dev/null || true
+        fi
     fi
     # CONNMARK restore on egress (for rate-limits)
     if ! iptables -t mangle -S POSTROUTING 2>/dev/null | grep -q "CONNMARK --restore-mark"; then
@@ -195,7 +202,7 @@ if [ "${RATELIMIT_BACKEND:-nftables}" != "iptables" ] && command -v nft &>/dev/n
 
         # One root tc flow filter - replaces per-IP fw filters.
         # Syntax details - see ensure_rules_min.sh.
-        if ! tc filter show dev "$IFACE" parent 1:0 2>/dev/null | grep -q "flow map"; then
+        if ! tc filter show dev "$IFACE" parent 1:0 2>/dev/null | grep -qE 'flow (map|chain)|map keys mark'; then
             echo -e "${Y}[ensure] tc: creating root flow filter on $IFACE${N}"
             tc filter add dev "$IFACE" parent 1:0 protocol ip prio 1 \
                 handle 1 flow map key mark addend 0xffffffff baseclass 1:1 2>&1 || \

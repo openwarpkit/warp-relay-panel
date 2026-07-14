@@ -99,12 +99,20 @@ if [ "$FWD" != "1" ]; then
 fi
 
 # -- tc HTB qdisc + CONNMARK restore (for shared rate-limit) --
+# Default class 1:ffff (65535) stays outside mark pool 1..65000.
 IFACE=$(ip route | awk '/default/ {print $5; exit}')
 if [ -n "$IFACE" ]; then
     if ! tc qdisc show dev "$IFACE" 2>/dev/null | grep -q "qdisc htb 1:"; then
         echo -e "${Y}[ensure-min] HTB qdisc on $IFACE not found - creating${N}"
-        tc qdisc add dev "$IFACE" root handle 1: htb default 999 2>/dev/null
-        tc class add dev "$IFACE" parent 1: classid 1:999 htb rate 1000mbit 2>/dev/null
+        tc qdisc add dev "$IFACE" root handle 1: htb default 65535 2>/dev/null
+        tc class add dev "$IFACE" parent 1: classid 1:ffff htb rate 1000mbit 2>/dev/null
+    else
+        # Migrate off legacy default 999 so marks can use up to 65000.
+        tc class add dev "$IFACE" parent 1: classid 1:ffff htb rate 1000mbit 2>/dev/null || true
+        if tc qdisc show dev "$IFACE" 2>/dev/null | grep -Eq 'default (0x)?999\b'; then
+            echo -e "${Y}[ensure-min] migrating HTB default class 999 -> 65535${N}"
+            tc qdisc change dev "$IFACE" root handle 1: htb default 65535 2>/dev/null || true
+        fi
     fi
     if ! iptables -t mangle -S POSTROUTING 2>/dev/null | grep -q "CONNMARK --restore-mark"; then
         iptables -t mangle -A POSTROUTING -j CONNMARK --restore-mark 2>/dev/null
@@ -174,7 +182,7 @@ if [ "${RATELIMIT_BACKEND:-nftables}" != "iptables" ] && command -v nft &>/dev/n
         #   - "baseclass 1:1" - default for map mode (explicit 1:0 gives "Illegal baseclass")
         #   - "addend 0xffffffff" = +(-1) -> result: classid = (1:1) + (mark - 1) = 1:mark
         # Without addend classid would be 1:(mark+1) - mismatch with HTB class 1:mark.
-        if ! tc filter show dev "$IFACE" parent 1:0 2>/dev/null | grep -q "flow map"; then
+        if ! tc filter show dev "$IFACE" parent 1:0 2>/dev/null | grep -qE 'flow (map|chain)|map keys mark'; then
             echo -e "${Y}[ensure-min] tc: creating root flow filter on $IFACE${N}"
             tc filter add dev "$IFACE" parent 1:0 protocol ip prio 1 \
                 handle 1 flow map key mark addend 0xffffffff baseclass 1:1 2>&1 || \

@@ -123,8 +123,8 @@ EOF
 # tc HTB qdisc + CONNMARK restore
 if [ -n "$IFACE" ]; then
     tc qdisc del dev "$IFACE" root 2>/dev/null || true
-    tc qdisc add dev "$IFACE" root handle 1: htb default 999 2>/dev/null || true
-    tc class add dev "$IFACE" parent 1: classid 1:999 htb rate 1000mbit 2>/dev/null || true
+    tc qdisc add dev "$IFACE" root handle 1: htb default 65535 2>/dev/null || true
+    tc class add dev "$IFACE" parent 1: classid 1:ffff htb rate 1000mbit 2>/dev/null || true
     iptables -t mangle -C POSTROUTING -j CONNMARK --restore-mark 2>/dev/null || \
         iptables -t mangle -A POSTROUTING -j CONNMARK --restore-mark 2>/dev/null
 fi

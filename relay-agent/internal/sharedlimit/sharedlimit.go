@@ -81,18 +81,27 @@ func (m *Manager) reconcile() {
 		}
 		m.seen[ip] = now
 	}
-	// 2. Idle: queue removal and drop from seen (bounds seen growth).
+	m.mu.Unlock()
+
+	// 2. Idle vs rl (source of truth), not only seen. Restored/historical IPs
+	// never enter seen and would otherwise leak marks forever.
 	toRemove := make([]string, 0)
-	for ip, lastSeen := range m.seen {
+	for _, l := range m.rl.All() {
+		ip := l.IP
 		if _, stillActive := active[ip]; stillActive {
 			continue
 		}
-		if now.Sub(lastSeen) > m.cfg.IdleGrace {
-			toRemove = append(toRemove, ip)
+		m.mu.Lock()
+		lastSeen, tracked := m.seen[ip]
+		drop := !tracked || now.Sub(lastSeen) > m.cfg.IdleGrace
+		if drop {
 			delete(m.seen, ip)
 		}
+		m.mu.Unlock()
+		if drop {
+			toRemove = append(toRemove, ip)
+		}
 	}
-	m.mu.Unlock()
 
 	// 3. Batch apply for new IPs (outside m.mu - rl has its own mutex).
 	go m.applyBatch(newIPs, "scan")
@@ -248,13 +257,13 @@ func (m *Manager) HasIP(ip string) int {
 // re-apply limits to current active IPs on the next tick.
 func (m *Manager) Reset() {
 	m.mu.Lock()
-	ips := make([]string, 0, len(m.seen))
-	for ip := range m.seen {
-		ips = append(ips, ip)
-	}
 	m.seen = make(map[string]time.Time, 64)
 	m.mu.Unlock()
 
+	ips := make([]string, 0, m.rl.Count())
+	for _, l := range m.rl.All() {
+		ips = append(ips, l.IP)
+	}
 	removed := m.rl.RemoveBatch(ips)
 	log.Printf("sharedlimit: reset (%d removed)", len(removed))
 }

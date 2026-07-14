@@ -81,8 +81,9 @@ func Load() Config {
 		PanelAPIKey: env("PANEL_API_KEY", ""),
 		RelayID:     env("RELAY_ID", ""),
 
-		RateLimitMarkMin: 10,
-		RateLimitMarkMax: 998,
+		// Pool 1..65000; HTB default class is 1:ffff (65535) — outside pool.
+		RateLimitMarkMin: 1,
+		RateLimitMarkMax: 65000,
 
 		SharedLimitMbps:    envFloat("SHARED_LIMIT_MBPS", 25.0),
 		SharedScanInterval: envInt("SHARED_SCAN_INTERVAL", 30),

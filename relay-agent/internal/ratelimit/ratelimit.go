@@ -1,7 +1,7 @@
 // Package ratelimit manages per-IP rate-limits via CONNMARK + HTB.
 //
 // Design:
-//   - unique fwmark M in [10..998] per IP
+//   - unique fwmark M in [1..65000] per IP (HTB default class 1:ffff = 65535)
 //   - nftables map ip2mark: { IP : M } (one shared PREROUTING rule does
 //     O(1) lookup and ct mark set instead of N linear iptables rules)
 //   - tc class add dev IFACE parent 1: classid 1:M htb rate Nmbit ceil Nmbit burst 16k
@@ -827,7 +827,7 @@ func (m *Manager) RestoreAll() (applied []string, failed []string) {
 			fmt.Fprintf(&nftBuf, "add element ip warp_shaper ip2mark { %s : 0x%x }\n", e.ip, e.mark)
 			fmt.Fprintf(&tcBuf, "class replace dev %s parent 1: classid 1:%x htb rate %.2fmbit ceil %.2fmbit burst 16k\n",
 				iface, e.mark, e.mbps, e.mbps)
-			// #nosec G115 -- mark is within safe 10..999 range
+			// #nosec G115 -- mark is within safe 1..65000 range
 			srcToMark[e.ip] = uint32(e.mark)
 		}
 

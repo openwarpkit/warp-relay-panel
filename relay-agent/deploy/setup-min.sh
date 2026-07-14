@@ -109,10 +109,11 @@ cat > ${INSTALL_DIR}/rules_recipe.json << EOF
 EOF
 
 # tc HTB qdisc + CONNMARK restore (for per-IP shaping)
+# Default class 1:ffff (65535) stays outside mark pool 1..65000.
 if [ -n "$IFACE" ]; then
     tc qdisc del dev "$IFACE" root 2>/dev/null || true
-    tc qdisc add dev "$IFACE" root handle 1: htb default 999
-    tc class add dev "$IFACE" parent 1: classid 1:999 htb rate 1000mbit
+    tc qdisc add dev "$IFACE" root handle 1: htb default 65535
+    tc class add dev "$IFACE" parent 1: classid 1:ffff htb rate 1000mbit
     iptables -t mangle -C POSTROUTING -j CONNMARK --restore-mark 2>/dev/null || \
         iptables -t mangle -A POSTROUTING -j CONNMARK --restore-mark
     echo -e "${G}  tc HTB qdisc + CONNMARK restore configured${N}"
