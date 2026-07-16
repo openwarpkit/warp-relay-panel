@@ -6,6 +6,7 @@ Protected (X-API-Key):
   POST/GET/DELETE  /api/clients
   POST             /api/clients/{id}/activate  - manual activation by IP
   POST/GET/DELETE  /api/relays
+  PATCH            /api/relays/{id}        - edit host/port
   POST/GET/DELETE  /api/blacklist
   POST             /api/relays/sync-all
   POST             /api/relays/update-all
@@ -32,7 +33,7 @@ from .database import (
     block_client, delete_client, get_client_full,
     get_activation_logs, delete_activation_logs, get_all_active_ips,
     get_client_labels,
-    add_relay, list_relays, get_active_relays, delete_relay, toggle_relay,
+    add_relay, edit_relay, list_relays, get_active_relays, delete_relay, toggle_relay,
     add_ip_ban, remove_ip_ban, remove_ip_ban_by_ip, list_ip_bans,
     get_ip_ban,
     add_rate_limit, remove_rate_limit_by_ip, get_rate_limit,
@@ -118,6 +119,10 @@ class RelayCreate(BaseModel):
 
 class RelayToggle(BaseModel):
     active: bool
+
+class RelayUpdate(BaseModel):
+    host: str | None = None
+    agent_port: int | None = None
 
 class IPBanCreate(BaseModel):
     ip: str
@@ -554,6 +559,18 @@ async def api_delete_relay(relay_id: int):
     if not ok:
         raise HTTPException(404, "Relay not found")
     return {"deleted": True, "id": relay_id}
+
+@app.patch("/api/relays/{relay_id}", dependencies=[Depends(require_api_key)])
+async def api_edit_relay(relay_id: int, data: RelayUpdate):
+    if data.host is None and data.agent_port is None:
+        raise HTTPException(400, "Nothing to update")
+    try:
+        relay = await edit_relay(relay_id, host=data.host, agent_port=data.agent_port)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not relay:
+        raise HTTPException(404, "Relay not found")
+    return relay
 
 @app.patch("/api/relays/{relay_id}/toggle", dependencies=[Depends(require_api_key)])
 async def api_toggle_relay(relay_id: int, data: RelayToggle):

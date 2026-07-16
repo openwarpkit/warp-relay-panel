@@ -435,8 +435,7 @@ async def list_ip_bans_paginated(page: int = 0, per_page: int = 20,
 _RELAYS_CACHE_TTL = float(os.environ.get("RELAYS_CACHE_TTL", "15"))
 
 
-async def add_relay(name: str, host: str, agent_port: int = 7580,
-                    agent_secret: str = "", agent_type: str = "full") -> dict:
+def _validate_host(host: str) -> None:
     try:
         resolved_ip = socket.gethostbyname(host)
         ip = ipaddress.ip_address(resolved_ip)
@@ -448,6 +447,11 @@ async def add_relay(name: str, host: str, agent_port: int = 7580,
         if "Invalid host" in str(e):
             raise
 
+
+async def add_relay(name: str, host: str, agent_port: int = 7580,
+                    agent_secret: str = "", agent_type: str = "full") -> dict:
+    _validate_host(host)
+
     if agent_type not in ("full", "min"):
         raise ValueError(f"agent_type must be 'full' or 'min', got: {agent_type}")
 
@@ -458,6 +462,32 @@ async def add_relay(name: str, host: str, agent_port: int = 7580,
     )
     if not row:
         raise ValueError("Failed to add relay")
+    cache.invalidate("relays:")
+    return row
+
+
+async def edit_relay(relay_id: int, host: str | None = None,
+                     agent_port: int | None = None) -> Optional[dict]:
+    if host is None and agent_port is None:
+        raise ValueError("Nothing to update")
+    if host is not None:
+        _validate_host(host)
+    if agent_port is not None and not (1 <= agent_port <= 65535):
+        raise ValueError("agent_port must be 1-65535")
+
+    sets, args = [], []
+    if host is not None:
+        sets.append("host = %s")
+        args.append(host)
+    if agent_port is not None:
+        sets.append("agent_port = %s")
+        args.append(agent_port)
+    args.append(relay_id)
+
+    row = await _one(
+        f"UPDATE relays SET {', '.join(sets)} WHERE id = %s RETURNING *",
+        tuple(args),
+    )
     cache.invalidate("relays:")
     return row
 

@@ -17,3 +17,12 @@ def test_relay_create_custom_agent_type():
 def test_relay_create_invalid():
     with pytest.raises(ValidationError):
         RelayCreate(name="Test") # missing host
+
+def test_relay_update_partial():
+    from api.index import RelayUpdate
+    u = RelayUpdate(host="5.6.7.8")
+    assert u.host == "5.6.7.8"
+    assert u.agent_port is None
+    u2 = RelayUpdate(agent_port=9000)
+    assert u2.host is None
+    assert u2.agent_port == 9000
