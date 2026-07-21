@@ -242,16 +242,21 @@ render_table() {
                 return sprintf("%.0f bps", bits)
             }
             function bar(value, total, percent, filled, i, output) {
-                percent = total > 0 ? int(value * 100 / total + 0.5) : 0
+                percent = 0
+                if (total > 0) percent = int(value * 100 / total + 0.5)
                 if (percent > 100) percent = 100
                 filled = int(percent * 12 / 100)
                 output = "["
-                for (i = 0; i < 12; i++) output = output (i < filled ? "#" : ".")
+                for (i = 0; i < 12; i++) {
+                    if (i < filled) output = output "#"
+                    else output = output "."
+                }
                 return output "] " sprintf("%3d%%", percent)
             }
             {
                 if (NR > limit) next
-                width = kind == "P" ? 7 : 15
+                width = 15
+                if (kind == "P") width = 7
                 printf "%-*s %11s %11s %11s %6d %6d  %s\n", width, $2,
                     rate($7), rate($6), rate($8), $3, $5, bar($8, denominator)
             }
@@ -287,11 +292,13 @@ while true; do
     aggregate_flows "$ELAPSED"
 
     IFACE_RX_RATE="$(awk -v current="$CURRENT_RX" -v previous="$PREVIOUS_RX" -v elapsed="$ELAPSED" 'BEGIN {
-        delta = current >= previous ? current - previous : 0
+        delta = 0
+        if (current >= previous) delta = current - previous
         printf "%.0f", delta / elapsed
     }')"
     IFACE_TX_RATE="$(awk -v current="$CURRENT_TX" -v previous="$PREVIOUS_TX" -v elapsed="$ELAPSED" 'BEGIN {
-        delta = current >= previous ? current - previous : 0
+        delta = 0
+        if (current >= previous) delta = current - previous
         printf "%.0f", delta / elapsed
     }')"
 
@@ -308,12 +315,16 @@ while true; do
     CT_COUNT="$(read_counter /proc/sys/net/netfilter/nf_conntrack_count)"
     CT_MAX="$(read_counter /proc/sys/net/netfilter/nf_conntrack_max)"
     CT_PERCENT="$(awk -v count="$CT_COUNT" -v maximum="$CT_MAX" 'BEGIN {
-        printf "%.1f", maximum > 0 ? count * 100 / maximum : 0
+        percent = 0
+        if (maximum > 0) percent = count * 100 / maximum
+        printf "%.1f", percent
     }')"
     LOAD_AVERAGE="$(awk '{ print $1 " " $2 " " $3 }' /proc/loadavg)"
     MEMORY="$(awk '/MemTotal:/ { total=$2 } /MemAvailable:/ { available=$2 } END {
         used=total-available
-        printf "%.0f/%.0f MiB (%.1f%%)", used/1024, total/1024, total > 0 ? used*100/total : 0
+        percent=0
+        if (total > 0) percent=used*100/total
+        printf "%.0f/%.0f MiB (%.1f%%)", used/1024, total/1024, percent
     }' /proc/meminfo)"
     RX_DROPPED="$(read_counter "/sys/class/net/$IFACE/statistics/rx_dropped")"
     TX_DROPPED="$(read_counter "/sys/class/net/$IFACE/statistics/tx_dropped")"
@@ -330,7 +341,9 @@ while true; do
         LIMIT_MBPS="$(awk -F '=' '$1 == "MBPS" { print $2; exit }' /etc/default/warp-port-limit)"
         LIMIT_RATE="$(awk -F '\t' -v port="$LIMIT_PORT" '$1 == "P" && $2 == port { print $8; exit }' "$AGGREGATE")"
         LIMIT_USAGE="$(awk -v rate="${LIMIT_RATE:-0}" -v mbps="${LIMIT_MBPS:-0}" 'BEGIN {
-            printf "%.1f", mbps > 0 ? rate * 8 * 100 / (mbps * 1000000) : 0
+            percent = 0
+            if (mbps > 0) percent = rate * 8 * 100 / (mbps * 1000000)
+            printf "%.1f", percent
         }')"
         if tc class show dev "$IFACE" 2>/dev/null | grep -F 'htb 1:fffe ' >/dev/null &&
            iptables -t mangle -S POSTROUTING 2>/dev/null | grep -F "WR_PORT_LIMIT_${LIMIT_PORT}" >/dev/null; then
