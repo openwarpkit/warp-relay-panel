@@ -137,6 +137,15 @@ aggregate_flows() {
             sessionsPort[port]++
             sessionsIP[ip]++
             sessionsTotal++
+            portIP = port SUBSEP ip
+            if (!(portIP in seenPortIP)) {
+                seenPortIP[portIP] = 1
+                clientsPort[port]++
+            }
+            if (!(ip in seenIP)) {
+                seenIP[ip] = 1
+                clientsTotal++
+            }
             if ($6) {
                 assuredPort[port]++
                 assuredIP[ip]++
@@ -164,19 +173,20 @@ aggregate_flows() {
             for (port in sessionsPort) {
                 tx = txPort[port] / dt
                 rx = rxPort[port] / dt
-                printf "P\t%s\t%d\t%d\t%d\t%.0f\t%.0f\t%.0f\n", port,
-                    sessionsPort[port], assuredPort[port], unrepliedPort[port], tx, rx, tx + rx
+                printf "P\t%s\t%d\t%d\t%d\t%.0f\t%.0f\t%.0f\t%d\n", port,
+                    sessionsPort[port], assuredPort[port], unrepliedPort[port], tx, rx, tx + rx,
+                    clientsPort[port]
             }
             for (ip in sessionsIP) {
                 tx = txIP[ip] / dt
                 rx = rxIP[ip] / dt
-                printf "I\t%s\t%d\t%d\t%d\t%.0f\t%.0f\t%.0f\n", ip,
+                printf "I\t%s\t%d\t%d\t%d\t%.0f\t%.0f\t%.0f\t1\n", ip,
                     sessionsIP[ip], assuredIP[ip], unrepliedIP[ip], tx, rx, tx + rx
             }
             tx = txTotal / dt
             rx = rxTotal / dt
-            printf "T\t-\t%d\t%d\t%d\t%.0f\t%.0f\t%.0f\n", sessionsTotal,
-                assuredTotal, unrepliedTotal, tx, rx, tx + rx
+            printf "T\t-\t%d\t%d\t%d\t%.0f\t%.0f\t%.0f\t%d\n", sessionsTotal,
+                assuredTotal, unrepliedTotal, tx, rx, tx + rx, clientsTotal
         }
     ' "$PREVIOUS" "$CURRENT" > "$AGGREGATE"
 }
@@ -227,7 +237,8 @@ render_table() {
     local limit="$2"
     local denominator="$3"
     if [[ "$kind" == "P" ]]; then
-        printf '%-7s %11s %11s %11s %6s %6s  %s\n' "PORT" "DOWN" "UP" "TOTAL" "SESS" "UNR" "SHARE"
+        printf '%-7s %11s %11s %11s %6s %7s %6s  %s\n' \
+            "PORT" "DOWN" "UP" "TOTAL" "SESS" "CLIENTS" "UNR" "SHARE"
     else
         printf '%-15s %11s %11s %11s %6s %6s  %s\n' "CLIENT IP" "DOWN" "UP" "TOTAL" "SESS" "UNR" "SHARE"
     fi
@@ -257,8 +268,13 @@ render_table() {
                 if (NR > limit) next
                 width = 15
                 if (kind == "P") width = 7
-                printf "%-*s %11s %11s %11s %6d %6d  %s\n", width, $2,
-                    rate($7), rate($6), rate($8), $3, $5, bar($8, denominator)
+                if (kind == "P") {
+                    printf "%-*s %11s %11s %11s %6d %7d %6d  %s\n", width, $2,
+                        rate($7), rate($6), rate($8), $3, $9, $5, bar($8, denominator)
+                } else {
+                    printf "%-*s %11s %11s %11s %6d %6d  %s\n", width, $2,
+                        rate($7), rate($6), rate($8), $3, $5, bar($8, denominator)
+                }
             }
         '
 }
@@ -303,13 +319,14 @@ while true; do
     }')"
 
     TOTAL_LINE="$(awk -F '\t' '$1 == "T" { print; exit }' "$AGGREGATE")"
-    IFS=$'\t' read -r _ _ SESSIONS ASSURED UNREPLIED WARP_TX WARP_RX WARP_TOTAL <<< "$TOTAL_LINE"
+    IFS=$'\t' read -r _ _ SESSIONS ASSURED UNREPLIED WARP_TX WARP_RX WARP_TOTAL CLIENTS_TOTAL <<< "$TOTAL_LINE"
     SESSIONS="${SESSIONS:-0}"
     ASSURED="${ASSURED:-0}"
     UNREPLIED="${UNREPLIED:-0}"
     WARP_TX="${WARP_TX:-0}"
     WARP_RX="${WARP_RX:-0}"
     WARP_TOTAL="${WARP_TOTAL:-0}"
+    CLIENTS_TOTAL="${CLIENTS_TOTAL:-0}"
 
     IFS=$'\t' read -r MONTH_TX MONTH_RX TRAFFIC_MONTH <<< "$(monthly_totals)"
     CT_COUNT="$(read_counter /proc/sys/net/netfilter/nf_conntrack_count)"
@@ -340,6 +357,8 @@ while true; do
         LIMIT_PORT="$(awk -F '=' '$1 == "PORT" { print $2; exit }' /etc/default/warp-port-limit)"
         LIMIT_MBPS="$(awk -F '=' '$1 == "MBPS" { print $2; exit }' /etc/default/warp-port-limit)"
         LIMIT_RATE="$(awk -F '\t' -v port="$LIMIT_PORT" '$1 == "P" && $2 == port { print $8; exit }' "$AGGREGATE")"
+        LIMIT_CLIENTS="$(awk -F '\t' -v port="$LIMIT_PORT" '$1 == "P" && $2 == port { print $9; exit }' "$AGGREGATE")"
+        LIMIT_CLIENTS="${LIMIT_CLIENTS:-0}"
         LIMIT_USAGE="$(awk -v rate="${LIMIT_RATE:-0}" -v mbps="${LIMIT_MBPS:-0}" 'BEGIN {
             percent = 0
             if (mbps > 0) percent = rate * 8 * 100 / (mbps * 1000000)
@@ -350,7 +369,7 @@ while true; do
             LIMIT_COLOR="$GREEN"
             if awk -v usage="$LIMIT_USAGE" 'BEGIN { exit !(usage >= 70) }'; then LIMIT_COLOR="$YELLOW"; fi
             if awk -v usage="$LIMIT_USAGE" 'BEGIN { exit !(usage >= 90) }'; then LIMIT_COLOR="$RED"; fi
-            LIMIT_STATUS="${LIMIT_COLOR}OK / ${LIMIT_PORT} / ${LIMIT_MBPS} Mbps / ${LIMIT_USAGE}%${RESET}"
+            LIMIT_STATUS="${LIMIT_COLOR}OK / ${LIMIT_PORT} / ${LIMIT_MBPS} Mbps / ${LIMIT_USAGE}% / ${LIMIT_CLIENTS} clients${RESET}"
         else
             LIMIT_STATUS="${RED}BROKEN / service active, tc or MARK rule missing${RESET}"
         fi
@@ -372,8 +391,8 @@ while true; do
         "$(format_rate "$WARP_RX")" "$(format_rate "$WARP_TX")" "$(format_rate "$WARP_TOTAL")"
     printf 'Interface  RX:   %11s   TX: %11s   Drops: RX %s / TX %s\n' \
         "$(format_rate "$IFACE_RX_RATE")" "$(format_rate "$IFACE_TX_RATE")" "$RX_DROPPED" "$TX_DROPPED"
-    printf 'Sessions: %s total / %s assured / %s unreplied   Conntrack: %s/%s (%s%%)\n' \
-        "$SESSIONS" "$ASSURED" "$UNREPLIED" "$CT_COUNT" "$CT_MAX" "$CT_PERCENT"
+    printf 'Clients: %s IPs   Sessions: %s total / %s assured / %s unreplied   Conntrack: %s/%s (%s%%)\n' \
+        "$CLIENTS_TOTAL" "$SESSIONS" "$ASSURED" "$UNREPLIED" "$CT_COUNT" "$CT_MAX" "$CT_PERCENT"
     printf 'Month %s: Down %s / Up %s / Total %s   Load: %s   RAM: %s\n' \
         "$TRAFFIC_MONTH" "$(format_bytes "$MONTH_RX")" "$(format_bytes "$MONTH_TX")" \
         "$(format_bytes "$(( MONTH_RX + MONTH_TX ))")" "$LOAD_AVERAGE" "$MEMORY"
