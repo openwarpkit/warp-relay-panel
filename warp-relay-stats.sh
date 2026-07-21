@@ -353,12 +353,25 @@ while true; do
     fi
 
     LIMIT_STATUS="${DIM}off${RESET}"
+    IP_HISTORY_STATUS="${DIM}collector off${RESET}"
+    LIMIT_IPS_FILE=""
     if systemctl is-active --quiet warp-port-limit.service && [[ -r /etc/default/warp-port-limit ]]; then
         LIMIT_PORT="$(awk -F '=' '$1 == "PORT" { print $2; exit }' /etc/default/warp-port-limit)"
         LIMIT_MBPS="$(awk -F '=' '$1 == "MBPS" { print $2; exit }' /etc/default/warp-port-limit)"
         LIMIT_RATE="$(awk -F '\t' -v port="$LIMIT_PORT" '$1 == "P" && $2 == port { print $8; exit }' "$AGGREGATE")"
         LIMIT_CLIENTS="$(awk -F '\t' -v port="$LIMIT_PORT" '$1 == "P" && $2 == port { print $9; exit }' "$AGGREGATE")"
         LIMIT_CLIENTS="${LIMIT_CLIENTS:-0}"
+        LIMIT_IPS_FILE="$(awk -F '=' '$1 == "LIMIT_IPS_FILE" { print $2; exit }' /etc/default/warp-port-limit)"
+        LIMIT_IPS_FILE="${LIMIT_IPS_FILE:-/opt/warp-relay-agent/limited-port-${LIMIT_PORT}-ips.txt}"
+        COLLECTED_IPS=0
+        if [[ -r "$LIMIT_IPS_FILE" ]]; then
+            COLLECTED_IPS="$(awk 'NF { count++ } END { print count + 0 }' "$LIMIT_IPS_FILE")"
+        fi
+        if systemctl is-active --quiet warp-port-limit-ip-collector.service; then
+            IP_HISTORY_STATUS="${GREEN}${COLLECTED_IPS} unique / collector ACTIVE${RESET}"
+        else
+            IP_HISTORY_STATUS="${RED}${COLLECTED_IPS} unique / collector INACTIVE${RESET}"
+        fi
         LIMIT_USAGE="$(awk -v rate="${LIMIT_RATE:-0}" -v mbps="${LIMIT_MBPS:-0}" 'BEGIN {
             percent = 0
             if (mbps > 0) percent = rate * 8 * 100 / (mbps * 1000000)
@@ -377,7 +390,7 @@ while true; do
 
     TERMINAL_LINES="$(tput lines 2>/dev/null || printf '40')"
     VISIBLE_TOP="$TOP"
-    MAX_VISIBLE=$(( (TERMINAL_LINES - 17) / 2 ))
+    MAX_VISIBLE=$(( (TERMINAL_LINES - 18) / 2 ))
     (( MAX_VISIBLE < 3 )) && MAX_VISIBLE=3
     (( VISIBLE_TOP > MAX_VISIBLE )) && VISIBLE_TOP="$MAX_VISIBLE"
 
@@ -386,6 +399,9 @@ while true; do
     printf '%s\n' '================================================================================================'
     printf 'Agent: %b   Interface: %s   CF target: %s   Refresh: %ss\n' "$AGENT_STATUS" "$IFACE" "$DST_IP" "$INTERVAL"
     printf 'Port limit: %b\n' "$LIMIT_STATUS"
+    if [[ -n "$LIMIT_IPS_FILE" ]]; then
+        printf 'IP history: %b   File: %s\n' "$IP_HISTORY_STATUS" "$LIMIT_IPS_FILE"
+    fi
     printf '\n%bLIVE TRAFFIC%b\n' "$BOLD" "$RESET"
     printf 'WARP       Down: %11s   Up: %11s   Combined: %11s\n' \
         "$(format_rate "$WARP_RX")" "$(format_rate "$WARP_TX")" "$(format_rate "$WARP_TOTAL")"
