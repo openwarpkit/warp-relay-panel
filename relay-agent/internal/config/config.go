@@ -47,9 +47,10 @@ type Config struct {
 	IpsetPersistDebounce  float64
 	SelfSyncInterval      int // full-agent: periodic panel reconcile, sec (0 = off)
 
-	PanelURL    string
-	PanelAPIKey string
-	RelayID     string
+	PanelURL            string
+	PanelAPIKey         string
+	RelayID             string
+	PanelRequestTimeout int
 
 	RateLimitMarkMin int
 	RateLimitMarkMax int
@@ -77,9 +78,10 @@ func Load() Config {
 		IpsetPersistDebounce:  envFloat("IPSET_PERSIST_DEBOUNCE", 3.0),
 		SelfSyncInterval:      envInt("SELF_SYNC_INTERVAL", 600),
 
-		PanelURL:    strings.TrimRight(env("PANEL_URL", ""), "/"),
-		PanelAPIKey: env("PANEL_API_KEY", ""),
-		RelayID:     env("RELAY_ID", ""),
+		PanelURL:            strings.TrimRight(env("PANEL_URL", ""), "/"),
+		PanelAPIKey:         env("PANEL_API_KEY", ""),
+		RelayID:             env("RELAY_ID", ""),
+		PanelRequestTimeout: envInt("PANEL_REQUEST_TIMEOUT", 60),
 
 		// Pool 1..65000; HTB default class is 1:ffff (65535) — outside pool.
 		RateLimitMarkMin: 1,
@@ -155,4 +157,3 @@ func envFloat(key string, def float64) float64 {
 	}
 	return def
 }
-

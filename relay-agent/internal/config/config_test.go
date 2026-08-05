@@ -62,10 +62,17 @@ func TestParsePorts(t *testing.T) {
 
 func TestLoad(t *testing.T) {
 	_ = os.Setenv("AGENT_SECRET", "supersecret")
-	defer func() { _ = os.Unsetenv("AGENT_SECRET") }()
+	_ = os.Setenv("PANEL_REQUEST_TIMEOUT", "90")
+	defer func() {
+		_ = os.Unsetenv("AGENT_SECRET")
+		_ = os.Unsetenv("PANEL_REQUEST_TIMEOUT")
+	}()
 
 	cfg := Load()
 	if cfg.AgentSecret != "supersecret" {
 		t.Errorf("expected supersecret, got %s", cfg.AgentSecret)
+	}
+	if cfg.PanelRequestTimeout != 90 {
+		t.Errorf("expected panel timeout 90, got %d", cfg.PanelRequestTimeout)
 	}
 }

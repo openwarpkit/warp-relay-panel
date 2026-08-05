@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -803,6 +804,8 @@ func (m *Manager) RestoreAll() (applied []string, failed []string) {
 			return nil, []string{"no default interface"}
 		}
 		_ = m.ensureBackend()
+		m.shellMu.Lock()
+		defer m.shellMu.Unlock()
 
 		m.mu.Lock()
 		type ipMark struct {
@@ -816,22 +819,19 @@ func (m *Manager) RestoreAll() (applied []string, failed []string) {
 		}
 		m.mu.Unlock()
 
-		if len(all) == 0 {
-			return
-		}
-
 		var nftBuf, tcBuf strings.Builder
 		fmt.Fprintf(&nftBuf, "flush map ip warp_shaper ip2mark\n")
 		srcToMark := make(map[string]uint32, len(all))
+		expectedMarks := make(map[int]bool, len(all))
 		for _, e := range all {
 			fmt.Fprintf(&nftBuf, "add element ip warp_shaper ip2mark { %s : 0x%x }\n", e.ip, e.mark)
 			fmt.Fprintf(&tcBuf, "class replace dev %s parent 1: classid 1:%x htb rate %.2fmbit ceil %.2fmbit burst 16k\n",
 				iface, e.mark, e.mbps, e.mbps)
+			expectedMarks[e.mark] = true
 			// #nosec G115 -- mark is within safe 1..65000 range
 			srcToMark[e.ip] = uint32(e.mark)
 		}
 
-		m.shellMu.Lock()
 		rc, _, errOut := shell.RunStdin("nft -f -", nftBuf.String(), 30*time.Second)
 		if rc != 0 && isMissingErr(errOut) {
 			if healErr := m.ensureBackend(); healErr == nil {
@@ -839,7 +839,6 @@ func (m *Manager) RestoreAll() (applied []string, failed []string) {
 			}
 		}
 		if rc != 0 && !isExistsErr(errOut) {
-			m.shellMu.Unlock()
 			log.Printf("ratelimit.RestoreAll: nft batch rc=%d: %s", rc, errOut)
 			for _, e := range all {
 				failed = append(failed, e.ip)
@@ -847,16 +846,38 @@ func (m *Manager) RestoreAll() (applied []string, failed []string) {
 			return
 		}
 
-		if rcTc, _, tcErr := shell.RunStdin("tc -batch -", tcBuf.String(), 30*time.Second); rcTc != 0 && !isExistsErr(tcErr) {
-			log.Printf("ratelimit.RestoreAll: tc batch rc=%d: %s", rcTc, tcErr)
+		if tcBuf.Len() > 0 {
+			if rcTc, _, tcErr := shell.RunStdin("tc -batch -", tcBuf.String(), 30*time.Second); rcTc != 0 && !isExistsErr(tcErr) {
+				log.Printf("ratelimit.RestoreAll: tc batch rc=%d: %s", rcTc, tcErr)
+			}
 		}
-		m.shellMu.Unlock()
-		if _, err := m.ct.MarkBySrcsUDP(srcToMark); err != nil {
-			log.Printf("ratelimit.RestoreAll: conntrack mark update: %v", err)
+		if m.ct != nil && len(srcToMark) > 0 {
+			if _, err := m.ct.MarkBySrcsUDP(srcToMark); err != nil {
+				log.Printf("ratelimit.RestoreAll: conntrack mark update: %v", err)
+			}
+		}
+
+		_, classOut, _ := shell.Run(fmt.Sprintf("tc class show dev %s 2>/dev/null", iface), 5*time.Second)
+		staleMarks := staleTCClassMarks(parseTCClassMarks(classOut), expectedMarks)
+		if len(staleMarks) > 0 {
+			var cleanup strings.Builder
+			for _, mark := range staleMarks {
+				fmt.Fprintf(&cleanup, "class del dev %s classid 1:%x\n", iface, mark)
+			}
+			cleanupRC, _, cleanupErr := shell.RunStdin("tc -batch -", cleanup.String(), 30*time.Second)
+			if cleanupRC != 0 && !isMissingErr(cleanupErr) {
+				log.Printf("ratelimit.RestoreAll: stale tc cleanup rc=%d: %s", cleanupRC, cleanupErr)
+			} else {
+				log.Printf("Rate-limit RestoreAll: removed %d stale tc classes", len(staleMarks))
+			}
 		}
 
 		for _, e := range all {
 			applied = append(applied, e.ip)
+		}
+		if len(all) == 0 {
+			log.Printf("Rate-limit RestoreAll: cleared kernel state")
+			return
 		}
 		log.Printf("Rate-limit RestoreAll: re-seeded %d IPs (flush+add map, tc replace)", len(applied))
 		return
@@ -892,11 +913,40 @@ func (m *Manager) RestoreAll() (applied []string, failed []string) {
 }
 
 // tc prints the classid minor in hex (e.g. `class htb 1:fb`).
-var classRe = regexp.MustCompile(`class htb 1:([0-9a-f]+)`)
+var classRe = regexp.MustCompile(`class htb 1:([0-9a-fA-F]+)`)
 
-// nftIPRe - IPv4 in `nft list map ip warp_shaper ip2mark` output.
-// Format: `elements = { 1.2.3.4 : 0x0000000a, ... }` (optional with timeouts).
-var nftIPRe = regexp.MustCompile(`(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s*:`)
+var nftEntryRe = regexp.MustCompile(`(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s*:\s*(0x[0-9a-fA-F]+|\d+)`)
+
+func parseTCClassMarks(out string) map[int]bool {
+	marks := make(map[int]bool)
+	for _, match := range classRe.FindAllStringSubmatch(out, -1) {
+		if mark, err := strconv.ParseInt(match[1], 16, 32); err == nil {
+			marks[int(mark)] = true
+		}
+	}
+	return marks
+}
+
+func parseNftMarks(out string) map[string]int {
+	marks := make(map[string]int)
+	for _, match := range nftEntryRe.FindAllStringSubmatch(out, -1) {
+		if mark, err := strconv.ParseInt(match[2], 0, 32); err == nil {
+			marks[match[1]] = int(mark)
+		}
+	}
+	return marks
+}
+
+func staleTCClassMarks(existing, expected map[int]bool) []int {
+	stale := make([]int, 0)
+	for mark := range existing {
+		if mark != 65535 && !expected[mark] {
+			stale = append(stale, mark)
+		}
+	}
+	slices.Sort(stale)
+	return stale
+}
 
 // Verify returns a list of IPs for which a tc-class or nft-element is missing.
 func (m *Manager) Verify() []string {
@@ -904,50 +954,55 @@ func (m *Manager) Verify() []string {
 	if iface == "" {
 		return nil
 	}
+	m.shellMu.Lock()
+	defer m.shellMu.Unlock()
+
+	m.mu.Lock()
+	expected := make(map[string]Limit, len(m.m))
+	expectedMarks := make(map[int]bool, len(m.m))
+	for ip, limit := range m.m {
+		expected[ip] = limit
+		expectedMarks[limit.Mark] = true
+	}
+	m.mu.Unlock()
+
 	rc, out, _ := shell.Run(fmt.Sprintf("tc class show dev %s 2>/dev/null", iface), 5*time.Second)
 	if rc != 0 {
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		out := make([]string, 0, len(m.m))
-		for ip := range m.m {
-			out = append(out, ip)
+		drift := make([]string, 0, len(expected))
+		for ip := range expected {
+			drift = append(drift, ip)
 		}
-		return out
+		return drift
 	}
-	existing := make(map[int]bool)
-	for _, line := range strings.Split(out, "\n") {
-		match := classRe.FindStringSubmatch(line)
-		if match != nil {
-			if n, err := strconv.ParseInt(match[1], 16, 32); err == nil {
-				existing[int(n)] = true
-			}
-		}
-	}
+	existing := parseTCClassMarks(out)
 
-	// For nft-backend check that IP is in map @ip2mark. If table is missing
-	// (ensure_rules.sh did not run) - Verify forces RestoreAll to reapply,
-	// which will attempt to recreate elements (nft error is passed to applyTC).
-	nftIPs := map[string]bool{}
+	nftMarks := map[string]int{}
 	if m.useNft {
 		rc, nftOut, _ := shell.Run("nft list map ip warp_shaper ip2mark 2>/dev/null", 5*time.Second)
 		if rc == 0 {
-			for _, match := range nftIPRe.FindAllStringSubmatch(nftOut, -1) {
-				nftIPs[match[1]] = true
-			}
+			nftMarks = parseNftMarks(nftOut)
 		}
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	missing := make([]string, 0)
-	for ip, l := range m.m {
-		if !existing[l.Mark] {
-			missing = append(missing, ip)
+	drift := make([]string, 0)
+	for ip, limit := range expected {
+		if !existing[limit.Mark] {
+			drift = append(drift, ip)
 			continue
 		}
-		if m.useNft && !nftIPs[ip] {
-			missing = append(missing, ip)
+		if m.useNft && nftMarks[ip] != limit.Mark {
+			drift = append(drift, ip)
 		}
 	}
-	return missing
+	for _, mark := range staleTCClassMarks(existing, expectedMarks) {
+		drift = append(drift, fmt.Sprintf("tc_class:1:%x", mark))
+	}
+	if m.useNft {
+		for ip := range nftMarks {
+			if _, ok := expected[ip]; !ok {
+				drift = append(drift, "nft_ip:"+ip)
+			}
+		}
+	}
+	return drift
 }

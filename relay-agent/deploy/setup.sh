@@ -104,6 +104,8 @@ iptables -A FORWARD -p udp -d ${DST_IP} -j DROP -m comment --comment "WR_WHITELI
 
 netfilter-persistent save
 ipset save > /etc/ipset.rules 2>/dev/null || true
+chown nobody:nogroup /etc/ipset.rules
+chmod 0640 /etc/ipset.rules
 
 # Recipe
 mkdir -p ${INSTALL_DIR}
@@ -190,6 +192,7 @@ TRAFFIC_INTERVAL=30
 PANEL_URL=${PANEL_URL}
 PANEL_API_KEY=${PANEL_API_KEY}
 RELAY_ID=${RELAY_ID}
+PANEL_REQUEST_TIMEOUT=60
 
 REPO_DIR=${REPO_DIR}
 

@@ -112,6 +112,21 @@ func TestAllocateMark(t *testing.T) {
 	}
 }
 
+func TestParseNftMarks(t *testing.T) {
+	marks := parseNftMarks(`elements = { 198.51.100.10 : 0x0000000c, 203.0.113.4 : 7 }`)
+	if marks["198.51.100.10"] != 12 || marks["203.0.113.4"] != 7 {
+		t.Fatalf("unexpected marks: %v", marks)
+	}
+}
+
+func TestStaleTCClassMarks(t *testing.T) {
+	existing := parseTCClassMarks("class htb 1:c root\nclass htb 1:20 root\nclass htb 1:ffff root")
+	stale := staleTCClassMarks(existing, map[int]bool{12: true})
+	if len(stale) != 1 || stale[0] != 32 {
+		t.Fatalf("unexpected stale classes: %v", stale)
+	}
+}
+
 func FuzzRatelimitLoad(f *testing.F) {
 	// Add valid JSON seed
 	f.Add([]byte(`{"1.1.1.1":{"mbps":10.5,"mark":11,"applied_at":"now"}}`))

@@ -24,6 +24,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Request, HTTPException, Depends, Header
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -60,6 +61,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="WARP Relay Panel", version=API_VERSION, lifespan=lifespan)
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
 
 

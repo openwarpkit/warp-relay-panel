@@ -34,10 +34,13 @@ type Payload struct {
 	RateLimits []RateLimitEntry `json:"rate_limits"`
 }
 
-func New(url, apiKey, relayID string) *Client {
+func New(url, apiKey, relayID string, timeout time.Duration) *Client {
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
 	return &Client{
 		URL: url, APIKey: apiKey, RelayID: relayID,
-		HTTP: &http.Client{Timeout: 20 * time.Second},
+		HTTP: &http.Client{Timeout: timeout},
 	}
 }
 
@@ -48,7 +51,7 @@ func (c *Client) Configured() bool {
 // FetchWhitelistPayload - GET /api/relays/{id}/whitelist-payload.
 func (c *Client) FetchWhitelistPayload() (*Payload, error) {
 	url := fmt.Sprintf("%s/api/relays/%s/whitelist-payload", c.URL, c.RelayID)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), c.HTTP.Timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {

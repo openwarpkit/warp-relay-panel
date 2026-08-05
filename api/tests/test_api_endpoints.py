@@ -20,6 +20,23 @@ def test_health(client):
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
 
+@patch("api.index.get_sync_payload", new_callable=AsyncMock)
+def test_whitelist_payload_is_compressed(mock_payload, client):
+    mock_payload.return_value = {
+        "clients": [
+            {"ip": f"198.51.100.{index % 250 + 1}", "client_id": index}
+            for index in range(1000)
+        ],
+        "rate_limits": [],
+    }
+    response = client.get(
+        "/api/relays/1/whitelist-payload",
+        headers={"X-API-Key": "test_key", "Accept-Encoding": "gzip"},
+    )
+    assert response.status_code == 200
+    assert response.headers["content-encoding"] == "gzip"
+    assert len(response.json()["clients"]) == 1000
+
 @patch("api.index.create_client_record", new_callable=AsyncMock)
 def test_create_client(mock_create, client):
     mock_create.return_value = {"id": 1, "token": "test_token"}

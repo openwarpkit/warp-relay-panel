@@ -73,7 +73,7 @@ func main() {
 	}
 
 	// Debounced ipset persist
-	persistTrigger := makeDebouncedPersist(time.Duration(cfg.IpsetPersistDebounce*float64(time.Second)))
+	persistTrigger := makeDebouncedPersist(time.Duration(cfg.IpsetPersistDebounce * float64(time.Second)))
 
 	srv := &server.Server{
 		Cfg:            cfg,
@@ -118,7 +118,12 @@ func main() {
 	}
 
 	// Optional startup-resync with panel
-	pc := panel.New(cfg.PanelURL, cfg.PanelAPIKey, cfg.RelayID)
+	pc := panel.New(
+		cfg.PanelURL,
+		cfg.PanelAPIKey,
+		cfg.RelayID,
+		time.Duration(cfg.PanelRequestTimeout)*time.Second,
+	)
 	if pc.Configured() {
 		go startupResync(pc, rc, rl, cfg)
 		go srv.SelfSyncLoop(ctx, pc, time.Duration(cfg.SelfSyncInterval)*time.Second)
@@ -145,7 +150,7 @@ func main() {
 		log.Println("Received termination signal, shutting down HTTP...")
 		shutdownCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
 		defer c()
-		cancel() // Stop background workers
+		cancel()                          // Stop background workers
 		_ = httpSrv.Shutdown(shutdownCtx) // Unblocks ListenAndServe
 	}()
 

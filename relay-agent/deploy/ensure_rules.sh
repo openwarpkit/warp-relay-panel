@@ -31,6 +31,14 @@ else
     echo "[ensure] ipset '$IPSET_NAME' OK"
 fi
 
+if [ ! -e /etc/ipset.rules ]; then
+    ipset save > /etc/ipset.rules 2>/dev/null || touch /etc/ipset.rules
+fi
+if [ "$(id -u)" -eq 0 ]; then
+    chown nobody:nogroup /etc/ipset.rules
+    chmod 0640 /etc/ipset.rules
+fi
+
 # -- iptables NAT (WR_RULE) --
 rebuild_from_recipe() {
     if [ ! -f "$RECIPE" ]; then
