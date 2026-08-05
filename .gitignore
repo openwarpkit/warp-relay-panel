@@ -6,3 +6,7 @@ __pycache__/
 relay-agent/bin/
 relay-agent/dist/
 *.exe
+
+tools/relay_diagnostics/.env
+tools/relay_diagnostics/inventory.local.json
+tools/relay_diagnostics/reports/

@@ -1,0 +1,21 @@
+{
+  "defaults": {
+    "username": "root",
+    "port": 22,
+    "expected_limit_mbps": 10
+  },
+  "servers": [
+    {
+      "name": "min-finland",
+      "host": "relay-min-fi.example.com",
+      "type": "min",
+      "password_env": "RELAY_MIN_FI_PASSWORD"
+    },
+    {
+      "name": "full-estonia",
+      "host": "relay-full-ee.example.com",
+      "type": "full",
+      "password_env": "RELAY_FULL_EE_PASSWORD"
+    }
+  ]
+}
