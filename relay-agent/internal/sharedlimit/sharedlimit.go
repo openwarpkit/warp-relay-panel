@@ -25,6 +25,8 @@ type Config struct {
 	ScanInterval time.Duration
 	DstIP        string
 	Ports        []uint16
+	MasqueDstIP  string
+	MasquePorts  []uint16
 }
 
 type Entry struct {
@@ -34,26 +36,41 @@ type Entry struct {
 }
 
 type Manager struct {
-	cfg      Config
-	ct       *conntrackgo.Client
-	rl       *ratelimit.Manager
-	mu       sync.Mutex
-	seen     map[string]time.Time // ip -> lastSeen
-	portsSet map[uint16]bool
+	cfg     Config
+	ct      *conntrackgo.Client
+	rl      *ratelimit.Manager
+	mu      sync.Mutex
+	seen    map[string]time.Time // ip -> lastSeen
+	targets map[string]map[uint16]bool
 }
 
 func New(ct *conntrackgo.Client, rl *ratelimit.Manager, cfg Config) *Manager {
-	portsSet := make(map[uint16]bool, len(cfg.Ports))
-	for _, p := range cfg.Ports {
-		portsSet[p] = true
-	}
+	targets := make(map[string]map[uint16]bool, 2)
+	addTarget(targets, cfg.DstIP, cfg.Ports)
+	addTarget(targets, cfg.MasqueDstIP, cfg.MasquePorts)
 	return &Manager{
-		cfg:      cfg,
-		ct:       ct,
-		rl:       rl,
-		seen:     make(map[string]time.Time, 64),
-		portsSet: portsSet,
+		cfg:     cfg,
+		ct:      ct,
+		rl:      rl,
+		seen:    make(map[string]time.Time, 64),
+		targets: targets,
 	}
+}
+
+func addTarget(targets map[string]map[uint16]bool, dstIP string, ports []uint16) {
+	if dstIP == "" || len(ports) == 0 {
+		return
+	}
+	portSet := make(map[uint16]bool, len(ports))
+	for _, port := range ports {
+		portSet[port] = true
+	}
+	targets[dstIP] = portSet
+}
+
+func (m *Manager) matchesTarget(dstIP string, port uint16) bool {
+	ports, ok := m.targets[dstIP]
+	return ok && ports[port]
 }
 
 // reconcile performs one pass:
@@ -63,7 +80,7 @@ func New(ct *conntrackgo.Client, rl *ratelimit.Manager, cfg Config) *Manager {
 func (m *Manager) reconcile() {
 	// TTL = half of ScanInterval: with default 10s gives 5s cache.
 	// /shaped-handler and concurrent traffic requests will get the same snapshot.
-	active, err := m.ct.ActiveUDPClients(m.cfg.DstIP, m.portsSet)
+	active, err := m.ct.ActiveUDPClientsForTargets(m.targets)
 	if err != nil {
 		log.Printf("sharedlimit: scan error: %v", err)
 		return
@@ -138,8 +155,8 @@ func (m *Manager) applyBatch(newIPs []string, source string) {
 }
 
 func (m *Manager) Loop(ctx context.Context) {
-	log.Printf("sharedlimit: started - limit=%.1f Mbps, dst=%s, ports=%d, scan=%s, idle_grace=%s",
-		m.cfg.LimitMbps, m.cfg.DstIP, len(m.cfg.Ports),
+	log.Printf("sharedlimit: started - limit=%.1f Mbps, targets=%d, ports=%d, scan=%s, idle_grace=%s",
+		m.cfg.LimitMbps, len(m.targets), len(m.cfg.Ports)+len(m.cfg.MasquePorts),
 		m.cfg.ScanInterval, m.cfg.IdleGrace)
 
 	// Initial full sync
@@ -169,10 +186,10 @@ func (m *Manager) Loop(ctx context.Context) {
 			if ev.Flow.TupleOrig.Proto.Protocol != 17 { // protoUDP
 				continue
 			}
-			if !m.portsSet[ev.Flow.TupleOrig.Proto.DestinationPort] {
-				continue
-			}
-			if ev.Flow.TupleReply.IP.SourceAddress.String() != m.cfg.DstIP {
+			if !m.matchesTarget(
+				ev.Flow.TupleReply.IP.SourceAddress.String(),
+				ev.Flow.TupleOrig.Proto.DestinationPort,
+			) {
 				continue
 			}
 			src := ev.Flow.TupleOrig.IP.SourceAddress.String()

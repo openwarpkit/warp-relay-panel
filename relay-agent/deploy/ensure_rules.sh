@@ -7,6 +7,7 @@
 
 IPSET_NAME="${IPSET_NAME:-warp_whitelist}"
 TAG="WR_RULE"
+MASQUE_TAG="WR_MASQUE"
 RECIPE="${RECIPE:-/opt/warp-relay-agent/rules_recipe.json}"
 
 G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; N='\033[0m'
@@ -53,20 +54,23 @@ rebuild_from_recipe() {
     SRC_IP=$(jq -r '.src_ip' "$RECIPE")
     DST_IP=$(jq -r '.dst_ip' "$RECIPE")
     PORTS=$(jq -r '.ports | join(",")' "$RECIPE")
+    MASQUE_DST_IP=$(jq -r '.masque_dst_ip // "162.159.198.2"' "$RECIPE")
+    MASQUE_PORTS=$(jq -r '(.masque_ports // [443,4443,8443,8095]) | join(",")' "$RECIPE")
     IFACE=$(jq -r '.iface // empty' "$RECIPE")
 
-    if [ -z "$SRC_IP" ] || [ -z "$DST_IP" ] || [ -z "$PORTS" ]; then
+    if [ -z "$SRC_IP" ] || [ -z "$DST_IP" ] || [ -z "$PORTS" ] || \
+       [ -z "$MASQUE_DST_IP" ] || [ -z "$MASQUE_PORTS" ]; then
         echo -e "${R}[ensure] Recipe incomplete (src/dst/ports)${N}"
         return 1
     fi
 
-    echo -e "${Y}[ensure] Rebuilding NAT from recipe: src=$SRC_IP dst=$DST_IP${N}"
+    echo -e "${Y}[ensure] Rebuilding NAT from recipe: src=$SRC_IP warp=$DST_IP masque=$MASQUE_DST_IP${N}"
 
     # Clean up possible dangling rules with tag
-    iptables -t nat -S 2>/dev/null | grep "$TAG" | sed 's/^-A/-D/' | while read rule; do
+    iptables -t nat -S 2>/dev/null | grep -E "$TAG|$MASQUE_TAG" | sed 's/^-A/-D/' | while read rule; do
         iptables -t nat $rule 2>/dev/null || true
     done
-    iptables -S 2>/dev/null | grep "WR_WHITELIST" | sed 's/^-A/-D/' | while read rule; do
+    iptables -S 2>/dev/null | grep -E "WR_WHITELIST|WR_MASQUE_WHITELIST" | sed 's/^-A/-D/' | while read rule; do
         iptables $rule 2>/dev/null || true
     done
 
@@ -88,6 +92,15 @@ rebuild_from_recipe() {
             -m comment --comment "$TAG" 2>/dev/null
     done
 
+    iptables -t nat -A PREROUTING -d "$SRC_IP" -p udp \
+        -m multiport --dports "$MASQUE_PORTS" \
+        -j DNAT --to-destination "$MASQUE_DST_IP" \
+        -m comment --comment "$MASQUE_TAG" 2>/dev/null
+    iptables -t nat -A POSTROUTING -p udp -d "$MASQUE_DST_IP" \
+        -m multiport --dports "$MASQUE_PORTS" \
+        -j MASQUERADE \
+        -m comment --comment "$MASQUE_TAG" 2>/dev/null
+
     iptables -I FORWARD 1 -p udp -d "$DST_IP" \
         -m set --match-set "$IPSET_NAME" src \
         -j ACCEPT \
@@ -95,22 +108,36 @@ rebuild_from_recipe() {
     iptables -I FORWARD 2 -p udp -s "$DST_IP" \
         -j ACCEPT \
         -m comment --comment "WR_WHITELIST_IN" 2>/dev/null
+    iptables -I FORWARD 3 -p udp -d "$MASQUE_DST_IP" \
+        -m multiport --dports "$MASQUE_PORTS" \
+        -m set --match-set "$IPSET_NAME" src \
+        -j ACCEPT \
+        -m comment --comment "WR_MASQUE_WHITELIST_OUT" 2>/dev/null
+    iptables -I FORWARD 4 -p udp -s "$MASQUE_DST_IP" \
+        -m multiport --sports "$MASQUE_PORTS" \
+        -j ACCEPT \
+        -m comment --comment "WR_MASQUE_WHITELIST_IN" 2>/dev/null
     iptables -A FORWARD -p udp -d "$DST_IP" \
         -j DROP \
         -m comment --comment "WR_WHITELIST_DROP" 2>/dev/null
+    iptables -A FORWARD -p udp -d "$MASQUE_DST_IP" \
+        -j DROP \
+        -m comment --comment "WR_MASQUE_WHITELIST_DROP" 2>/dev/null
 
     netfilter-persistent save 2>/dev/null || true
     echo -e "${G}[ensure] NAT rebuilt from recipe${N}"
     return 0
 }
 
-if ! iptables -t nat -S 2>/dev/null | grep -q "$TAG"; then
+if ! iptables -t nat -S 2>/dev/null | grep -q "$TAG" || \
+   ! iptables -t nat -S 2>/dev/null | grep -q "$MASQUE_TAG"; then
     echo -e "${Y}[ensure] iptables NAT rules not found${N}"
     if command -v netfilter-persistent &>/dev/null; then
         echo -e "${Y}[ensure] Restoring via netfilter-persistent...${N}"
         netfilter-persistent reload 2>/dev/null
     fi
-    if ! iptables -t nat -S 2>/dev/null | grep -q "$TAG"; then
+    if ! iptables -t nat -S 2>/dev/null | grep -q "$TAG" || \
+       ! iptables -t nat -S 2>/dev/null | grep -q "$MASQUE_TAG"; then
         echo -e "${Y}[ensure] netfilter-persistent did not help - trying recipe${N}"
         rebuild_from_recipe || \
           echo -e "${R}[ensure] Run setup.sh for full setup${N}"
@@ -122,7 +149,10 @@ else
 fi
 
 # -- iptables FORWARD whitelist (WR_WHITELIST_OUT/IN) --
-if ! iptables -S FORWARD 2>/dev/null | grep -q "WR_WHITELIST_OUT"; then
+if ! iptables -S FORWARD 2>/dev/null | grep -q "WR_WHITELIST_OUT" || \
+   ! iptables -S FORWARD 2>/dev/null | grep -q "WR_WHITELIST_IN" || \
+   ! iptables -S FORWARD 2>/dev/null | grep -q "WR_MASQUE_WHITELIST_OUT" || \
+   ! iptables -S FORWARD 2>/dev/null | grep -q "WR_MASQUE_WHITELIST_IN"; then
     echo -e "${Y}[ensure] FORWARD whitelist rules lost - rebuilding${N}"
     rebuild_from_recipe || true
 fi

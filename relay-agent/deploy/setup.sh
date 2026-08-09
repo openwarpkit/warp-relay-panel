@@ -32,6 +32,7 @@ read -p "Relay ID (this relay's id in panel): " RELAY_ID
 
 INSTALL_DIR="/opt/warp-relay-agent"
 TAG="WR_RULE"
+MASQUE_TAG="WR_MASQUE"
 BIN_NAME="warp-relay-agent"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 GO_AGENT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"   # …/relay-agent
@@ -77,16 +78,18 @@ fi
 echo -e "${Y}[4/7] iptables NAT/FORWARD...${N}"
 SRC_IP=$(curl -4s ifconfig.me)
 DST_IP=$(getent ahostsv4 engage.cloudflareclient.com | awk '{print $1; exit}')
-echo -e "  Relay IP: ${B}${SRC_IP}${N}, CF IP: ${B}${DST_IP}${N}"
+MASQUE_DST_IP="162.159.198.2"
+echo -e "  Relay IP: ${B}${SRC_IP}${N}, WARP IP: ${B}${DST_IP}${N}, MASQUE IP: ${B}${MASQUE_DST_IP}${N}"
 
-iptables -t nat -S | grep "WR_RULE" | sed 's/^-A/-D/' | while read rule; do
+iptables -t nat -S | grep -E "WR_RULE|WR_MASQUE" | sed 's/^-A/-D/' | while read rule; do
     iptables -t nat $rule 2>/dev/null || true
 done
-iptables -S | grep "WR_RULE\|WR_WHITELIST" | sed 's/^-A/-D/' | while read rule; do
+iptables -S | grep -E "WR_WHITELIST|WR_MASQUE_WHITELIST" | sed 's/^-A/-D/' | while read rule; do
     iptables $rule 2>/dev/null || true
 done
 
 PORTS=(500 854 859 864 878 880 890 891 894 903 908 928 934 939 942 943 945 946 955 968 987 988 1002 1010 1014 1018 1070 1074 1180 1387 1701 1843 2371 2408 2506 3138 3476 3581 3854 4177 4198 4233 4500 5279 5956 7103 7152 7156 7281 7559 8319 8742 8854 8886)
+MASQUE_PORTS=(443 4443 8443 8095)
 CHUNK_SIZE=15
 for ((i=0; i<${#PORTS[@]}; i+=CHUNK_SIZE)); do
     CHUNK=("${PORTS[@]:i:CHUNK_SIZE}")
@@ -97,10 +100,22 @@ for ((i=0; i<${#PORTS[@]}; i+=CHUNK_SIZE)); do
         -j MASQUERADE -m comment --comment "${TAG}"
 done
 
+MASQUE_GROUP=$(IFS=,; echo "${MASQUE_PORTS[*]}")
+iptables -t nat -A PREROUTING -d ${SRC_IP} -p udp -m multiport --dports ${MASQUE_GROUP} \
+    -j DNAT --to-destination ${MASQUE_DST_IP} -m comment --comment "${MASQUE_TAG}"
+iptables -t nat -A POSTROUTING -p udp -d ${MASQUE_DST_IP} -m multiport --dports ${MASQUE_GROUP} \
+    -j MASQUERADE -m comment --comment "${MASQUE_TAG}"
+
 iptables -I FORWARD 1 -p udp -d ${DST_IP} -m set --match-set warp_whitelist src \
     -j ACCEPT -m comment --comment "WR_WHITELIST_OUT"
 iptables -I FORWARD 2 -p udp -s ${DST_IP} -j ACCEPT -m comment --comment "WR_WHITELIST_IN"
+iptables -I FORWARD 3 -p udp -d ${MASQUE_DST_IP} -m multiport --dports ${MASQUE_GROUP} \
+    -m set --match-set warp_whitelist src \
+    -j ACCEPT -m comment --comment "WR_MASQUE_WHITELIST_OUT"
+iptables -I FORWARD 4 -p udp -s ${MASQUE_DST_IP} -m multiport --sports ${MASQUE_GROUP} \
+    -j ACCEPT -m comment --comment "WR_MASQUE_WHITELIST_IN"
 iptables -A FORWARD -p udp -d ${DST_IP} -j DROP -m comment --comment "WR_WHITELIST_DROP"
+iptables -A FORWARD -p udp -d ${MASQUE_DST_IP} -j DROP -m comment --comment "WR_MASQUE_WHITELIST_DROP"
 
 netfilter-persistent save
 ipset save > /etc/ipset.rules 2>/dev/null || true
@@ -111,11 +126,14 @@ chmod 0640 /etc/ipset.rules
 mkdir -p ${INSTALL_DIR}
 IFACE=$(ip route | awk '/default/ {print $5; exit}')
 PORTS_JSON=$(printf ',%s' "${PORTS[@]}"); PORTS_JSON="[${PORTS_JSON:1}]"
+MASQUE_PORTS_JSON=$(printf ',%s' "${MASQUE_PORTS[@]}"); MASQUE_PORTS_JSON="[${MASQUE_PORTS_JSON:1}]"
 cat > ${INSTALL_DIR}/rules_recipe.json << EOF
 {
   "src_ip": "${SRC_IP}",
   "dst_ip": "${DST_IP}",
   "ports": ${PORTS_JSON},
+  "masque_dst_ip": "${MASQUE_DST_IP}",
+  "masque_ports": ${MASQUE_PORTS_JSON},
   "ipset_name": "warp_whitelist",
   "tag": "${TAG}",
   "iface": "${IFACE}"
@@ -188,6 +206,9 @@ IPSET_NAME=warp_whitelist
 RULES_WATCHDOG_INTERVAL=30
 METRICS_SAMPLE_INTERVAL=1
 TRAFFIC_INTERVAL=30
+
+MASQUE_DST_IP=${MASQUE_DST_IP}
+MASQUE_PORTS=${MASQUE_GROUP}
 
 PANEL_URL=${PANEL_URL}
 PANEL_API_KEY=${PANEL_API_KEY}

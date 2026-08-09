@@ -8,6 +8,7 @@
 # ═══════════════════════════════════════
 
 TAG="WR_RULE"
+MASQUE_TAG="WR_MASQUE"
 RECIPE="${RECIPE:-/opt/warp-relay-agent/rules_recipe.json}"
 
 G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; N='\033[0m'
@@ -26,18 +27,22 @@ rebuild_from_recipe() {
     SRC_IP=$(jq -r '.src_ip' "$RECIPE")
     DST_IP=$(jq -r '.dst_ip' "$RECIPE")
     PORTS=$(jq -r '.ports | join(",")' "$RECIPE")
+    MASQUE_DST_IP=$(jq -r '.masque_dst_ip // "162.159.198.2"' "$RECIPE")
+    MASQUE_PORTS=$(jq -r '(.masque_ports // [443,4443,8443,8095]) | join(",")' "$RECIPE")
 
-    if [ -z "$SRC_IP" ] || [ -z "$DST_IP" ] || [ -z "$PORTS" ]; then
+    if [ -z "$SRC_IP" ] || [ -z "$DST_IP" ] || [ -z "$PORTS" ] || \
+       [ -z "$MASQUE_DST_IP" ] || [ -z "$MASQUE_PORTS" ]; then
         echo -e "${R}[ensure-min] Recipe incomplete${N}"
         return 1
     fi
 
     echo -e "${Y}[ensure-min] Rebuilding NAT+FORWARD from recipe${N}"
 
-    iptables -t nat -S 2>/dev/null | grep "$TAG" | sed 's/^-A/-D/' | while read rule; do
+    iptables -t nat -S 2>/dev/null | grep -E "$TAG|$MASQUE_TAG" | sed 's/^-A/-D/' | while read rule; do
         iptables -t nat $rule 2>/dev/null || true
     done
-    iptables -S 2>/dev/null | grep -E "WR_FORWARD|WR_WHITELIST" | sed 's/^-A/-D/' | while read rule; do
+
+    iptables -S 2>/dev/null | grep -E "WR_FORWARD|WR_WHITELIST|WR_MASQUE_FORWARD|WR_MASQUE_WHITELIST" | sed 's/^-A/-D/' | while read rule; do
         iptables $rule 2>/dev/null || true
     done
 
@@ -67,18 +72,37 @@ rebuild_from_recipe() {
             -m comment --comment "WR_FORWARD_IN" 2>/dev/null
     done
 
+    iptables -t nat -A PREROUTING -d "$SRC_IP" -p udp \
+        -m multiport --dports "$MASQUE_PORTS" \
+        -j DNAT --to-destination "$MASQUE_DST_IP" \
+        -m comment --comment "$MASQUE_TAG" 2>/dev/null
+    iptables -t nat -A POSTROUTING -p udp -d "$MASQUE_DST_IP" \
+        -m multiport --dports "$MASQUE_PORTS" \
+        -j MASQUERADE \
+        -m comment --comment "$MASQUE_TAG" 2>/dev/null
+    iptables -A FORWARD -p udp -d "$MASQUE_DST_IP" \
+        -m multiport --dports "$MASQUE_PORTS" \
+        -j ACCEPT \
+        -m comment --comment "WR_MASQUE_FORWARD_OUT" 2>/dev/null
+    iptables -A FORWARD -p udp -s "$MASQUE_DST_IP" \
+        -m multiport --sports "$MASQUE_PORTS" \
+        -j ACCEPT \
+        -m comment --comment "WR_MASQUE_FORWARD_IN" 2>/dev/null
+
     netfilter-persistent save 2>/dev/null || true
     echo -e "${G}[ensure-min] NAT+FORWARD rebuilt${N}"
     return 0
 }
 
 # -- iptables NAT --
-if ! iptables -t nat -S 2>/dev/null | grep -q "$TAG"; then
+if ! iptables -t nat -S 2>/dev/null | grep -q "$TAG" || \
+   ! iptables -t nat -S 2>/dev/null | grep -q "$MASQUE_TAG"; then
     echo -e "${Y}[ensure-min] iptables NAT not found${N}"
     if command -v netfilter-persistent &>/dev/null; then
         netfilter-persistent reload 2>/dev/null
     fi
-    if ! iptables -t nat -S 2>/dev/null | grep -q "$TAG"; then
+    if ! iptables -t nat -S 2>/dev/null | grep -q "$TAG" || \
+       ! iptables -t nat -S 2>/dev/null | grep -q "$MASQUE_TAG"; then
         rebuild_from_recipe || \
           echo -e "${R}[ensure-min] Run setup.sh for full setup${N}"
     fi
@@ -87,7 +111,10 @@ else
 fi
 
 # -- iptables FORWARD ACCEPT --
-if ! iptables -S FORWARD 2>/dev/null | grep -q "WR_FORWARD_OUT"; then
+if ! iptables -S FORWARD 2>/dev/null | grep -q "WR_FORWARD_OUT" || \
+   ! iptables -S FORWARD 2>/dev/null | grep -q "WR_FORWARD_IN" || \
+   ! iptables -S FORWARD 2>/dev/null | grep -q "WR_MASQUE_FORWARD_OUT" || \
+   ! iptables -S FORWARD 2>/dev/null | grep -q "WR_MASQUE_FORWARD_IN"; then
     echo -e "${Y}[ensure-min] FORWARD ACCEPT rules lost - rebuilding${N}"
     rebuild_from_recipe || true
 fi

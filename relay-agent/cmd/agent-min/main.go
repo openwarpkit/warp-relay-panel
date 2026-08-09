@@ -83,7 +83,7 @@ func main() {
 		Refcount:         nil, // not needed for min-agent
 		RateLimit:        rl,
 		SkipIpset:        true,
-		ForwardTags:      []string{"WR_FORWARD_OUT", "WR_FORWARD_IN"},
+		ForwardTags:      []string{"WR_FORWARD_OUT", "WR_FORWARD_IN", "WR_MASQUE_FORWARD_OUT", "WR_MASQUE_FORWARD_IN"},
 	}
 	updater := &selfupdate.Updater{
 		RepoDir:    cfg.RepoDir,
@@ -99,6 +99,8 @@ func main() {
 		IdleGrace:    time.Duration(cfg.SharedIdleGrace) * time.Second,
 		DstIP:        dstIP,
 		Ports:        cfg.WarpPorts,
+		MasqueDstIP:  cfg.MasqueDstIP,
+		MasquePorts:  cfg.MasquePorts,
 	})
 
 	srv := &servermin.Server{
@@ -147,7 +149,8 @@ func main() {
 	addr := fmt.Sprintf(":%d", cfg.AgentPort)
 	log.Printf("WARP Relay Agent MIN v%s starting on %s", Version, addr)
 	log.Printf("Shared limit: %.1f Mbps per IP, scan=%ds, idle_grace=%ds, ports=%d",
-		cfg.SharedLimitMbps, cfg.SharedScanInterval, cfg.SharedIdleGrace, len(cfg.WarpPorts))
+		cfg.SharedLimitMbps, cfg.SharedScanInterval, cfg.SharedIdleGrace,
+		len(cfg.WarpPorts)+len(cfg.MasquePorts))
 
 	httpSrv := &http.Server{
 		Addr:              addr,
@@ -162,8 +165,8 @@ func main() {
 		log.Println("Received termination signal, shutting down HTTP...")
 		shutdownCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
 		defer c()
-		cancel() // Stop background workers
-		_ = httpSrv.Shutdown(shutdownCtx) // Unblocks ListenAndServe
+		cancel()
+		_ = httpSrv.Shutdown(shutdownCtx)
 	}()
 
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

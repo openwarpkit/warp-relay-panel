@@ -508,25 +508,28 @@ func errIsENOENT(err error) bool {
 }
 
 func (c *Client) ActiveUDPClients(dstIP string, ports map[uint16]bool) (map[string]struct{}, error) {
-	out := make(map[string]struct{}, 64)
 	targetDst, err := netip.ParseAddr(dstIP)
 	if err != nil || !targetDst.Is4() {
-		return out, fmt.Errorf("invalid or non-IPv4 dstIP: %s", dstIP)
+		return map[string]struct{}{}, fmt.Errorf("invalid or non-IPv4 dstIP: %s", dstIP)
 	}
-	targetDst4 := targetDst.As4()
+	return c.ActiveUDPClientsForTargets(map[string]map[uint16]bool{targetDst.String(): ports})
+}
+
+func (c *Client) ActiveUDPClientsForTargets(targets map[string]map[uint16]bool) (map[string]struct{}, error) {
+	out := make(map[string]struct{}, 64)
+	if len(targets) == 0 {
+		return out, nil
+	}
 
 	for i := 0; i < NumShards; i++ {
 		shard := c.shards[i]
 		shard.mu.RLock()
 		for _, f := range shard.flows {
-			if !ports[f.TupleOrig.Proto.DestinationPort] {
-				continue
-			}
-
 			if !f.TupleReply.IP.SourceAddress.Is4() {
 				continue
 			}
-			if f.TupleReply.IP.SourceAddress.As4() != targetDst4 {
+			ports, ok := targets[f.TupleReply.IP.SourceAddress.String()]
+			if !ok || !ports[f.TupleOrig.Proto.DestinationPort] {
 				continue
 			}
 			src4 := f.TupleOrig.IP.SourceAddress.As4()

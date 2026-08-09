@@ -86,6 +86,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			"idle_grace":    int(cfg.IdleGrace.Seconds()),
 			"dst_ip":        cfg.DstIP,
 			"warp_ports":    len(cfg.Ports),
+			"warp": map[string]interface{}{
+				"dst_ip": cfg.DstIP,
+				"ports":  cfg.Ports,
+			},
+			"masque": map[string]interface{}{
+				"dst_ip": cfg.MasqueDstIP,
+				"ports":  cfg.MasquePorts,
+			},
 		},
 		"conntrack": fmt.Sprintf("%s/%s", ctCur, ctMax),
 		"load":      loadVal,
@@ -181,10 +189,19 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"agent_type": "min",
 		"online":     online,
 		"sessions":   map[string]int{"assured": stats.Assured, "unreplied": stats.Unreplied},
+		"protocols":  map[string]int{"warp": countPorts(stats.TopPorts, s.Cfg.WarpPorts), "masque": countPorts(stats.TopPorts, s.Cfg.MasquePorts)},
 		"top_ports":  topPorts,
 		"network":    speed,
 		"traffic":    s.Traffic.GetAll(noRefcount, noClients),
 	})
+}
+
+func countPorts(counts map[uint16]int, ports []uint16) int {
+	total := 0
+	for _, port := range ports {
+		total += counts[port]
+	}
+	return total
 }
 
 func readSysfsInt(path string) int64 {

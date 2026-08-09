@@ -60,6 +60,19 @@ func TestParsePorts(t *testing.T) {
 	}
 }
 
+func TestMasquePortsDoNotOverlapWarp(t *testing.T) {
+	ports := excludePorts([]uint16{443, 500, 443, 4443, 1701, 8443, 8095, 4500}, DefaultWarpPorts)
+	want := []uint16{443, 4443, 8443, 8095}
+	if len(ports) != len(want) {
+		t.Fatalf("unexpected MASQUE ports: %v", ports)
+	}
+	for i := range want {
+		if ports[i] != want[i] {
+			t.Fatalf("unexpected MASQUE ports: %v", ports)
+		}
+	}
+}
+
 func TestLoad(t *testing.T) {
 	_ = os.Setenv("AGENT_SECRET", "supersecret")
 	_ = os.Setenv("PANEL_REQUEST_TIMEOUT", "90")

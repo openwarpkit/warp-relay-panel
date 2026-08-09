@@ -54,12 +54,12 @@ func (w *Watchdog) check() Checks {
 	}
 
 	_, natOut, _ := shell.Run("iptables -t nat -S 2>/dev/null", 5*time.Second)
-	c.NAT = strings.Contains(natOut, "WR_RULE")
+	c.NAT = strings.Contains(natOut, "WR_RULE") && strings.Contains(natOut, "WR_MASQUE")
 
 	_, fwdOut, _ := shell.Run("iptables -S FORWARD 2>/dev/null", 5*time.Second)
 	tags := w.ForwardTags
 	if len(tags) == 0 {
-		tags = []string{"WR_WHITELIST_OUT", "WR_WHITELIST_IN"}
+		tags = []string{"WR_WHITELIST_OUT", "WR_WHITELIST_IN", "WR_MASQUE_WHITELIST_OUT", "WR_MASQUE_WHITELIST_IN"}
 	}
 	c.Forward = true
 	for _, t := range tags {

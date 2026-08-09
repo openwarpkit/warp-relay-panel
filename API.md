@@ -1116,11 +1116,14 @@ Health-check всех relay'ев параллельно.
     ]
   },
   "sessions": { "assured": 80, "unreplied": 5 },
+  "protocols": { "warp": 60, "masque": 20 },
   "top_ports": { "443": 1500, "500": 300 },
   "network": { "interface": "eth0", "rx_bytes_total": 12345, "tx_bytes_total": 6789 },
   "traffic": { ...как у /traffic... }
 }
 ```
+
+`protocols.masque` считает UDP-сессии на входящих портах `443`, `4443`, `8443`, `8095`; `protocols.warp` — сессии на портах обычного WARP.
 
 ---
 

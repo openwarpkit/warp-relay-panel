@@ -62,7 +62,9 @@ type Config struct {
 	WarpDstIP          string   // "" = auto-detect (engage.cloudflareclient.com)
 	WarpPorts          []uint16 // default - embed
 	WarpDstHostname    string   // auto-detect source (default engage.cloudflareclient.com)
-	MinTrafficMode     string   // min-agent: perip | aggregate | off (default aggregate)
+	MasqueDstIP        string
+	MasquePorts        []uint16
+	MinTrafficMode     string // min-agent: perip | aggregate | off (default aggregate)
 }
 
 func Load() Config {
@@ -93,8 +95,11 @@ func Load() Config {
 		WarpDstIP:          env("WARP_DST_IP", ""),
 		WarpDstHostname:    env("WARP_DST_HOSTNAME", "engage.cloudflareclient.com"),
 		WarpPorts:          parsePorts(env("WARP_PORTS", "")),
+		MasqueDstIP:        env("MASQUE_DST_IP", "162.159.198.2"),
+		MasquePorts:        parsePortsWithDefault(env("MASQUE_PORTS", ""), DefaultMasquePorts),
 		MinTrafficMode:     env("MIN_TRAFFIC_MODE", "aggregate"),
 	}
+	cfg.MasquePorts = excludePorts(cfg.MasquePorts, cfg.WarpPorts)
 	if cfg.AgentSecret == "change-me" {
 		log.Fatalf("FATAL: Using default AGENT_SECRET ('change-me'). This is insecure and not allowed!")
 	}
@@ -110,10 +115,16 @@ var DefaultWarpPorts = []uint16{
 	8742, 8854, 8886,
 }
 
+var DefaultMasquePorts = []uint16{443, 4443, 8443, 8095}
+
 // parsePorts: "500,854,..." -> []uint16. Empty string -> DefaultWarpPorts.
 func parsePorts(s string) []uint16 {
+	return parsePortsWithDefault(s, DefaultWarpPorts)
+}
+
+func parsePortsWithDefault(s string, defaults []uint16) []uint16 {
 	if s == "" {
-		return DefaultWarpPorts
+		return append([]uint16(nil), defaults...)
 	}
 	out := []uint16{}
 	for _, p := range strings.Split(s, ",") {
@@ -128,7 +139,27 @@ func parsePorts(s string) []uint16 {
 		out = append(out, uint16(n))
 	}
 	if len(out) == 0 {
-		return DefaultWarpPorts
+		return append([]uint16(nil), defaults...)
+	}
+	return out
+}
+
+func excludePorts(ports, occupied []uint16) []uint16 {
+	used := make(map[uint16]struct{}, len(occupied))
+	for _, port := range occupied {
+		used[port] = struct{}{}
+	}
+	out := make([]uint16, 0, len(ports))
+	seen := make(map[uint16]struct{}, len(ports))
+	for _, port := range ports {
+		if _, exists := used[port]; exists {
+			continue
+		}
+		if _, exists := seen[port]; exists {
+			continue
+		}
+		seen[port] = struct{}{}
+		out = append(out, port)
 	}
 	return out
 }

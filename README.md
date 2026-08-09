@@ -76,6 +76,8 @@ sudo bash /opt/warp-relay-panel/relay-agent/deploy/setup-min.sh    # min
 
 Скрипт спросит `Agent secret` (тот же `AGENT_SECRET`, что в конфигурации панели) и порт (default 7580). Скачает свежий бинарь из [releases/latest](https://github.com/openwarpkit/warp-relay-panel/releases/latest), настроит iptables/ipset/tc, заведёт systemd unit, включит автовосстановление правил при перезагрузке.
 
+Relay одновременно обслуживает обычный WARP и MASQUE. UDP-порты `443`, `4443`, `8443`, `8095` направляются на MASQUE endpoint `162.159.198.2`; остальные WARP-порты — на обычный endpoint. Порты `500`, `1701`, `4500` остаются за обычным WARP.
+
 Override owner/repo для форка: `AGENT_RELEASE_REPO=user/repo bash setup.sh`.
 
 ### 3. Добавить relay в панель

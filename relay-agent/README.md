@@ -33,6 +33,8 @@ sudo bash deploy/setup-min.sh    # min
 
 Скрипт ставит пакеты, настраивает iptables/ipset/tc, скачивает свежий бинарь из `openwarpkit/warp-relay-panel/releases/latest`, создаёт systemd unit. Override owner/repo: `AGENT_RELEASE_REPO=user/repo bash setup.sh`.
 
+Обычный WARP и MASQUE работают одновременно. Входящие UDP-порты `443`, `4443`, `8443`, `8095` считаются MASQUE и направляются на `162.159.198.2`. Порты `500`, `1701`, `4500` уже заняты обычным WARP и в MASQUE-набор не входят. `/stats` возвращает счётчики сессий по протоколам в поле `protocols`.
+
 ## Самообновление
 
 ```bash

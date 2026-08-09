@@ -178,10 +178,19 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]interface{}{
 		"online":    online,
 		"sessions":  map[string]int{"assured": stats.Assured, "unreplied": stats.Unreplied},
+		"protocols": map[string]int{"warp": countPorts(stats.TopPorts, s.Cfg.WarpPorts), "masque": countPorts(stats.TopPorts, s.Cfg.MasquePorts)},
 		"top_ports": topPorts,
 		"network":   speed,
 		"traffic":   s.Traffic.GetAll(s.Refcount.Count, s.Refcount.ClientsFor),
 	})
+}
+
+func countPorts(counts map[uint16]int, ports []uint16) int {
+	total := 0
+	for _, port := range ports {
+		total += counts[port]
+	}
+	return total
 }
 
 func readSysfsInt(path string) int64 {

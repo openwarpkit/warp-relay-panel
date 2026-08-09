@@ -12,12 +12,24 @@ func TestSharedLimitBasic(t *testing.T) {
 		ScanInterval: 5 * time.Second,
 		DstIP:        "1.1.1.1",
 		Ports:        []uint16{500, 1000},
+		MasqueDstIP:  "162.159.198.2",
+		MasquePorts:  []uint16{443, 4443},
 	}
 
 	m := &Manager{
-		cfg:      cfg,
-		seen:     make(map[string]time.Time),
-		portsSet: map[uint16]bool{500: true, 1000: true},
+		cfg:  cfg,
+		seen: make(map[string]time.Time),
+		targets: map[string]map[uint16]bool{
+			"1.1.1.1":       {500: true, 1000: true},
+			"162.159.198.2": {443: true, 4443: true},
+		},
+	}
+
+	if !m.matchesTarget("162.159.198.2", 443) {
+		t.Fatal("expected MASQUE target to match")
+	}
+	if m.matchesTarget("1.1.1.1", 443) {
+		t.Fatal("MASQUE port must not match WARP target")
 	}
 
 	if m.Cfg().LimitMbps != 25.0 {
