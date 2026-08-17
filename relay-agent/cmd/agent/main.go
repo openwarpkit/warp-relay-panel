@@ -29,7 +29,7 @@ import (
 )
 
 // Version is set via -ldflags during build.
-var Version = "2.2.10"
+var Version = "2.2.17"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
@@ -42,7 +42,11 @@ func main() {
 	// Persistent netlink connection for conntrack - opened lazily,
 	// reconnects on ENOBUFS.
 	ct := conntrackgo.New()
-	defer func() { _ = ct.Close() }()
+	defer func() {
+		if err := ct.Close(); err != nil {
+			log.Printf("conntrack shutdown: %v", err)
+		}
+	}()
 
 	rc := refcount.New(filepath.Join(cfg.DataDir, "refcount.json"))
 	tm := traffic.New(
@@ -71,6 +75,7 @@ func main() {
 		Version:    Version,
 		BinaryName: "warp-relay-agent",
 	}
+	updater.FinalizePending()
 
 	// Debounced ipset persist
 	persistTrigger := makeDebouncedPersist(time.Duration(cfg.IpsetPersistDebounce * float64(time.Second)))

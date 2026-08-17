@@ -28,7 +28,7 @@ import (
 	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/watchdog"
 )
 
-var Version = "2.2.10-min"
+var Version = "2.2.17-min"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
@@ -46,7 +46,11 @@ func main() {
 	log.Printf("WARP DST_IP = %s", dstIP)
 
 	ct := conntrackgo.New()
-	defer func() { _ = ct.Close() }()
+	defer func() {
+		if err := ct.Close(); err != nil {
+			log.Printf("conntrack shutdown: %v", err)
+		}
+	}()
 
 	trafInterval := time.Duration(cfg.TrafficInterval) * time.Second
 	if cfg.MinTrafficMode == traffic.ModeAggregate {
@@ -92,6 +96,7 @@ func main() {
 		Version:    Version,
 		BinaryName: "warp-relay-agent-min",
 	}
+	updater.FinalizePending()
 
 	sl := sharedlimit.New(ct, rl, sharedlimit.Config{
 		LimitMbps:    cfg.SharedLimitMbps,

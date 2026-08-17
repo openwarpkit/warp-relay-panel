@@ -1,8 +1,11 @@
 package conntrackgo
 
 import (
+	"strings"
+	"sync"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestFlowKeyHash(t *testing.T) {
@@ -48,4 +51,31 @@ func TestErrIsENOENT(t *testing.T) {
 	if errIsENOENT(nil) {
 		t.Errorf("expected false for nil")
 	}
+}
+
+func TestWaitForWorkersCompletes(t *testing.T) {
+	c := &Client{}
+	if err := c.waitForWorkers(time.Second); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWaitForWorkersTimeout(t *testing.T) {
+	c := &Client{}
+	var release sync.Once
+	blocked := make(chan struct{})
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		<-blocked
+	}()
+	t.Cleanup(func() {
+		release.Do(func() { close(blocked) })
+	})
+
+	err := c.waitForWorkers(20 * time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "did not stop") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	release.Do(func() { close(blocked) })
 }

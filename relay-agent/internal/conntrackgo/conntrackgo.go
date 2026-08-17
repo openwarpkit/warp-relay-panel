@@ -19,6 +19,8 @@ import (
 const protoUDP = 17
 const NumShards = 256
 
+const workerShutdownTimeout = 10 * time.Second
+
 // UDPFlow is the minimal set for traffic accounting.
 type UDPFlow struct {
 	SrcIP      string
@@ -115,8 +117,52 @@ func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
 		close(c.stopListen)
 	})
-	c.wg.Wait()
-	return nil
+	return c.waitForWorkers(workerShutdownTimeout)
+}
+
+func (c *Client) waitForWorkers(timeout time.Duration) error {
+	done := make(chan struct{})
+	go func() {
+		c.wg.Wait()
+		close(done)
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-timer.C:
+		return fmt.Errorf("conntrack workers did not stop within %s", timeout)
+	}
+}
+
+func (c *Client) waitRetry(delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-c.stopListen:
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func closeListener(conn *conntrack.Conn, evChan <-chan conntrack.Event, errChan <-chan error) {
+	done := make(chan struct{})
+	go func() {
+		_ = conn.Close()
+		close(done)
+	}()
+
+	for {
+		select {
+		case <-done:
+			return
+		case <-evChan:
+		case <-errChan:
+		}
+	}
 }
 
 func (c *Client) listenWorker() {
@@ -131,7 +177,9 @@ func (c *Client) listenWorker() {
 		conn, err := conntrack.Dial(nil)
 		if err != nil {
 			log.Printf("conntrack listenWorker: dial failed: %v", err)
-			time.Sleep(5 * time.Second)
+			if !c.waitRetry(5 * time.Second) {
+				return
+			}
 			continue
 		}
 
@@ -173,7 +221,9 @@ func (c *Client) listenWorker() {
 		if listenErr != nil {
 			log.Printf("conntrack listenWorker: listen failed: %v", listenErr)
 			_ = conn.Close()
-			time.Sleep(5 * time.Second)
+			if !c.waitRetry(5 * time.Second) {
+				return
+			}
 			continue
 		}
 
@@ -181,7 +231,7 @@ func (c *Client) listenWorker() {
 		for {
 			select {
 			case <-c.stopListen:
-				_ = conn.Close()
+				closeListener(conn, evChan, errChan)
 				return
 			case ev, ok := <-evChan:
 				if !ok {
@@ -222,8 +272,10 @@ func (c *Client) listenWorker() {
 			}
 		}
 
-		_ = conn.Close()
-		time.Sleep(1 * time.Second)
+		closeListener(conn, evChan, errChan)
+		if !c.waitRetry(time.Second) {
+			return
+		}
 	}
 }
 

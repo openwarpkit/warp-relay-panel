@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -22,9 +21,15 @@ import (
 // Override via env AGENT_RELEASE_REPO=user/repo.
 const DefaultReleaseRepo = "openwarpkit/warp-relay-panel"
 
+const (
+	restartDelay   = 2 * time.Second
+	forceExitDelay = 20 * time.Second
+)
+
 type Status struct {
 	OK         bool          `json:"ok"`
 	NoChanges  bool          `json:"no_changes,omitempty"`
+	Restarting bool          `json:"restarting,omitempty"`
 	Error      string        `json:"error,omitempty"`
 	Details    string        `json:"details,omitempty"`
 	OldVersion string        `json:"old_version,omitempty"`
@@ -74,6 +79,18 @@ func (u *Updater) binaryName() string {
 	return "warp-relay-agent"
 }
 
+func (u *Updater) releaseVersion() string {
+	return strings.TrimSuffix(u.Version, "-min")
+}
+
+func signalSelf() error {
+	process, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		return err
+	}
+	return process.Signal(os.Interrupt)
+}
+
 func (u *Updater) saveStatus(s Status) {
 	if err := os.MkdirAll(filepath.Dir(u.StatusPath), 0o750); err != nil {
 		log.Printf("selfupdate: mkdir error: %v", err)
@@ -110,6 +127,33 @@ func (u *Updater) saveStatus(s Status) {
 		_ = os.Remove(tmpPath)
 		log.Printf("selfupdate: saveStatus error (rename): %v", err)
 	}
+}
+
+func (u *Updater) FinalizePending() {
+	data, err := os.ReadFile(u.StatusPath)
+	if err != nil {
+		return
+	}
+
+	var status Status
+	if err := json.Unmarshal(data, &status); err != nil || !status.Restarting {
+		return
+	}
+
+	status.Restarting = false
+	status.FinishedAt = nowISO()
+	if status.NewVersion == u.releaseVersion() {
+		status.OK = true
+		status.Error = ""
+		status.Details = ""
+		log.Printf("Update verified after restart: %s", status.NewVersion)
+	} else {
+		status.OK = false
+		status.Error = "restart verification failed"
+		status.Details = fmt.Sprintf("expected %s, running %s", status.NewVersion, u.releaseVersion())
+		log.Printf("Update restart verification failed: %s", status.Details)
+	}
+	u.saveStatus(status)
 }
 
 // fetchLatestRelease - pulls the latest release from GitHub API,
@@ -255,7 +299,7 @@ func (u *Updater) Run() {
 
 	// 3. If tag matches current version - skip download.
 	tagVersion := strings.TrimPrefix(tag, "agent-v")
-	if tagVersion == u.Version {
+	if tagVersion == u.releaseVersion() {
 		u.saveStatus(Status{
 			OK: true, NoChanges: true,
 			OldVersion: u.Version,
@@ -310,19 +354,25 @@ func (u *Updater) Run() {
 	)
 
 	u.saveStatus(Status{
-		OK:         true,
+		OK:         false,
+		Restarting: true,
 		OldVersion: u.Version,
 		NewVersion: tagVersion,
 		ReleaseTag: tag,
 		BinaryName: u.binaryName(),
 		StartedAt:  startedAt,
-		FinishedAt: nowISO(),
 	})
-	log.Printf("Update complete: %s -> %s, restarting via SIGTERM...", u.Version, tag)
+	log.Printf("Update complete: %s -> %s, restarting...", u.Version, tag)
 
-	// 7. SIGTERM (delayed, to allow returning a response).
-	time.AfterFunc(2*time.Second, func() {
-		_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+	time.AfterFunc(restartDelay, func() {
+		time.AfterFunc(forceExitDelay, func() {
+			log.Printf("Graceful shutdown timed out after %s, forcing exit", forceExitDelay)
+			os.Exit(1)
+		})
+		if err := signalSelf(); err != nil {
+			log.Printf("termination signal failed: %v", err)
+			os.Exit(1)
+		}
 	})
 }
 
