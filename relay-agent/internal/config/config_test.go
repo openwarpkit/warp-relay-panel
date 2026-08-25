@@ -87,7 +87,7 @@ func TestLoad(t *testing.T) {
 
 func TestLoadAdaptiveSharedLimitDefaults(t *testing.T) {
 	t.Setenv("AGENT_SECRET", "supersecret")
-	t.Setenv("SHARED_LIMIT_MBPS", "5")
+	t.Setenv("SHARED_LIMIT_MBPS", "10")
 	t.Setenv("SHARED_MIN_LIMIT_MBPS", "9")
 	t.Setenv("SHARED_MONTHLY_BUDGET_TB", "30")
 	t.Setenv("SHARED_BUDGET_DIRECTION", "invalid")

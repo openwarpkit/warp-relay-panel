@@ -98,6 +98,9 @@ func Load() Config {
 	if cfg.SharedLimitMbps <= 0 {
 		cfg.SharedLimitMbps = 5.0
 	}
+	if cfg.SharedLimitMbps > 5.0 {
+		cfg.SharedLimitMbps = 5.0
+	}
 	if cfg.SharedMinLimitMbps <= 0 {
 		cfg.SharedMinLimitMbps = 1.0
 	}
