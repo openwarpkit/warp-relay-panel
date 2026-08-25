@@ -71,6 +71,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	online := s.onlineClients()
 	mtx := s.Metrics.Snapshot()
 	cfg := s.SharedLimit.Cfg()
+	limitStatus := s.SharedLimit.Status()
 
 	resp := map[string]interface{}{
 		"status":         "ok",
@@ -81,9 +82,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"online_clients": online["count"],
 		"shaped_clients": s.SharedLimit.Count(),
 		"shared_limit": map[string]interface{}{
-			"mbps":          cfg.LimitMbps,
+			"mbps":          limitStatus.CurrentLimitMbps,
+			"default_mbps":  cfg.LimitMbps,
+			"min_mbps":      cfg.MinLimitMbps,
 			"scan_interval": int(cfg.ScanInterval.Seconds()),
 			"idle_grace":    int(cfg.IdleGrace.Seconds()),
+			"budget":        limitStatus,
 			"dst_ip":        cfg.DstIP,
 			"warp_ports":    len(cfg.Ports),
 			"warp": map[string]interface{}{

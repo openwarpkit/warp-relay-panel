@@ -7,7 +7,8 @@ import (
 
 func TestSharedLimitBasic(t *testing.T) {
 	cfg := Config{
-		LimitMbps:    25.0,
+		LimitMbps:    5.0,
+		MinLimitMbps: 1.0,
 		IdleGrace:    10 * time.Second,
 		ScanInterval: 5 * time.Second,
 		DstIP:        "1.1.1.1",
@@ -32,8 +33,8 @@ func TestSharedLimitBasic(t *testing.T) {
 		t.Fatal("MASQUE port must not match WARP target")
 	}
 
-	if m.Cfg().LimitMbps != 25.0 {
-		t.Errorf("expected 25.0, got %f", m.Cfg().LimitMbps)
+	if m.Cfg().LimitMbps != 5.0 {
+		t.Errorf("expected 5.0, got %f", m.Cfg().LimitMbps)
 	}
 
 	if m.Count() != 0 {

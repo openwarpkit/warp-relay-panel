@@ -45,26 +45,24 @@ type Config struct {
 	RulesWatchdogInterval int
 	MetricsSampleInterval int
 	IpsetPersistDebounce  float64
-	SelfSyncInterval      int // full-agent: periodic panel reconcile, sec (0 = off)
-
-	PanelURL            string
-	PanelAPIKey         string
-	RelayID             string
-	PanelRequestTimeout int
 
 	RateLimitMarkMin int
 	RateLimitMarkMax int
 
 	// Min-agent (shared limit) - ignored by full-agent.
-	SharedLimitMbps    float64
-	SharedScanInterval int      // sec
-	SharedIdleGrace    int      // sec
-	WarpDstIP          string   // "" = auto-detect (engage.cloudflareclient.com)
-	WarpPorts          []uint16 // default - embed
-	WarpDstHostname    string   // auto-detect source (default engage.cloudflareclient.com)
-	MasqueDstIP        string
-	MasquePorts        []uint16
-	MinTrafficMode     string // min-agent: perip | aggregate | off (default aggregate)
+	SharedLimitMbps      float64
+	SharedMinLimitMbps   float64
+	SharedScanInterval   int // sec
+	SharedIdleGrace      int // sec
+	SharedBudgetTB       float64
+	SharedBudgetMode     string
+	SharedBudgetInterval int
+	WarpDstIP            string   // "" = auto-detect (engage.cloudflareclient.com)
+	WarpPorts            []uint16 // default - embed
+	WarpDstHostname      string   // auto-detect source (default engage.cloudflareclient.com)
+	MasqueDstIP          string
+	MasquePorts          []uint16
+	MinTrafficMode       string // min-agent: perip | aggregate | off (default aggregate)
 }
 
 func Load() Config {
@@ -78,28 +76,40 @@ func Load() Config {
 		RulesWatchdogInterval: envInt("RULES_WATCHDOG_INTERVAL", 30),
 		MetricsSampleInterval: envInt("METRICS_SAMPLE_INTERVAL", 1),
 		IpsetPersistDebounce:  envFloat("IPSET_PERSIST_DEBOUNCE", 3.0),
-		SelfSyncInterval:      envInt("SELF_SYNC_INTERVAL", 600),
-
-		PanelURL:            strings.TrimRight(env("PANEL_URL", ""), "/"),
-		PanelAPIKey:         env("PANEL_API_KEY", ""),
-		RelayID:             env("RELAY_ID", ""),
-		PanelRequestTimeout: envInt("PANEL_REQUEST_TIMEOUT", 60),
-
 		// Pool 1..65000; HTB default class is 1:ffff (65535) — outside pool.
 		RateLimitMarkMin: 1,
 		RateLimitMarkMax: 65000,
 
-		SharedLimitMbps:    envFloat("SHARED_LIMIT_MBPS", 25.0),
-		SharedScanInterval: envInt("SHARED_SCAN_INTERVAL", 30),
-		SharedIdleGrace:    envInt("SHARED_IDLE_GRACE", 60),
-		WarpDstIP:          env("WARP_DST_IP", ""),
-		WarpDstHostname:    env("WARP_DST_HOSTNAME", "engage.cloudflareclient.com"),
-		WarpPorts:          parsePorts(env("WARP_PORTS", "")),
-		MasqueDstIP:        env("MASQUE_DST_IP", "162.159.198.2"),
-		MasquePorts:        parsePortsWithDefault(env("MASQUE_PORTS", ""), DefaultMasquePorts),
-		MinTrafficMode:     env("MIN_TRAFFIC_MODE", "aggregate"),
+		SharedLimitMbps:      envFloat("SHARED_LIMIT_MBPS", 5.0),
+		SharedMinLimitMbps:   envFloat("SHARED_MIN_LIMIT_MBPS", 1.0),
+		SharedScanInterval:   envInt("SHARED_SCAN_INTERVAL", 30),
+		SharedIdleGrace:      envInt("SHARED_IDLE_GRACE", 60),
+		SharedBudgetTB:       envFloat("SHARED_MONTHLY_BUDGET_TB", 30.0),
+		SharedBudgetMode:     strings.ToLower(env("SHARED_BUDGET_DIRECTION", "tx")),
+		SharedBudgetInterval: envInt("SHARED_BUDGET_INTERVAL", 300),
+		WarpDstIP:            env("WARP_DST_IP", ""),
+		WarpDstHostname:      env("WARP_DST_HOSTNAME", "engage.cloudflareclient.com"),
+		WarpPorts:            parsePorts(env("WARP_PORTS", "")),
+		MasqueDstIP:          env("MASQUE_DST_IP", "162.159.198.2"),
+		MasquePorts:          parsePortsWithDefault(env("MASQUE_PORTS", ""), DefaultMasquePorts),
+		MinTrafficMode:       env("MIN_TRAFFIC_MODE", "aggregate"),
 	}
 	cfg.MasquePorts = excludePorts(cfg.MasquePorts, cfg.WarpPorts)
+	if cfg.SharedLimitMbps <= 0 {
+		cfg.SharedLimitMbps = 5.0
+	}
+	if cfg.SharedMinLimitMbps <= 0 {
+		cfg.SharedMinLimitMbps = 1.0
+	}
+	if cfg.SharedMinLimitMbps > cfg.SharedLimitMbps {
+		cfg.SharedMinLimitMbps = cfg.SharedLimitMbps
+	}
+	if cfg.SharedBudgetMode != "tx" && cfg.SharedBudgetMode != "rx" && cfg.SharedBudgetMode != "total" {
+		cfg.SharedBudgetMode = "tx"
+	}
+	if cfg.SharedBudgetInterval < 60 {
+		cfg.SharedBudgetInterval = 60
+	}
 	if cfg.AgentSecret == "change-me" {
 		log.Fatalf("FATAL: Using default AGENT_SECRET ('change-me'). This is insecure and not allowed!")
 	}

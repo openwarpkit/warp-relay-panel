@@ -7,7 +7,7 @@ Native Go-агент. Тот же HTTP API что был у Python-предше�
 | Бинарь | Назначение |
 |---|---|
 | `warp-relay-agent` (full) | Whitelist через ipset + per-IP rate-limit по запросам панели |
-| `warp-relay-agent-min` (min) | Без whitelist — пропускает всех; автоматический симметричный лимит N Mbps (default 25) на каждый активный IP |
+| `warp-relay-agent-min` (min) | Без whitelist — пропускает всех; адаптивный симметричный лимит 5–1 Mbps на активный IP с месячным TX-бюджетом 30 TB |
 
 В панели регистрируется `agent_type:"full"|"min"`. Панель сама не шлёт whitelist/rate-limit команды на min-агента — фильтр по `agent_type='full'` в `db.get_active_relays()`.
 
@@ -69,7 +69,7 @@ make fmt vet            # форматирование и проверки
 
 ```
 cmd/
-├── agent/main.go            — full: debounced ipset persist, startup-resync
+├── agent/main.go            — full: debounced ipset persist, local state restore
 └── agent-min/main.go        — min: sharedlimit reconcile loop
 internal/
 ├── config/                  — env loader (общий, +новые env для min)
@@ -83,7 +83,6 @@ internal/
 ├── metrics/                 — gopsutil sampler
 ├── watchdog/                — self-heal loop (SkipIpset для min)
 ├── selfupdate/              — git pull + curl бинаря из release + systemctl restart
-├── panel/                   — HTTP-клиент к панели (только full)
 ├── server/                  — chi router для full-агента
 └── servermin/               — chi router для min-агента (stub'ами whitelist/rate-limit)
 ```

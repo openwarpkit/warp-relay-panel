@@ -7,3 +7,4 @@ relay-agent/bin/
 relay-agent/dist/
 *.exe
 tools/
+/infrastructure.local.json

@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/adaptivelimit"
 	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/config"
 	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/conntrackgo"
 	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/metrics"
@@ -28,7 +29,7 @@ import (
 	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/watchdog"
 )
 
-var Version = "2.2.17-min"
+var Version = "2.2.18-min"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
@@ -55,6 +56,14 @@ func main() {
 	trafInterval := time.Duration(cfg.TrafficInterval) * time.Second
 	if cfg.MinTrafficMode == traffic.ModeAggregate {
 		trafInterval = 10 * time.Minute
+		budgetInterval := time.Duration(cfg.SharedBudgetInterval) * time.Second
+		budgetSampleInterval := budgetInterval / 2
+		if budgetSampleInterval < 30*time.Second {
+			budgetSampleInterval = 30 * time.Second
+		}
+		if cfg.SharedBudgetTB > 0 && budgetSampleInterval < trafInterval {
+			trafInterval = budgetSampleInterval
+		}
 	}
 	tm := traffic.New(
 		filepath.Join(cfg.DataDir, "traffic.json"),
@@ -99,13 +108,26 @@ func main() {
 	updater.FinalizePending()
 
 	sl := sharedlimit.New(ct, rl, sharedlimit.Config{
-		LimitMbps:    cfg.SharedLimitMbps,
-		ScanInterval: time.Duration(cfg.SharedScanInterval) * time.Second,
-		IdleGrace:    time.Duration(cfg.SharedIdleGrace) * time.Second,
-		DstIP:        dstIP,
-		Ports:        cfg.WarpPorts,
-		MasqueDstIP:  cfg.MasqueDstIP,
-		MasquePorts:  cfg.MasquePorts,
+		LimitMbps:       cfg.SharedLimitMbps,
+		MinLimitMbps:    cfg.SharedMinLimitMbps,
+		ScanInterval:    time.Duration(cfg.SharedScanInterval) * time.Second,
+		IdleGrace:       time.Duration(cfg.SharedIdleGrace) * time.Second,
+		MonthlyBudgetTB: cfg.SharedBudgetTB,
+		BudgetDirection: cfg.SharedBudgetMode,
+		BudgetInterval:  time.Duration(cfg.SharedBudgetInterval) * time.Second,
+		Usage: func() adaptivelimit.Usage {
+			totals := tm.GetAll(
+				func(string) int { return 0 },
+				func(string) []int64 { return nil },
+			)
+			return adaptivelimit.Usage{
+				Month: totals.Month, TXBytes: totals.TotalTXBytes, RXBytes: totals.TotalRXBytes,
+			}
+		},
+		DstIP:       dstIP,
+		Ports:       cfg.WarpPorts,
+		MasqueDstIP: cfg.MasqueDstIP,
+		MasquePorts: cfg.MasquePorts,
 	})
 
 	srv := &servermin.Server{
@@ -153,8 +175,9 @@ func main() {
 
 	addr := fmt.Sprintf(":%d", cfg.AgentPort)
 	log.Printf("WARP Relay Agent MIN v%s starting on %s", Version, addr)
-	log.Printf("Shared limit: %.1f Mbps per IP, scan=%ds, idle_grace=%ds, ports=%d",
-		cfg.SharedLimitMbps, cfg.SharedScanInterval, cfg.SharedIdleGrace,
+	log.Printf("Shared limit: %.1f..%.1f Mbps per IP, budget=%.1f TB/%s, scan=%ds, idle_grace=%ds, ports=%d",
+		cfg.SharedMinLimitMbps, cfg.SharedLimitMbps, cfg.SharedBudgetTB, cfg.SharedBudgetMode,
+		cfg.SharedScanInterval, cfg.SharedIdleGrace,
 		len(cfg.WarpPorts)+len(cfg.MasquePorts))
 
 	httpSrv := &http.Server{

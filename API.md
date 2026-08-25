@@ -1,4 +1,4 @@
-# WARP Relay Panel — API Reference (v1.3.0)
+# WARP Relay Panel — API Reference (v1.4.0)
 
 Документ для интеграции с панелью из внешних проектов (бот, фронтенд, скрипты).
 
@@ -34,7 +34,7 @@ Healthcheck панели.
 
 **Response 200:**
 ```json
-{ "status": "ok", "version": "1.3.0" }
+{ "status": "ok", "version": "1.4.0" }
 ```
 
 ---
@@ -495,9 +495,8 @@ Batch-резолв `client_id` → `label`. Полезно для UI: по `clie
 | `name` | string | да | — |
 | `host` | string | да | IPv4 или DNS-имя relay |
 | `agent_port` | int | нет | `7580` |
-| `agent_secret` | string | нет | `""` |
-
-> ⚠ **Внимание:** в текущей версии `RelayCreate` Pydantic-модель НЕ принимает `agent_type` — relay создаётся всегда с `agent_type="full"` (default в `add_relay()`). Чтобы создать min-relay, надо обновить модель или вставлять напрямую в БД (Postgres). На уровне БД поле есть и используется фильтрами.
+| `agent_secret` | string | нет | `""`; write-only, хранится Fernet-зашифрованным |
+| `agent_type` | string | нет | `"full"` |
 
 **Response 200:** объект relay из БД:
 ```json
@@ -506,7 +505,8 @@ Batch-резолв `client_id` → `label`. Полезно для UI: по `clie
   "name": "FI-Helsinki",
   "host": "1.2.3.4",
   "agent_port": 7580,
-  "agent_secret": "secret",
+  "agent_secret_configured": true,
+  "agent_secret_fingerprint": "2bb80d537b1d",
   "agent_type": "full",
   "is_active": true,
   "is_synced": true,
@@ -662,7 +662,7 @@ Health-check всех relay'ев параллельно.
 ---
 
 ### `GET /api/relays/{relay_id}/whitelist-payload`
-**Внутренний endpoint** для startup-resync агента. Возвращает полный payload с расшифрованными IP клиентов и всеми активными rate_limits.
+Legacy endpoint для rolling upgrade старых full-agent. Новые agents не хранят panel credentials: панель сравнивает `GET /state` и сама отправляет `/whitelist/sync` при drift.
 
 **Response 200:**
 ```json
@@ -958,10 +958,45 @@ Health-check всех relay'ев параллельно.
 ```json
 {
   "agent_type": "min",
-  "shared_limit": 25.0,
+  "shared_limit": {
+    "mbps": 4.0,
+    "default_mbps": 5.0,
+    "min_mbps": 1.0,
+    "budget": {
+      "enabled": true,
+      "direction": "tx",
+      "budget_tb": 30.0,
+      "used_tb": 12.4,
+      "remaining_tb": 17.6,
+      "forecast_tb": 31.2,
+      "pace": 1.04,
+      "recent_mbps": 97.5,
+      "target_mbps": 91.2,
+      "current_limit_mbps": 4.0,
+      "desired_limit_mbps": 4.0,
+      "unachievable_at_floor": false
+    }
+  },
   "shaped_clients": 8
 }
 ```
+
+### `GET /state` (только full)
+
+Лёгкая проверка фактического состояния для panel-driven reconciliation. Требует `X-Agent-Key`.
+
+```json
+{
+  "ok": true,
+  "state_hash": "sha256 logical state",
+  "whitelist_hash": "sha256 actual ipset",
+  "whitelist_count": 150,
+  "client_refs_count": 157,
+  "rate_limits_count": 5
+}
+```
+
+Панель отправляет полный `/whitelist/sync` только при несовпадении одного из hash.
 
 ---
 

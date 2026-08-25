@@ -14,13 +14,14 @@ Protected (X-API-Key):
   GET              /api/stats
 """
 
+import asyncio
 import ipaddress
 import logging
 import os
 import pathlib
 import re
 import string
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Request, HTTPException, Depends, Header
@@ -42,22 +43,44 @@ from .database import (
 )
 from . import database, relay_client
 from .warp_networks import WARP_NETWORKS as _WARP_NETWORKS
+from .crypto import agent_secret_fingerprint
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("panel")
 
-API_VERSION = "1.3.0"
+API_VERSION = "1.4.0"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await database.open_pool()
     logger.info("DB pool opened")
+    reconcile_task = None
+    reconcile_interval = int(os.environ.get("RELAY_RECONCILE_INTERVAL", "60"))
+    if reconcile_interval > 0:
+        reconcile_task = asyncio.create_task(_relay_reconcile_loop(reconcile_interval))
     try:
         yield
     finally:
+        if reconcile_task is not None:
+            reconcile_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await reconcile_task
         await database.close_pool()
         logger.info("DB pool closed")
+
+
+async def _relay_reconcile_loop(interval: int):
+    await asyncio.sleep(min(15, interval))
+    while True:
+        try:
+            result = await relay_client.reconcile_full_relays()
+            changed = sum(1 for item in result["relays"].values() if item.get("changed"))
+            failed = sum(1 for item in result["relays"].values() if not item.get("ok"))
+            logger.info("Relay reconcile: changed=%d failed=%d", changed, failed)
+        except Exception:
+            logger.exception("Relay reconcile failed")
+        await asyncio.sleep(interval)
 
 
 app = FastAPI(title="WARP Relay Panel", version=API_VERSION, lifespan=lifespan)
@@ -125,6 +148,7 @@ class RelayToggle(BaseModel):
 class RelayUpdate(BaseModel):
     host: str | None = None
     agent_port: int | None = None
+    agent_secret: str | None = None
 
 class IPBanCreate(BaseModel):
     ip: str
@@ -145,6 +169,15 @@ class RateLimitRemove(BaseModel):
 
 class ClientLabelsRequest(BaseModel):
     ids: list[int]
+
+
+def _public_relay(relay: dict) -> dict:
+    result = dict(relay)
+    secret = result.pop("agent_secret", "") or ""
+    result.pop("agent_secret_enc", None)
+    result["agent_secret_configured"] = result.get("agent_secret_configured", bool(secret))
+    result["agent_secret_fingerprint"] = agent_secret_fingerprint(secret) if secret else None
+    return result
 
 
 
@@ -543,16 +576,17 @@ async def api_remove_ip_ban(ban_id: int):
 
 @app.post("/api/relays", dependencies=[Depends(require_api_key)])
 async def api_add_relay(data: RelayCreate):
-    return await add_relay(
+    relay = await add_relay(
         name=data.name, host=data.host,
         agent_port=data.agent_port, agent_secret=data.agent_secret,
         agent_type=data.agent_type,
     )
+    return _public_relay(relay)
 
 @app.get("/api/relays", dependencies=[Depends(require_api_key)])
 async def api_list_relays(fields: str = "full"):
     """fields=basic - without last_health (lighter payload)."""
-    return await list_relays(fields=fields)
+    return [_public_relay(relay) for relay in await list_relays(fields=fields)]
 
 
 @app.delete("/api/relays/{relay_id}", dependencies=[Depends(require_api_key)])
@@ -564,22 +598,25 @@ async def api_delete_relay(relay_id: int):
 
 @app.patch("/api/relays/{relay_id}", dependencies=[Depends(require_api_key)])
 async def api_edit_relay(relay_id: int, data: RelayUpdate):
-    if data.host is None and data.agent_port is None:
+    if data.host is None and data.agent_port is None and data.agent_secret is None:
         raise HTTPException(400, "Nothing to update")
     try:
-        relay = await edit_relay(relay_id, host=data.host, agent_port=data.agent_port)
+        relay = await edit_relay(
+            relay_id, host=data.host, agent_port=data.agent_port,
+            agent_secret=data.agent_secret,
+        )
     except ValueError as e:
         raise HTTPException(400, str(e))
     if not relay:
         raise HTTPException(404, "Relay not found")
-    return relay
+    return _public_relay(relay)
 
 @app.patch("/api/relays/{relay_id}/toggle", dependencies=[Depends(require_api_key)])
 async def api_toggle_relay(relay_id: int, data: RelayToggle):
     relay = await toggle_relay(relay_id, data.active)
     if not relay:
         raise HTTPException(404, "Relay not found")
-    return relay
+    return _public_relay(relay)
 
 @app.get("/api/relays/{relay_id}/health", dependencies=[Depends(require_api_key)])
 async def api_relay_health(relay_id: int):
@@ -654,7 +691,7 @@ async def api_dashboard():
     stats["total_relays"] = len(relays)
     stats["active_relays"] = sum(1 for r in relays if r.get("is_active"))
 
-    return {"relays": relays, "stats": stats}
+    return {"relays": [_public_relay(relay) for relay in relays], "stats": stats}
 
 
 

@@ -19,7 +19,7 @@ from typing import Optional
 from psycopg_pool import AsyncConnectionPool
 from psycopg.rows import dict_row
 
-from .crypto import encrypt_ip, decrypt_ip, hash_ip
+from .crypto import decrypt_ip, decrypt_value, encrypt_ip, encrypt_value, hash_ip
 from . import cache
 
 _pool: Optional[AsyncConnectionPool] = None
@@ -42,6 +42,23 @@ async def open_pool() -> None:
     pool = _get_pool()
     await pool.open()
     await pool.wait()
+    await migrate_agent_secrets()
+
+
+async def migrate_agent_secrets() -> None:
+    async with _get_pool().connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("ALTER TABLE relays ADD COLUMN IF NOT EXISTS agent_secret_enc TEXT")
+            await cur.execute(
+                "SELECT id, agent_secret, agent_secret_enc FROM relays "
+                "WHERE agent_secret_enc IS NULL AND agent_secret <> ''"
+            )
+            rows = await cur.fetchall()
+            for row in rows:
+                await cur.execute(
+                    "UPDATE relays SET agent_secret_enc = %s, agent_secret = '' WHERE id = %s",
+                    (encrypt_value(row["agent_secret"]), row["id"]),
+                )
 
 
 async def close_pool() -> None:
@@ -456,19 +473,20 @@ async def add_relay(name: str, host: str, agent_port: int = 7580,
         raise ValueError(f"agent_type must be 'full' or 'min', got: {agent_type}")
 
     row = await _one(
-        "INSERT INTO relays (name, host, agent_port, agent_secret, agent_type) "
-        "VALUES (%s, %s, %s, %s, %s) RETURNING *",
-        (name, host, agent_port, agent_secret, agent_type),
+        "INSERT INTO relays (name, host, agent_port, agent_secret, agent_secret_enc, agent_type) "
+        "VALUES (%s, %s, %s, %s, %s, %s) RETURNING *",
+        (name, host, agent_port, "", encrypt_value(agent_secret) if agent_secret else None, agent_type),
     )
     if not row:
         raise ValueError("Failed to add relay")
     cache.invalidate("relays:")
-    return row
+    return _decrypt_relay(row)
 
 
 async def edit_relay(relay_id: int, host: str | None = None,
-                     agent_port: int | None = None) -> Optional[dict]:
-    if host is None and agent_port is None:
+                     agent_port: int | None = None,
+                     agent_secret: str | None = None) -> Optional[dict]:
+    if host is None and agent_port is None and agent_secret is None:
         raise ValueError("Nothing to update")
     if host is not None:
         _validate_host(host)
@@ -482,6 +500,9 @@ async def edit_relay(relay_id: int, host: str | None = None,
     if agent_port is not None:
         sets.append("agent_port = %s")
         args.append(agent_port)
+    if agent_secret is not None:
+        sets.extend(["agent_secret = ''", "agent_secret_enc = %s"])
+        args.append(encrypt_value(agent_secret) if agent_secret else None)
     args.append(relay_id)
 
     row = await _one(
@@ -489,7 +510,7 @@ async def edit_relay(relay_id: int, host: str | None = None,
         tuple(args),
     )
     cache.invalidate("relays:")
-    return row
+    return _decrypt_relay(row) if row else None
 
 
 async def list_relays(fields: str = "full") -> list[dict]:
@@ -500,10 +521,14 @@ async def list_relays(fields: str = "full") -> list[dict]:
         return cached_value
 
     if fields == "basic":
-        cols = "id, name, host, agent_port, is_active, is_synced, last_health_at"
+        cols = (
+            "id, name, host, agent_port, is_active, is_synced, last_health_at, "
+            "(agent_secret_enc IS NOT NULL OR agent_secret <> '') AS agent_secret_configured"
+        )
     else:
         cols = "*"
     rows = await _all(f"SELECT {cols} FROM relays ORDER BY id")
+    rows = [_decrypt_relay(row) for row in rows]
     cache.set(key, rows, ttl=_RELAYS_CACHE_TTL)
     return rows
 
@@ -525,6 +550,7 @@ async def get_active_relays(agent_type: str | None = None) -> list[dict]:
         )
     else:
         rows = await _all("SELECT * FROM relays WHERE is_active = TRUE ORDER BY id")
+    rows = [_decrypt_relay(row) for row in rows]
     cache.set(key, rows, ttl=_RELAYS_CACHE_TTL)
     return rows
 
@@ -541,12 +567,29 @@ async def toggle_relay(relay_id: int, active: bool) -> Optional[dict]:
         (active, relay_id),
     )
     cache.invalidate("relays:")
-    return row
+    return _decrypt_relay(row) if row else None
+
+
+def _decrypt_relay(row: dict) -> dict:
+    relay = dict(row)
+    if "agent_secret_enc" not in relay and "agent_secret" not in relay:
+        return relay
+    encrypted = relay.pop("agent_secret_enc", None)
+    if encrypted:
+        relay["agent_secret"] = decrypt_value(encrypted)
+    else:
+        relay["agent_secret"] = relay.get("agent_secret") or ""
+    return relay
 
 
 async def mark_relay_synced(relay_id: int, synced: bool):
-    await _exec("UPDATE relays SET is_synced = %s WHERE id = %s", (synced, relay_id))
-    cache.invalidate("relays:")
+    changed = await _exec(
+        "UPDATE relays SET is_synced = %s "
+        "WHERE id = %s AND is_synced IS DISTINCT FROM %s",
+        (synced, relay_id, synced),
+    )
+    if changed:
+        cache.invalidate("relays:")
 
 
 async def update_relay_health(relay_id: int, health_data: dict):
@@ -654,8 +697,7 @@ async def get_sync_payload() -> dict:
     try:
         rows = await _all("SELECT * FROM get_sync_payload()")
     except Exception as e:
-        print(f"[get_sync_payload] error: {e}")
-        return {"clients": [], "rate_limits": []}
+        raise RuntimeError("failed to build relay sync payload") from e
 
     clients = []
     rl_seen: dict[str, dict] = {}

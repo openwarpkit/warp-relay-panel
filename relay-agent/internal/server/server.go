@@ -42,6 +42,7 @@ func (s *Server) Routes() http.Handler {
 
 	r.Get("/health", s.handleHealth)
 	r.Get("/stats", s.handleStats)
+	r.Get("/state", s.handleState)
 
 	r.Post("/whitelist/update", s.handleWhitelistUpdate)
 	r.Post("/whitelist/remove", s.handleWhitelistRemove)

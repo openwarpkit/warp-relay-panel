@@ -1,4 +1,4 @@
-# WARP Relay Panel — API Reference (v1.3.0)
+# WARP Relay Panel — API Reference (v1.4.0)
 
 Document for integrating with the panel from external projects (bot, frontend, scripts).
 
@@ -34,7 +34,7 @@ Panel healthcheck.
 
 **Response 200:**
 ```json
-{ "status": "ok", "version": "1.3.0" }
+{ "status": "ok", "version": "1.4.0" }
 ```
 
 ---
@@ -382,10 +382,10 @@ Register relay server in panel.
 | `name` | string | yes | — |
 | `host` | string | yes | IPv4 or DNS of relay |
 | `agent_port` | int | no | `7580` |
-| `agent_secret` | string | no | `""` |
+| `agent_secret` | string | no | `""`; write-only and Fernet-encrypted at rest |
 | `agent_type` | string | no | `"full"` |
 
-**Response 200:** relay object from DB.
+**Response 200:** relay object without the secret; includes `agent_secret_configured` and `agent_secret_fingerprint`.
 
 ---
 
@@ -465,7 +465,7 @@ Same for all relays.
 ---
 
 ### `GET /api/relays/{relay_id}/whitelist-payload`
-**Internal endpoint** for startup-resync agent. Returns full payload with decrypted client IPs and all active rate_limits.
+Legacy endpoint for rolling upgrades. New full-agents store no panel credentials; the panel compares `GET /state` and pushes `/whitelist/sync` on drift.
 
 ---
 
@@ -579,6 +579,7 @@ Port 7580. All endpoints (except `/health`) require `X-Agent-Key`.
 | `POST` | `/whitelist/remove` | `{"ip":"..."}` |
 | `POST` | `/whitelist/sync` | `{"clients":[{"ip","client_id"}]}` (background rebuild) |
 | `GET` | `/whitelist/list` | Current ipset |
+| `GET` | `/state` | Logical-state and actual-ipset hashes for panel-driven reconciliation |
 | `POST` | `/rate-limit` | `{"ip","mbps","expires_at"?,"client_id"?}` |
 | `DELETE` | `/rate-limit/{ip}` | Remove limit |
 | `GET` | `/rate-limit/{ip}` | Get limit |

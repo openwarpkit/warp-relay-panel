@@ -1,6 +1,6 @@
 import pytest
 from pydantic import ValidationError
-from api.index import RelayCreate
+from api.index import RelayCreate, _public_relay
 
 def test_relay_create_defaults():
     relay = RelayCreate(name="Test", host="1.2.3.4")
@@ -26,3 +26,10 @@ def test_relay_update_partial():
     u2 = RelayUpdate(agent_port=9000)
     assert u2.host is None
     assert u2.agent_port == 9000
+
+
+def test_public_relay_hides_agent_secret():
+    relay = _public_relay({"id": 1, "name": "r1", "agent_secret": "secret"})
+    assert "agent_secret" not in relay
+    assert relay["agent_secret_configured"] is True
+    assert relay["agent_secret_fingerprint"]

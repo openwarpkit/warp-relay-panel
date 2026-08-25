@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS relays (
     host TEXT NOT NULL,             -- IP or domain of relay
     agent_port INT NOT NULL DEFAULT 7580,
     agent_secret TEXT NOT NULL DEFAULT '',
+    agent_secret_enc TEXT,
     agent_type TEXT NOT NULL DEFAULT 'full',
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     is_synced BOOLEAN NOT NULL DEFAULT TRUE,
@@ -37,6 +38,8 @@ CREATE TABLE IF NOT EXISTS relays (
     last_health_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE relays ADD COLUMN IF NOT EXISTS agent_secret_enc TEXT;
 
 DO $$
 BEGIN

@@ -27,8 +27,8 @@ fi
 read -p "Agent secret (shared with panel): " AGENT_SECRET
 read -p "Agent port [7580]: " AGENT_PORT
 AGENT_PORT=${AGENT_PORT:-7580}
-read -p "Limit per client, Mbps [25]: " SHARED_LIMIT_MBPS
-SHARED_LIMIT_MBPS=${SHARED_LIMIT_MBPS:-25}
+read -p "Maximum limit per client, Mbps [5]: " SHARED_LIMIT_MBPS
+SHARED_LIMIT_MBPS=${SHARED_LIMIT_MBPS:-5}
 
 INSTALL_DIR="/opt/warp-relay-agent"
 TAG="WR_RULE"
@@ -176,8 +176,12 @@ RULES_WATCHDOG_INTERVAL=30
 METRICS_SAMPLE_INTERVAL=1
 TRAFFIC_INTERVAL=30
 
-# Shared rate-limit per active client IP
+# Adaptive rate-limit per active client IP
 SHARED_LIMIT_MBPS=${SHARED_LIMIT_MBPS}
+SHARED_MIN_LIMIT_MBPS=1
+SHARED_MONTHLY_BUDGET_TB=30
+SHARED_BUDGET_DIRECTION=tx
+SHARED_BUDGET_INTERVAL=300
 SHARED_SCAN_INTERVAL=10
 SHARED_IDLE_GRACE=60
 
@@ -227,7 +231,7 @@ echo -e "${G}  Relay (Go, min) configured!${N}"
 echo -e "${G}═══════════════════════════════════════${N}"
 echo -e "  ${C}Relay IP:${N}     ${B}${SRC_IP}${N}"
 echo -e "  ${C}Agent:${N}        ${B}http://${SRC_IP}:${AGENT_PORT}${N}"
-echo -e "  ${C}Type:${N}          ${B}min (no whitelist, ${SHARED_LIMIT_MBPS} Mbps per client)${N}"
+echo -e "  ${C}Type:${N}          ${B}min (no whitelist, adaptive ${SHARED_LIMIT_MBPS}→1 Mbps per IP)${N}"
 echo -e "  ${C}Binary:${N}       ${B}${INSTALL_DIR}/${BIN_NAME}${N}"
 echo -e "  ${C}Release:${N}      ${B}${RELEASE_REPO}${N}"
 echo ""

@@ -3,6 +3,7 @@ HTTP client for relay agents.
 """
 
 import asyncio
+import hashlib
 import ipaddress
 import logging
 import socket
@@ -79,6 +80,28 @@ def _resolve_host(host: str) -> str:
         return host
     except ValueError:
         return socket.gethostbyname(host)
+
+
+def _state_hashes(payload: dict) -> tuple[str, str]:
+    state_lines = []
+    whitelist_lines = set()
+    for client in payload.get("clients", []):
+        ip = client["ip"]
+        state_lines.append(f"C\t{ip}\t{int(client['client_id'])}")
+        whitelist_lines.add(f"I\t{ip}")
+    for limit in payload.get("rate_limits", []):
+        client_id = limit.get("client_id")
+        client_id_text = "" if client_id is None else str(int(client_id))
+        expires_at = limit.get("expires_at") or ""
+        state_lines.append(
+            f"R\t{limit['ip']}\t{float(limit['mbps']):.6f}\t{expires_at}\t{client_id_text}"
+        )
+
+    def digest(lines) -> str:
+        data = "\n".join(sorted(lines)).encode()
+        return hashlib.sha256(data).hexdigest()
+
+    return digest(state_lines), digest(whitelist_lines)
 
 
 async def _agent_request(relay: dict, method: str, path: str,
@@ -229,6 +252,53 @@ async def full_sync(relay_id: int | None = None) -> dict:
         "total_clients": len(client_entries),
         "total_rate_limits": len(rate_limit_entries),
         "skipped_banned": skipped_banned,
+        "relays": results,
+    }
+
+
+async def reconcile_full_relays() -> dict:
+    payload = await db.get_sync_payload()
+    state_hash, whitelist_hash = _state_hashes(payload)
+    relays = await db.get_active_relays(agent_type="full")
+    results = {}
+
+    async def _reconcile(relay):
+        state_ok, state = await _agent_request(relay, "GET", "/state")
+        matches = (
+            state_ok
+            and state.get("state_hash") == state_hash
+            and state.get("whitelist_hash") == whitelist_hash
+        )
+        if matches:
+            await db.mark_relay_synced(relay["id"], True)
+            results[relay["name"]] = {**state, "ok": True, "changed": False}
+            return
+
+        ok, data = await _agent_request(
+            relay,
+            "POST",
+            "/whitelist/sync",
+            {
+                "clients": payload["clients"],
+                "rate_limits": payload["rate_limits"],
+                "state_hash": state_hash,
+                "whitelist_hash": whitelist_hash,
+            },
+            timeout=SYNC_TIMEOUT,
+        )
+        applied = (
+            ok
+            and data.get("ok", False)
+            and data.get("state_hash") == state_hash
+            and data.get("whitelist_hash") == whitelist_hash
+        )
+        await db.mark_relay_synced(relay["id"], applied)
+        results[relay["name"]] = {**data, "ok": applied, "changed": True}
+
+    await asyncio.gather(*[_reconcile(relay) for relay in relays], return_exceptions=True)
+    return {
+        "state_hash": state_hash,
+        "whitelist_hash": whitelist_hash,
         "relays": results,
     }
 

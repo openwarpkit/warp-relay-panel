@@ -75,17 +75,32 @@ func TestMasquePortsDoNotOverlapWarp(t *testing.T) {
 
 func TestLoad(t *testing.T) {
 	_ = os.Setenv("AGENT_SECRET", "supersecret")
-	_ = os.Setenv("PANEL_REQUEST_TIMEOUT", "90")
 	defer func() {
 		_ = os.Unsetenv("AGENT_SECRET")
-		_ = os.Unsetenv("PANEL_REQUEST_TIMEOUT")
 	}()
 
 	cfg := Load()
 	if cfg.AgentSecret != "supersecret" {
 		t.Errorf("expected supersecret, got %s", cfg.AgentSecret)
 	}
-	if cfg.PanelRequestTimeout != 90 {
-		t.Errorf("expected panel timeout 90, got %d", cfg.PanelRequestTimeout)
+}
+
+func TestLoadAdaptiveSharedLimitDefaults(t *testing.T) {
+	t.Setenv("AGENT_SECRET", "supersecret")
+	t.Setenv("SHARED_LIMIT_MBPS", "5")
+	t.Setenv("SHARED_MIN_LIMIT_MBPS", "9")
+	t.Setenv("SHARED_MONTHLY_BUDGET_TB", "30")
+	t.Setenv("SHARED_BUDGET_DIRECTION", "invalid")
+	t.Setenv("SHARED_BUDGET_INTERVAL", "10")
+
+	cfg := Load()
+	if cfg.SharedLimitMbps != 5 || cfg.SharedMinLimitMbps != 5 {
+		t.Fatalf("unexpected limits: %.1f..%.1f", cfg.SharedMinLimitMbps, cfg.SharedLimitMbps)
+	}
+	if cfg.SharedBudgetTB != 30 || cfg.SharedBudgetMode != "tx" {
+		t.Fatalf("unexpected budget: %.1f TB/%s", cfg.SharedBudgetTB, cfg.SharedBudgetMode)
+	}
+	if cfg.SharedBudgetInterval != 60 {
+		t.Fatalf("expected minimum interval 60, got %d", cfg.SharedBudgetInterval)
 	}
 }

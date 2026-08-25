@@ -1,4 +1,4 @@
-# WARP Relay Panel v1.3.0
+# WARP Relay Panel v1.4.0
 
 Control panel for whitelist and rate-limits of WARP Relay servers.
 Self-hosted API panel (Docker/FastAPI + PostgreSQL), native Go agent v2.1.0+ on relays.
@@ -28,7 +28,7 @@ Telegram Bot  ──HTTP──▶  Docker (FastAPI)  ──HTTP──▶  Relay 
 **Two types of relay agents:**
 
 - **`full`** — whitelist via `ipset` + individual rate-limits upon panel request. Used for subscribers.
-- **`min`** — no whitelist, allows everyone. Imposes a shared limit of N Mbps (default 25) per active client IP. Used for free/public relays.
+- **`min`** — no whitelist, allows everyone. Assigns an adaptive 5–1 Mbps limit per active IP against a 30 TB monthly relay TX budget. Used for free/public relays.
 
 ---
 
@@ -56,7 +56,7 @@ Environment variables in `.env`:
 | `DATABASE_URL` | connection string (built from `POSTGRES_*` in compose, host = `db`) |
 | `ENCRYPTION_KEY` | Generate: `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
 | `API_KEY` | Any secret key for the bot |
-| `AGENT_SECRET` | Shared secret for relay agents |
+| `RELAY_RECONCILE_INTERVAL` | Panel-driven full-relay state check interval, default 60 seconds |
 
 > ⚠ When migrating from Supabase, keep the **same** `ENCRYPTION_KEY`, otherwise
 > previously stored IPs cannot be decrypted.
@@ -74,7 +74,7 @@ sudo bash /opt/warp-relay-panel/relay-agent/deploy/setup.sh        # full
 sudo bash /opt/warp-relay-panel/relay-agent/deploy/setup-min.sh    # min
 ```
 
-The script will ask for the `Agent secret` (same as `AGENT_SECRET` in the panel configuration) and port (default 7580). It downloads the fresh binary from [releases/latest](https://github.com/openwarpkit/warp-relay-panel/releases/latest), configures iptables/ipset/tc, creates a systemd unit, and enables auto-restore of rules on reboot.
+The script asks for a unique `Agent secret`, which is then supplied when registering the relay in the panel, and the agent port (default 7580). Full-agent stores no panel URL, API key, or panel relay ID. The binary comes from [releases/latest](https://github.com/openwarpkit/warp-relay-panel/releases/latest); firewall state is restored locally.
 
 The relay serves regular WARP and MASQUE at the same time. UDP ports `443`, `4443`, `8443`, and `8095` are forwarded to the MASQUE endpoint `162.159.198.2`; the remaining WARP ports use the regular endpoint. Ports `500`, `1701`, and `4500` remain assigned to regular WARP.
 
@@ -227,7 +227,7 @@ All `/api/*` endpoints require the `X-API-Key` header.
 | `GET` | `/api/relays/{id}/traffic` | Traffic by IP (`?summary=true`, `?top=10`) |
 | `POST` | `/api/relays/{id}/sync` | Sync whitelist (full only) |
 | `POST` | `/api/relays/{id}/update` | Update agent (fire-and-forget) |
-| `GET` | `/api/relays/{id}/whitelist-payload` | Full payload for startup-resync (internal) |
+| `GET` | `/api/relays/{id}/whitelist-payload` | Legacy payload for rolling upgrades of old full-agents |
 | `POST` | `/api/relays/sync-all` | Sync all full-relays |
 | `POST` | `/api/relays/update-all` | Update all relays |
 | `GET` | `/api/relays/health-all` | Check all relays |
@@ -443,7 +443,12 @@ warp-relay-panel/
 
 ## Changelog
 
-### v1.3.0 (current)
+### v1.4.0 (current)
+- Full-agent uses panel-driven state-hash reconciliation and stores no panel URL or API key.
+- `agent_secret` is Fernet-encrypted in PostgreSQL and omitted from public API responses.
+- Min-agent adapts its per-IP limit from 5 to 1 Mbps against a 30 TB monthly TX budget.
+
+### v1.3.0
 - **Release-flow via GitHub Actions:** agent binaries are built by CI and attached to the release upon creating an `agent-v*` tag. Nothing is compiled on the VPS anymore.
 - **Self-update download-driven:** agent on `/update` downloads fresh binary from GitHub Releases (~10-30 sec) instead of `make build` (~180 sec).
 - Removed old Python relay-agent (completely on Go v2.1.0+).

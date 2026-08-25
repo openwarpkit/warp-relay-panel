@@ -16,9 +16,7 @@ import (
 
 	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/config"
 	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/conntrackgo"
-	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/ipsetgo"
 	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/metrics"
-	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/panel"
 	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/ratelimit"
 	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/refcount"
 	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/selfupdate"
@@ -29,7 +27,7 @@ import (
 )
 
 // Version is set via -ldflags during build.
-var Version = "2.2.17"
+var Version = "2.2.18"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
@@ -37,6 +35,11 @@ func main() {
 	cfg := config.Load()
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		log.Fatalf("Cannot create data dir %s: %v", cfg.DataDir, err)
+	}
+	if removed, err := config.RemoveLegacyPanelCredentials(config.LegacyEnvPath(cfg.DataDir)); err != nil {
+		log.Printf("Legacy panel credentials cleanup failed: %v", err)
+	} else if removed > 0 {
+		log.Printf("Removed %d legacy panel credential settings", removed)
 	}
 
 	// Persistent netlink connection for conntrack - opened lazily,
@@ -122,20 +125,6 @@ func main() {
 		log.Printf("Rate-limits: restored=%d failed=%d", len(applied), len(failed))
 	}
 
-	// Optional startup-resync with panel
-	pc := panel.New(
-		cfg.PanelURL,
-		cfg.PanelAPIKey,
-		cfg.RelayID,
-		time.Duration(cfg.PanelRequestTimeout)*time.Second,
-	)
-	if pc.Configured() {
-		go startupResync(pc, rc, rl, cfg)
-		go srv.SelfSyncLoop(ctx, pc, time.Duration(cfg.SelfSyncInterval)*time.Second)
-	} else {
-		log.Println("Startup-resync skipped (PANEL_URL/PANEL_API_KEY/RELAY_ID not set)")
-	}
-
 	addr := fmt.Sprintf(":%d", cfg.AgentPort)
 	log.Printf("WARP Relay Agent v%s starting on %s", Version, addr)
 	log.Printf("ipset: %s, traffic interval: %ds, watchdog: %ds",
@@ -195,65 +184,4 @@ func makeDebouncedPersist(debounce time.Duration) func() {
 			log.Println("ipset persisted to /etc/ipset.rules")
 		})
 	}
-}
-
-func startupResync(
-	pc *panel.Client,
-	rc *refcount.Map,
-	rl *ratelimit.Manager,
-	cfg config.Config,
-) {
-	payload, err := pc.FetchWhitelistPayload()
-	if err != nil {
-		log.Printf("Startup-resync failed: %v", err)
-		return
-	}
-
-	// Rebuild ipset from payload - netlink.
-	if err := ipsetgo.Create(cfg.IpsetName, 1000000); err != nil {
-		log.Printf("startup-resync: ipset create: %v", err)
-	}
-	if err := ipsetgo.Flush(cfg.IpsetName); err != nil {
-		log.Printf("startup-resync: ipset flush: %v", err)
-	}
-
-	uniqueIPs := make(map[string]struct{})
-	rcEntries := make(map[string][]int64)
-	for _, c := range payload.Clients {
-		if !shell.ValidIPv4(c.IP) {
-			continue
-		}
-		uniqueIPs[c.IP] = struct{}{}
-		rcEntries[c.IP] = append(rcEntries[c.IP], c.ClientID)
-	}
-	for ip := range uniqueIPs {
-		if err := ipsetgo.Add(cfg.IpsetName, ip); err != nil {
-			log.Printf("startup-resync: ipset add %s: %v", ip, err)
-		}
-	}
-	rc.SetAll(rcEntries)
-	shell.Run("ipset save > /etc/ipset.rules 2>/dev/null", 10*time.Second)
-
-	// Rate-limits in batch - 1 nft + 1 tc + 1 conntrack Dump for all 200+ IPs
-	// instead of Nx fork+exec in loop (see ratelimit.SetBatch).
-	items := make([]ratelimit.SetItem, 0, len(payload.RateLimits))
-	for _, r := range payload.RateLimits {
-		if !shell.ValidIPv4(r.IP) {
-			continue
-		}
-		items = append(items, ratelimit.SetItem{
-			IP:        r.IP,
-			Mbps:      r.Mbps,
-			ExpiresAt: r.ExpiresAt,
-			ClientID:  r.ClientID,
-		})
-	}
-	if len(items) > 0 {
-		_, errs := rl.SetBatch(items)
-		for ip, err := range errs {
-			log.Printf("Startup-resync: rate-limit %s failed: %v", ip, err)
-		}
-	}
-	log.Printf("Startup-resync done: %d clients, %d rate_limits",
-		len(uniqueIPs), len(payload.RateLimits))
 }

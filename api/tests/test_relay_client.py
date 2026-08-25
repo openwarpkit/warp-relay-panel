@@ -3,7 +3,10 @@ import respx
 import httpx
 from unittest.mock import patch, AsyncMock
 import api.relay_client as rc
-from api.relay_client import add_ip, remove_ip, full_sync, get_traffic_all_relays
+from api.relay_client import (
+    _state_hashes, add_ip, remove_ip, full_sync,
+    get_traffic_all_relays, reconcile_full_relays,
+)
 
 @pytest.fixture
 def mock_db_relays():
@@ -64,6 +67,60 @@ async def test_full_sync(m_payload, mock_db_relays, mock_db_mark):
     assert result["total_clients"] == 1
     assert result["relays"]["r1"]["ok"] is True
     assert result["relays"]["r1"]["accepted"] is True
+
+
+def test_state_hashes_match_agent_format():
+    state_hash, whitelist_hash = _state_hashes({
+        "clients": [
+            {"ip": "203.0.113.2", "client_id": 8},
+            {"ip": "203.0.113.2", "client_id": 7},
+            {"ip": "203.0.113.1", "client_id": 3},
+        ],
+        "rate_limits": [
+            {"ip": "203.0.113.2", "mbps": 5, "expires_at": None, "client_id": 7},
+        ],
+    })
+    assert state_hash == "c20e72f5cbc44e49acd5f50f249d1fc22bd7608be22c911c867a932de5c580cd"
+    assert whitelist_hash == "22819dc99b331ec12e7d48f36347489718292e838f9e709ad78f7011f2b2f744"
+
+
+@pytest.mark.asyncio
+@respx.mock
+@patch("api.database.get_sync_payload", new_callable=AsyncMock)
+async def test_reconcile_skips_matching_state(m_payload, mock_db_relays, mock_db_mark):
+    payload = {"clients": [{"ip": "10.0.0.1", "client_id": 1}], "rate_limits": []}
+    m_payload.return_value = payload
+    state_hash, whitelist_hash = _state_hashes(payload)
+    respx.get("http://1.2.3.4:7580/state").mock(return_value=httpx.Response(200, json={
+        "ok": True, "state_hash": state_hash, "whitelist_hash": whitelist_hash,
+    }))
+
+    result = await reconcile_full_relays()
+
+    assert result["relays"]["r1"]["ok"] is True
+    assert result["relays"]["r1"]["changed"] is False
+    mock_db_mark.assert_called_once_with(1, True)
+
+
+@pytest.mark.asyncio
+@respx.mock
+@patch("api.database.get_sync_payload", new_callable=AsyncMock)
+async def test_reconcile_repairs_drift(m_payload, mock_db_relays, mock_db_mark):
+    payload = {"clients": [{"ip": "10.0.0.1", "client_id": 1}], "rate_limits": []}
+    m_payload.return_value = payload
+    state_hash, whitelist_hash = _state_hashes(payload)
+    respx.get("http://1.2.3.4:7580/state").mock(return_value=httpx.Response(200, json={
+        "ok": True, "state_hash": "stale", "whitelist_hash": "stale",
+    }))
+    respx.post("http://1.2.3.4:7580/whitelist/sync").mock(return_value=httpx.Response(200, json={
+        "ok": True, "state_hash": state_hash, "whitelist_hash": whitelist_hash,
+    }))
+
+    result = await reconcile_full_relays()
+
+    assert result["relays"]["r1"]["ok"] is True
+    assert result["relays"]["r1"]["changed"] is True
+    mock_db_mark.assert_called_once_with(1, True)
 
 @pytest.mark.asyncio
 @respx.mock

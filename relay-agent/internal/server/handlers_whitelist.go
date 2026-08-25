@@ -211,7 +211,12 @@ func (s *Server) doSync(entries []syncEntry, rlEntries *[]syncRateLimitEntry) ma
 		log.Printf("Sync complete: %d IPs, %d clients, %d invalid (rate_limits not in payload — skipped)",
 			len(uniqueIPs), len(valid), invalid)
 	}
-	
+	if state, err := s.currentState(); err == nil {
+		for key, value := range state {
+			statusFin[key] = value
+		}
+	}
+
 	return statusFin
 }
 

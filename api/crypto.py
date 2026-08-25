@@ -14,12 +14,24 @@ def _get_fernet() -> Fernet:
 
 
 def encrypt_ip(ip: str) -> str:
-    return _get_fernet().encrypt(ip.encode()).decode()
+    return encrypt_value(ip)
 
 
 def decrypt_ip(encrypted: str) -> str:
-    return _get_fernet().decrypt(encrypted.encode()).decode()
+    return decrypt_value(encrypted)
 
 
 def hash_ip(ip: str) -> str:
     return hashlib.sha256(ip.encode()).hexdigest()
+
+
+def encrypt_value(value: str) -> str:
+    return _get_fernet().encrypt(value.encode()).decode()
+
+
+def decrypt_value(encrypted: str) -> str:
+    return _get_fernet().decrypt(encrypted.encode()).decode()
+
+
+def agent_secret_fingerprint(secret: str) -> str:
+    return hashlib.sha256(secret.encode()).hexdigest()[:12]
