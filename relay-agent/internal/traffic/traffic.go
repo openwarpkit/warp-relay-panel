@@ -3,6 +3,7 @@
 package traffic
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -151,18 +152,77 @@ func (m *Monitor) save(state fileFmt) {
 	}
 }
 
-func (m *Monitor) checkMonthReset() *fileFmt {
+func (m *Monitor) archive(state fileFmt) error {
+	if _, err := time.Parse("2006-01", state.Month); err != nil {
+		return fmt.Errorf("invalid archive month %q", state.Month)
+	}
+	archivePath := filepath.Join(filepath.Dir(m.path), "traffic-"+state.Month+".json.gz")
+	if _, err := os.Stat(archivePath); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	m.saveMu.Lock()
+	defer m.saveMu.Unlock()
+	if _, err := os.Stat(archivePath); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(m.path), 0o750); err != nil {
+		return err
+	}
+
+	tmpPath := archivePath + ".tmp"
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	gz := gzip.NewWriter(f)
+	enc := json.NewEncoder(gz)
+	if err := enc.Encode(state); err != nil {
+		_ = gz.Close()
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := gz.Close(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, archivePath); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}
+
+func (m *Monitor) checkMonthReset() (*fileFmt, error) {
 	cur := nowMSK().Format("2006-01")
 	if m.state.Month != cur {
+		if err := m.archive(m.state); err != nil {
+			return nil, err
+		}
 		log.Printf("Monthly reset (MSK): %s → %s", m.state.Month, cur)
 		m.state = m.empty()
 		m.lastConn = make(map[connKey][2]uint64)
 
 		cp := m.state
 		cp.IPs = make(map[string]ipStats)
-		return &cp
+		return &cp, nil
 	}
-	return nil
+	return nil, nil
 }
 
 func (m *Monitor) Collect(countFunc func(string) int) {
@@ -179,7 +239,12 @@ func (m *Monitor) Collect(countFunc func(string) int) {
 	}
 
 	m.mu.Lock()
-	resetState := m.checkMonthReset()
+	resetState, err := m.checkMonthReset()
+	if err != nil {
+		m.mu.Unlock()
+		log.Printf("traffic: monthly archive failed: %v", err)
+		return
+	}
 
 	var now string
 	changed := false
@@ -301,7 +366,11 @@ func (m *Monitor) collectAggregate() {
 	}
 
 	m.mu.Lock()
-	m.checkMonthReset()
+	if _, err := m.checkMonthReset(); err != nil {
+		m.mu.Unlock()
+		log.Printf("traffic: monthly archive failed: %v", err)
+		return
+	}
 	if m.state.LastIfRX != 0 || m.state.LastIfTX != 0 {
 		// reboot resets kernel counters -> cur<last, count cur as the delta.
 		if rx >= m.state.LastIfRX {
@@ -353,10 +422,12 @@ type Summary struct {
 
 func (m *Monitor) GetAll(refCount func(string) int, clients func(string) []int64) Summary {
 	m.mu.Lock()
-	if resetState := m.checkMonthReset(); resetState != nil {
+	if resetState, err := m.checkMonthReset(); err != nil {
+		log.Printf("traffic: monthly archive failed: %v", err)
+	} else if resetState != nil {
 		go m.save(*resetState)
 	}
-	
+
 	// Fast copy phase under lock
 	month := m.state.Month
 	lastReset := m.state.LastReset
@@ -375,7 +446,7 @@ func (m *Monitor) GetAll(refCount func(string) int, clients func(string) []int64
 		LastReset: lastReset,
 		IPs:       make(map[string]PerIP, len(ipsCopy)),
 	}
-	
+
 	var totalTX, totalRX int64
 	for ip, s := range ipsCopy {
 		totalTX += s.TX

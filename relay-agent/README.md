@@ -21,6 +21,7 @@ Native Go-агент. Тот же HTTP API что был у Python-предше�
 - `ipset` (add/del/list/flush/create) — через [`vishvananda/netlink`](https://github.com/vishvananda/netlink) вместо `exec("ipset ...")`.
 - `iptables`/`tc` — оставлены через shell (редкие операции).
 - `ipset save > /etc/ipset.rules` — оставлен через shell (формат CLI-специфичный).
+- Завершённые месяцы сохраняются как `traffic-YYYY-MM.json.gz` перед reset.
 
 ## Установка
 

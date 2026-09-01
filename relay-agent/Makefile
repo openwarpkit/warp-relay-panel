@@ -2,7 +2,7 @@
 
 BIN := warp-relay-agent
 BIN_MIN := warp-relay-agent-min
-VERSION ?= 2.2.19
+VERSION ?= 2.2.20
 FUZZTIME ?= 10s
 LDFLAGS := -s -w -X main.Version=$(VERSION)
 LDFLAGS_MIN := -s -w -X main.Version=$(VERSION)-min

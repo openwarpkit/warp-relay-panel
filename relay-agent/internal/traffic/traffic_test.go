@@ -1,6 +1,8 @@
 package traffic
 
 import (
+	"compress/gzip"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -80,6 +82,80 @@ func TestTrafficAggregateTotals(t *testing.T) {
 	if s.TotalTXBytes != 1000 || s.TotalRXBytes != 2500 || s.TotalBytes != 3500 {
 		t.Fatalf("expected TX=1000 RX=2500 total=3500, got TX=%d RX=%d total=%d",
 			s.TotalTXBytes, s.TotalRXBytes, s.TotalBytes)
+	}
+}
+
+func TestMonthlyResetArchivesPerIPState(t *testing.T) {
+	tmpDir := t.TempDir()
+	m := New(filepath.Join(tmpDir, "traffic.json"), time.Hour, nil, ModePerIP)
+	previousMonth := nowMSK().AddDate(0, -1, 0).Format("2006-01")
+	m.state = fileFmt{
+		Month: previousMonth,
+		IPs: map[string]ipStats{
+			"203.0.113.7": {TX: 123, RX: 456, Updated: "previous"},
+		},
+		OrphanedTX: 10,
+		OrphanedRX: 20,
+	}
+
+	reset, err := m.checkMonthReset()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reset == nil || m.state.Month == previousMonth {
+		t.Fatal("month was not reset")
+	}
+
+	archivePath := filepath.Join(tmpDir, "traffic-"+previousMonth+".json.gz")
+	f, err := os.Open(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = gz.Close() }()
+	var archived fileFmt
+	if err := json.NewDecoder(gz).Decode(&archived); err != nil {
+		t.Fatal(err)
+	}
+	stats := archived.IPs["203.0.113.7"]
+	if archived.Month != previousMonth || stats.TX != 123 || stats.RX != 456 {
+		t.Fatalf("unexpected archive: %+v", archived)
+	}
+}
+
+func TestArchiveDoesNotOverwriteExistingMonth(t *testing.T) {
+	tmpDir := t.TempDir()
+	m := New(filepath.Join(tmpDir, "traffic.json"), time.Hour, nil, ModeAggregate)
+	month := nowMSK().AddDate(0, -1, 0).Format("2006-01")
+	first := fileFmt{Month: month, IPs: map[string]ipStats{}, AggTX: 100}
+	second := fileFmt{Month: month, IPs: map[string]ipStats{}, AggTX: 999}
+	if err := m.archive(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.archive(second); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := os.Open(filepath.Join(tmpDir, "traffic-"+month+".json.gz"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = gz.Close() }()
+	var archived fileFmt
+	if err := json.NewDecoder(gz).Decode(&archived); err != nil {
+		t.Fatal(err)
+	}
+	if archived.AggTX != 100 {
+		t.Fatalf("archive was overwritten: %d", archived.AggTX)
 	}
 }
 
