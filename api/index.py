@@ -200,7 +200,11 @@ _TPL_404 = string.Template(_load("404.html"))
 
 
 ERROR_MAP = {
-    "invalid_token": ("Invalid Link", "Activation link is invalid."),
+    "invalid_token": (
+        "Ссылка активации недействительна",
+        "Она могла устареть после очистки Relay-системы или быть скопирована не полностью. "
+        "Откройте «Личный кабинет» в боте и получите новую ссылку активации.",
+    ),
     "blocked": ("Access Blocked", "Your account has been blocked."),
     "ipv6_detected": ("IPv6 not supported",
                       "Relay only supports IPv4. Disable IPv6 or use mobile network."),
@@ -221,7 +225,16 @@ API_ERROR_MESSAGES = {
 def _error_html(key: str, status: int = 403) -> HTMLResponse:
     title, message = ERROR_MAP.get(key, ("Error", key))
     return HTMLResponse(
-        _TPL_ERROR.safe_substitute(style=_BASE_STYLE, title=title, message=message),
+        _TPL_ERROR.safe_substitute(
+            style=_BASE_STYLE,
+            title=title,
+            message=message,
+            recovery_block=(
+                '<a class="btn" style="color:var(--bg);text-decoration:none" '
+                'href="https://t.me/warp_generator_bot">Открыть бота</a>'
+                if key == "invalid_token" else ""
+            ),
+        ),
         status_code=status,
     )
 
