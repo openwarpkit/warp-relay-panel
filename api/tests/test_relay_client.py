@@ -170,7 +170,8 @@ async def test_get_relay_traffic_min_returns_totals():
 @respx.mock
 async def test_pool_timeout_recycles_client(mock_db_relays, mock_db_mark):
     rc._consecutive_timeouts = 0
-    before = await rc._get_client()
+    async with rc._get_client() as before:
+        pass
     respx.post("http://1.2.3.4:7580/whitelist/update").mock(
         side_effect=httpx.PoolTimeout("pool exhausted")
     )
@@ -185,7 +186,8 @@ async def test_pool_timeout_recycles_client(mock_db_relays, mock_db_mark):
 async def test_consecutive_timeouts_recycle(mock_db_relays, mock_db_mark, monkeypatch):
     monkeypatch.setattr(rc, "_RECYCLE_AFTER", 2)
     rc._consecutive_timeouts = 0
-    before = await rc._get_client()
+    async with rc._get_client() as before:
+        pass
     respx.post("http://1.2.3.4:7580/whitelist/update").mock(
         side_effect=httpx.ReadTimeout("read")
     )

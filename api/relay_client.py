@@ -7,6 +7,8 @@ import hashlib
 import ipaddress
 import logging
 import socket
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 import httpx
 from . import database as db
 
@@ -25,6 +27,7 @@ _RECYCLE_AFTER = 8
 
 _http_client: httpx.AsyncClient | None = None
 _client_lock = asyncio.Lock()
+_client_requests: dict[httpx.AsyncClient, int] = {}
 _consecutive_timeouts = 0
 
 
@@ -32,13 +35,33 @@ def _new_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(limits=_LIMITS, timeout=_TIMEOUT)
 
 
-async def _get_client() -> httpx.AsyncClient:
+async def _close_client(client: httpx.AsyncClient) -> None:
+    try:
+        await client.aclose()
+    except Exception:
+        pass
+
+
+@asynccontextmanager
+async def _get_client() -> AsyncIterator[httpx.AsyncClient]:
     global _http_client
-    if _http_client is None or _http_client.is_closed:
+    async with _client_lock:
+        if _http_client is None or _http_client.is_closed:
+            _http_client = _new_client()
+        client = _http_client
+        _client_requests[client] = _client_requests.get(client, 0) + 1
+    try:
+        yield client
+    finally:
         async with _client_lock:
-            if _http_client is None or _http_client.is_closed:
-                _http_client = _new_client()
-    return _http_client
+            remaining = _client_requests[client] - 1
+            if remaining:
+                _client_requests[client] = remaining
+            else:
+                _client_requests.pop(client)
+            close = not remaining and client is not _http_client
+        if close:
+            await _close_client(client)
 
 
 async def _recycle_client(stale: httpx.AsyncClient | None) -> None:
@@ -48,11 +71,9 @@ async def _recycle_client(stale: httpx.AsyncClient | None) -> None:
             return
         old, _http_client = _http_client, _new_client()
         _consecutive_timeouts = 0
-    if old is not None:
-        try:
-            await old.aclose()
-        except Exception:
-            pass
+        close = old is not None and not _client_requests.get(old, 0)
+    if close:
+        await _close_client(old)
     logger.warning("recycled httpx client (outbound pool wedged)")
 
 
@@ -126,38 +147,39 @@ async def _agent_request(relay: dict, method: str, path: str,
     headers = _agent_headers(relay)
     headers["Host"] = host
 
-    client = await _get_client()
-    try:
-        resp = await client.request(
-            method, url,
-            headers=headers,
-            json=json_data,
-            timeout=timeout,
-        )
-        data = resp.json()
-        _consecutive_timeouts = 0
-        if resp.status_code >= 400:
-            logger.warning("[%s] %s %s → %d: %s",
-                           relay["name"], method, path, resp.status_code, data)
-            return False, data
-        return True, data
-    except httpx.PoolTimeout:
-        msg = f"[{relay['name']}] timeout: {method} {path}"
-        logger.error("%s (pool exhausted)", msg)
-        await _recycle_client(client)
-        return False, {"error": msg}
-    except httpx.TimeoutException:
-        msg = f"[{relay['name']}] timeout: {method} {path}"
-        logger.error(msg)
-        _consecutive_timeouts += 1
-        if _consecutive_timeouts >= _RECYCLE_AFTER:
+    async with _get_client() as client:
+        try:
+            resp = await client.request(
+                method, url,
+                headers=headers,
+                json=json_data,
+                timeout=timeout,
+            )
+            data = resp.json()
+            if client is _http_client:
+                _consecutive_timeouts = 0
+            if resp.status_code >= 400:
+                logger.warning("[%s] %s %s → %d: %s",
+                               relay["name"], method, path, resp.status_code, data)
+                return False, data
+            return True, data
+        except httpx.PoolTimeout:
+            msg = f"[{relay['name']}] timeout: {method} {path}"
+            logger.error("%s (pool exhausted)", msg)
             await _recycle_client(client)
-        return False, {"error": msg}
-    except Exception as e:
-        msg = f"[{relay['name']}] error: {e}"
-        logger.error(msg)
-        return False, {"error": msg}
-
+            return False, {"error": msg}
+        except httpx.TimeoutException:
+            msg = f"[{relay['name']}] timeout: {method} {path}"
+            logger.error(msg)
+            if client is _http_client:
+                _consecutive_timeouts += 1
+                if _consecutive_timeouts >= _RECYCLE_AFTER:
+                    await _recycle_client(client)
+            return False, {"error": msg}
+        except Exception as e:
+            msg = f"[{relay['name']}] error: {e}"
+            logger.error(msg)
+            return False, {"error": msg}
 
 
 async def add_ip(new_ip: str, old_ip: str | None = None,
