@@ -148,6 +148,56 @@ async def test_get_traffic_all_relays():
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_reset_traffic_all_relays_reports_each_result():
+    relays = [
+        {"id": 1, "host": "1.2.3.4", "agent_port": 7580, "agent_secret": "s1", "name": "full"},
+        {"id": 2, "host": "2.3.4.5", "agent_port": 7580, "agent_secret": "s2", "name": "min", "agent_type": "min"},
+        {"id": 3, "host": "3.4.5.6", "agent_port": 7580, "agent_secret": "s3", "name": "offline"},
+        {"id": 4, "host": "4.5.6.7", "agent_port": 7580, "agent_secret": "s4", "name": "old"},
+    ]
+    ip = "203.0.113.7"
+    full = respx.post(f"http://1.2.3.4:7580/traffic/{ip}/reset").respond(200, json={"ok": True, "reset": True, "ip": ip})
+    respx.post(f"http://2.3.4.5:7580/traffic/{ip}/reset").respond(200, json={"ok": True, "reset": False, "ip": ip})
+    respx.post(f"http://3.4.5.6:7580/traffic/{ip}/reset").mock(side_effect=httpx.TimeoutException("Timeout"))
+    respx.post(f"http://4.5.6.7:7580/traffic/{ip}/reset").respond(404, json={"ok": True})
+    with patch("api.database.get_active_relays", new_callable=AsyncMock, return_value=relays) as active:
+        result = await rc.reset_traffic_all_relays(ip)
+    active.assert_awaited_once_with()
+    assert set(result) == {"full", "min", "offline", "old"}
+    assert result["full"]["ok"] is True and result["full"]["reset"] is True
+    assert result["min"]["ok"] is True and result["min"]["reset"] is False
+    assert result["offline"]["ok"] is False
+    assert result["old"]["ok"] is False
+    assert full.calls[0].request.headers["X-Agent-Key"] == "s1"
+
+
+@pytest.mark.asyncio
+async def test_reset_traffic_all_relays_keeps_unexpected_failures():
+    relays = [{"name": "broken"}, {"name": "healthy"}]
+
+    async def request(relay, *args):
+        if relay["name"] == "broken":
+            raise ValueError("bad relay config")
+        return True, {"ok": True, "reset": True}
+
+    with patch("api.database.get_active_relays", new_callable=AsyncMock, return_value=relays), \
+         patch("api.relay_client._agent_request", side_effect=request):
+        result = await rc.reset_traffic_all_relays("203.0.113.7")
+    assert result["broken"] == {"relay": "broken", "ok": False, "error": "bad relay config"}
+    assert result["healthy"]["ok"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ip", ["invalid", "::1", "203.0.113.7/24", "203.0.113.7?reset=all"])
+async def test_reset_traffic_rejects_invalid_ip_before_requests(ip):
+    with patch("api.database.get_active_relays", new_callable=AsyncMock) as active:
+        with pytest.raises(ValueError):
+            await rc.reset_traffic_all_relays(ip)
+    active.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_get_relay_traffic_min_returns_totals():
     from api.relay_client import get_relay_traffic
     relay = {"id": 3, "host": "9.9.9.9", "agent_port": 7580,

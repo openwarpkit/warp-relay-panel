@@ -37,6 +37,7 @@ type ipStats struct {
 }
 
 type fileFmt struct {
+	revision   uint64
 	Month      string             `json:"month"`
 	IPs        map[string]ipStats `json:"ips"`
 	OrphanedTX int64              `json:"orphaned_tx"`
@@ -55,14 +56,15 @@ type connKey struct {
 }
 
 type Monitor struct {
-	mu       sync.Mutex
-	saveMu   sync.Mutex
-	path     string
-	interval time.Duration
-	state    fileFmt
-	lastConn map[connKey][2]uint64
-	ct       *conntrackgo.Client
-	mode     string
+	mu            sync.Mutex
+	saveMu        sync.Mutex
+	savedRevision uint64
+	path          string
+	interval      time.Duration
+	state         fileFmt
+	lastConn      map[connKey][2]uint64
+	ct            *conntrackgo.Client
+	mode          string
 }
 
 func New(path string, interval time.Duration, ct *conntrackgo.Client, mode string) *Monitor {
@@ -112,19 +114,22 @@ func (m *Monitor) empty() fileFmt {
 	}
 }
 
-func (m *Monitor) save(state fileFmt) {
+func (m *Monitor) save(state fileFmt) error {
 	m.saveMu.Lock()
 	defer m.saveMu.Unlock()
+	if state.revision < m.savedRevision {
+		return nil
+	}
 	if err := os.MkdirAll(filepath.Dir(m.path), 0o750); err != nil {
 		log.Printf("traffic: mkdir error: %v", err)
-		return
+		return err
 	}
 	tmpPath := m.path + ".tmp"
 	// #nosec G304 -- Tmp file path is constructed from config
 	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		log.Printf("traffic: save error (create tmp): %v", err)
-		return
+		return err
 	}
 
 	enc := json.NewEncoder(f)
@@ -133,23 +138,26 @@ func (m *Monitor) save(state fileFmt) {
 		_ = f.Close()
 		_ = os.Remove(tmpPath)
 		log.Printf("traffic: save error (write tmp): %v", err)
-		return
+		return err
 	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmpPath)
 		log.Printf("traffic: save error (sync tmp): %v", err)
-		return
+		return err
 	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmpPath)
 		log.Printf("traffic: save error (close tmp): %v", err)
-		return
+		return err
 	}
 	if err := os.Rename(tmpPath, m.path); err != nil {
 		_ = os.Remove(tmpPath)
 		log.Printf("traffic: save error (rename): %v", err)
+		return err
 	}
+	m.savedRevision = state.revision
+	return nil
 }
 
 func (m *Monitor) archive(state fileFmt) error {
@@ -215,7 +223,9 @@ func (m *Monitor) checkMonthReset() (*fileFmt, error) {
 			return nil, err
 		}
 		log.Printf("Monthly reset (MSK): %s → %s", m.state.Month, cur)
+		revision := m.state.revision + 1
 		m.state = m.empty()
+		m.state.revision = revision
 		m.lastConn = make(map[connKey][2]uint64)
 
 		cp := m.state
@@ -238,6 +248,10 @@ func (m *Monitor) Collect(countFunc func(string) int) {
 		return
 	}
 
+	m.collectFlows(flows, countFunc)
+}
+
+func (m *Monitor) collectFlows(flows []conntrackgo.UDPFlow, countFunc func(string) int) {
 	m.mu.Lock()
 	resetState, err := m.checkMonthReset()
 	if err != nil {
@@ -298,6 +312,7 @@ func (m *Monitor) Collect(countFunc func(string) int) {
 	m.lastConn = current
 	var stateCopy *fileFmt
 	if changed {
+		m.state.revision++
 		cp := m.state
 		newMap := make(map[string]ipStats, len(m.state.IPs))
 		for k, v := range m.state.IPs {
@@ -386,6 +401,7 @@ func (m *Monitor) collectAggregate() {
 	}
 	m.state.LastIfRX = rx
 	m.state.LastIfTX = tx
+	m.state.revision++
 	cp := m.state
 	cp.IPs = make(map[string]ipStats)
 	m.mu.Unlock()
@@ -510,7 +526,9 @@ func (m *Monitor) GetIP(ip string, refCount func(string) int, clients func(strin
 
 func (m *Monitor) Reset() string {
 	m.mu.Lock()
+	revision := m.state.revision + 1
 	m.state = m.empty()
+	m.state.revision = revision
 	m.lastConn = make(map[connKey][2]uint64)
 	cp := m.state
 	cp.IPs = make(map[string]ipStats)
@@ -519,4 +537,29 @@ func (m *Monitor) Reset() string {
 	m.save(cp)
 	log.Println("Traffic data manually reset")
 	return cp.Month
+}
+
+func (m *Monitor) ResetIP(ip string) (string, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.mode != ModePerIP {
+		return m.state.Month, false, nil
+	}
+	if _, err := m.checkMonthReset(); err != nil {
+		return m.state.Month, false, err
+	}
+	_, found := m.state.IPs[ip]
+	cp := m.state
+	cp.revision++
+	cp.IPs = make(map[string]ipStats, len(m.state.IPs))
+	for key, stats := range m.state.IPs {
+		if key != ip {
+			cp.IPs[key] = stats
+		}
+	}
+	if err := m.save(cp); err != nil {
+		return cp.Month, false, err
+	}
+	m.state = cp
+	return cp.Month, found, nil
 }

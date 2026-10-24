@@ -35,6 +35,10 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Building $TAG (version=$VERSION)"
 
+      - name: Test traffic and agent APIs
+        working-directory: relay-agent
+        run: go test ./internal/traffic ./internal/server ./internal/servermin
+
       - name: Build full agent (amd64)
         working-directory: relay-agent
         run: |

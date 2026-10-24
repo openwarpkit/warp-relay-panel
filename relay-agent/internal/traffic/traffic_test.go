@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/conntrackgo"
 )
 
 func TestTrafficSaveAndLoad(t *testing.T) {
@@ -63,6 +65,94 @@ func TestTrafficReset(t *testing.T) {
 	s, _, _, ok := m.GetIP("1.2.3.4", func(ip string) int { return 0 }, func(ip string) []int64 { return nil })
 	if ok || s.TXBytes != 0 {
 		t.Fatalf("expected IP 1.2.3.4 to be removed after Reset()")
+	}
+}
+
+func TestResetIPPreservesOtherTrafficAndPersists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "traffic.json")
+	m := New(path, time.Second, nil, ModePerIP)
+	ip := "203.0.113.7"
+	other := "203.0.113.8"
+	m.state.IPs[ip] = ipStats{TX: 100, RX: 200}
+	m.state.IPs[other] = ipStats{TX: 30, RX: 40, Updated: "unchanged"}
+	m.state.OrphanedTX, m.state.OrphanedRX = 5, 6
+	lastReset := m.state.LastReset
+	stale := m.state
+
+	month, reset, err := m.ResetIP(ip)
+	if err != nil || !reset || month != nowMSK().Format("2006-01") {
+		t.Fatalf("unexpected reset: month=%s reset=%v err=%v", month, reset, err)
+	}
+	if err := m.save(stale); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, monitor := range []*Monitor{m, New(path, time.Second, nil, ModePerIP)} {
+		summary := monitor.GetAll(func(string) int { return 0 }, func(string) []int64 { return nil })
+		if _, exists := summary.IPs[ip]; exists {
+			t.Fatal("reset IP was restored")
+		}
+		if summary.IPs[other].TXBytes != 30 || summary.IPs[other].RXBytes != 40 || summary.IPs[other].Updated != "unchanged" {
+			t.Fatalf("other IP changed: %+v", summary.IPs[other])
+		}
+		if summary.TotalTXBytes != 35 || summary.TotalRXBytes != 46 || summary.LastReset != lastReset {
+			t.Fatalf("unexpected summary: %+v", summary)
+		}
+	}
+
+	_, reset, err = m.ResetIP(ip)
+	if err != nil || reset {
+		t.Fatalf("repeated reset: reset=%v err=%v", reset, err)
+	}
+}
+
+func TestResetIPContinuesActiveFlowDeltas(t *testing.T) {
+	m := New(filepath.Join(t.TempDir(), "traffic.json"), time.Second, nil, ModePerIP)
+	ip := "203.0.113.7"
+	flows := []conntrackgo.UDPFlow{{SrcIP: ip, DstIP: "192.0.2.1", SrcPort: 1000, DstPort: 2408, BytesOrig: 100, BytesReply: 200}}
+	m.collectFlows(flows, nil)
+	flows[0].BytesOrig, flows[0].BytesReply = 150, 300
+	m.collectFlows(flows, nil)
+	if _, reset, err := m.ResetIP(ip); err != nil || !reset {
+		t.Fatalf("reset=%v err=%v", reset, err)
+	}
+	flows[0].BytesOrig, flows[0].BytesReply = 160, 320
+	m.collectFlows(flows, nil)
+	stats := m.state.IPs[ip]
+	if stats.TX != 10 || stats.RX != 20 {
+		t.Fatalf("expected only post-reset deltas, got %+v", stats)
+	}
+}
+
+func TestResetIPFailurePreservesMemory(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(parent, []byte("blocked"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := New(filepath.Join(parent, "traffic.json"), time.Second, nil, ModePerIP)
+	ip := "203.0.113.7"
+	m.state.IPs[ip] = ipStats{TX: 100, RX: 200}
+	if _, reset, err := m.ResetIP(ip); err == nil || reset {
+		t.Fatalf("expected persistence failure, reset=%v err=%v", reset, err)
+	}
+	if m.state.IPs[ip].TX != 100 || m.state.IPs[ip].RX != 200 {
+		t.Fatal("failed reset changed memory")
+	}
+}
+
+func TestResetIPSkipsAggregateAndOffModes(t *testing.T) {
+	for _, mode := range []string{ModeAggregate, ModeOff} {
+		t.Run(mode, func(t *testing.T) {
+			m := New(filepath.Join(t.TempDir(), "traffic.json"), time.Second, nil, mode)
+			m.state.AggTX, m.state.AggRX = 1000, 2000
+			m.state.LastIfTX, m.state.LastIfRX = 3000, 4000
+			if _, reset, err := m.ResetIP("203.0.113.7"); err != nil || reset {
+				t.Fatalf("reset=%v err=%v", reset, err)
+			}
+			if m.state.AggTX != 1000 || m.state.AggRX != 2000 || m.state.LastIfTX != 3000 || m.state.LastIfRX != 4000 {
+				t.Fatal("aggregate counters changed")
+			}
+		})
 	}
 }
 

@@ -20,6 +20,30 @@ def test_health(client):
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
 
+
+@patch("api.index.relay_client.reset_traffic_all_relays", new_callable=AsyncMock)
+def test_reset_traffic_ip_requires_api_key(mock_reset, client):
+    response = client.post("/api/traffic/203.0.113.7/reset", headers={"X-API-Key": "wrong"})
+    assert response.status_code == 403
+    mock_reset.assert_not_awaited()
+
+
+@patch("api.index.relay_client.reset_traffic_all_relays", new_callable=AsyncMock)
+def test_reset_traffic_ip_returns_per_relay_results(mock_reset, client):
+    mock_reset.return_value = {"r1": {"ok": True, "reset": True}, "r2": {"ok": False, "error": "timeout"}}
+    response = client.post("/api/traffic/203.0.113.7/reset", headers={"X-API-Key": "test_key"})
+    assert response.status_code == 200
+    assert response.json() == mock_reset.return_value
+    mock_reset.assert_awaited_once_with("203.0.113.7")
+
+
+@pytest.mark.parametrize("ip", ["invalid", "::1", "999.1.2.3"])
+@patch("api.index.relay_client.reset_traffic_all_relays", new_callable=AsyncMock)
+def test_reset_traffic_ip_rejects_invalid_address(mock_reset, ip, client):
+    response = client.post(f"/api/traffic/{ip}/reset", headers={"X-API-Key": "test_key"})
+    assert response.status_code == 400
+    mock_reset.assert_not_awaited()
+
 @patch("api.index.get_sync_payload", new_callable=AsyncMock)
 def test_whitelist_payload_is_compressed(mock_payload, client):
     mock_payload.return_value = {

@@ -48,7 +48,7 @@ from .crypto import agent_secret_fingerprint
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("panel")
 
-API_VERSION = "1.4.0"
+API_VERSION = "1.5.0"
 
 
 @asynccontextmanager
@@ -684,6 +684,15 @@ async def api_update_all_relays():
 @app.get("/api/traffic", dependencies=[Depends(require_api_key)])
 async def api_traffic_all():
     return await relay_client.get_traffic_all_relays()
+
+
+@app.post("/api/traffic/{ip}/reset", dependencies=[Depends(require_api_key)])
+async def api_traffic_reset_ip(ip: str):
+    try:
+        ip = str(ipaddress.IPv4Address(ip))
+    except ValueError:
+        raise HTTPException(400, "invalid_ip")
+    return await relay_client.reset_traffic_all_relays(ip)
 
 
 

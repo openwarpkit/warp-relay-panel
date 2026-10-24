@@ -43,3 +43,17 @@ func (s *Server) handleTrafficReset(w http.ResponseWriter, r *http.Request) {
 	month := s.Traffic.Reset()
 	writeJSON(w, 200, map[string]interface{}{"ok": true, "month": month})
 }
+
+func (s *Server) handleTrafficResetIP(w http.ResponseWriter, r *http.Request) {
+	ip := chi.URLParam(r, "ip")
+	if !shell.ValidIPv4(ip) {
+		writeError(w, 400, "Invalid IP: "+ip)
+		return
+	}
+	month, reset, err := s.Traffic.ResetIP(ip)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]interface{}{"ok": true, "ip": ip, "month": month, "reset": reset})
+}

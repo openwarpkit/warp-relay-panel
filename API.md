@@ -894,6 +894,20 @@ Legacy endpoint для rolling upgrade старых full-agent. Новые agent
 
 ---
 
+### `POST /api/traffic/{ip}/reset`
+
+Requires panel v1.5.0, agent v2.2.21, and the `X-API-Key` header. The only input is the path parameter `ip` (IPv4). No body or query parameters.
+
+The response is a map keyed by relay name. Each result contains `ok`, `relay`, and, on success, `ip`, `month` (`YYYY-MM`, MSK), and `reset`. `reset=true` means the IP entry was removed and persisted. `reset=false` with `ok=true` means no entry existed or the agent uses aggregate/off accounting. Failed results contain `ok=false` and `error`.
+
+HTTP 200 may contain partial failures. An empty map means no active relays. Invalid IPv4 returns HTTP 400 with `{"detail":"invalid_ip"}`. Only active relays are contacted. Other IPs, archived months, client bindings, whitelist, rate limits, and aggregate min-agent counters remain unchanged.
+
+New traffic accumulates after the reset. Repeating the operation also clears traffic accumulated since the previous call. Do not automatically retry the entire operation after a partial failure or timeout.
+
+The panel calls `POST /traffic/{ip}/reset` on each relay using `X-Agent-Key`. Bots need only the panel API key; relay secrets and SSH access are not required.
+
+---
+
 # Relay Agent API
 
 Каждый relay-сервер слушает собственный HTTP API (по умолчанию порт 7580). Панель сама дёргает эти endpoints — но они полезны и для прямого мониторинга/диагностики.

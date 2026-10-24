@@ -45,6 +45,7 @@ func (s *Server) Routes() http.Handler {
 	r.Get("/traffic", s.handleTrafficAll)
 	r.Get("/traffic/{ip}", s.handleTrafficByIP)
 	r.Post("/traffic/reset", s.handleTrafficReset)
+	r.Post("/traffic/{ip}/reset", s.handleTrafficResetIP)
 
 	r.Get("/shaped", s.handleShaped)
 	r.Post("/shaped/reset", s.handleShapedReset)

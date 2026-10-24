@@ -29,7 +29,7 @@ import (
 	"github.com/openwarpkit/warp-relay-panel/relay-agent/internal/watchdog"
 )
 
-var Version = "2.2.20-min"
+var Version = "2.2.21-min"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)

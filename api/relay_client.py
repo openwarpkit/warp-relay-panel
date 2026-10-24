@@ -385,6 +385,21 @@ async def get_traffic_all_relays(client_ip: str | None = None) -> dict:
     return results
 
 
+async def reset_traffic_all_relays(ip: str) -> dict:
+    ip = str(ipaddress.IPv4Address(ip))
+    relays = await db.get_active_relays()
+
+    async def _reset(relay):
+        try:
+            ok, data = await _agent_request(relay, "POST", f"/traffic/{ip}/reset")
+            return {**data, "ok": ok and data.get("ok", False), "relay": relay["name"]}
+        except Exception as exc:
+            return {"ok": False, "relay": relay["name"], "error": str(exc)}
+
+    results = await asyncio.gather(*[_reset(relay) for relay in relays])
+    return {relay["name"]: result for relay, result in zip(relays, results)}
+
+
 async def health_check_all() -> dict:
     relays = await db.get_active_relays()
     results = {}
