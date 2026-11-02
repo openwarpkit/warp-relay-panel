@@ -1,0 +1,25 @@
+[Unit]
+Description=Encrypted WARP relay panel backup
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/bin/python3 /opt/warp-relay-panel-backup/panel_backup.py --config /etc/warp-relay-panel-backup/config.json
+TimeoutStartSec=20min
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectControlGroups=true
+NoNewPrivileges=true
+ReadWritePaths=/var/backups/warp-relay-panel /var/lib/warp-relay-panel-backup /run/lock
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

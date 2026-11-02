@@ -1,0 +1,23 @@
+{
+  "panel_container": "warp-relay-panel",
+  "database_container": "warp-relay-db",
+  "database_user": "warp",
+  "database_name": "warp",
+  "helper_image": "warp-relay-panel-backup-helper:latest",
+  "archive_directory": "/var/backups/warp-relay-panel/archives",
+  "temporary_directory": "/var/lib/warp-relay-panel-backup/tmp",
+  "lock_file": "/run/lock/warp-relay-panel-backup.lock",
+  "runtime_files": {
+    "/srv/warp-relay-panel/.env": "runtime/panel.env",
+    "/srv/warp-relay-panel/docker-compose.yml": "runtime/docker-compose.yml",
+    "/srv/warp-relay-panel/recovery-volume.yml": "runtime/recovery-volume.yml"
+  },
+  "keep_delivered": 72,
+  "part_bytes": 16777216,
+  "installation_id": "replace-on-installation",
+  "expected_bot_id": 0,
+  "chat_id": 0,
+  "message_thread_id": 0,
+  "telegram_token": "",
+  "archive_password": ""
+}

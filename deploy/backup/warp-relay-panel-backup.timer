@@ -1,0 +1,12 @@
+[Unit]
+Description=Hourly encrypted WARP relay panel backup
+
+[Timer]
+OnCalendar=*-*-* *:00:00 Europe/Moscow
+RandomizedDelaySec=20
+AccuracySec=1s
+Persistent=true
+Unit=warp-relay-panel-backup.service
+
+[Install]
+WantedBy=timers.target
