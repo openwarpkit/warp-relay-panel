@@ -34,3 +34,24 @@
 - Routing validation: direct HTTPS API and existing public activation proxy returned HTTP 200 with database health OK. API requests without a key were rejected. TLS verification remained enabled.
 - Backups: original SQL, verified restored dump, full pre-change bot database dump, exact affected bot rows, agent state and configuration snapshots were retained privately. No database contents, credentials or private keys are included in Git.
 - Approval: owner request in this chat to restore the specified archive on the specified server, reconcile absent bot credentials and switch the proxy; subsequent explicit instruction to move the API A record. DNS change was applied by the coordinating agent and independently verified.
+
+## WRP-BACKUP-20261102-001
+
+- Completed: 2026-11-02 05:17:44 MSK.
+- Status: installed, delivered, restored and scheduled.
+- Deployed controller/helper code commit: `e25c21dac33bcb34c1bc399aacf93275923a7eb8`, pushed and verified against the upstream before installation.
+- Installed controller SHA-256: `72fbbd92006836eece02236f1087af1e8cc1de7c8495245d30f817d2bc7b2a4e`.
+- Installed helper SHA-256: `18ad5ac00fe5a3c8f03dfc465484f02663a0e48f110f0b5bc005262461dc1aa6`, matching the file actually executed in the helper image.
+- Helper image ID: `sha256:3792e99415f60f0a8a46ffac28875631660fa0904febe5cb5c63ba935d1b5a7f`; Python 3.12 and py7zr 1.0.0. Encryption helpers are ephemeral, have no network, and are limited to one CPU and 1 GiB RAM.
+- Scope: consistent SQL dump and required panel runtime settings, dedicated Nginx virtual host, only that host's TLS chain/key and renewal settings, plus restore manifest. Other projects, the shared ACME account, backup encryption password and Telegram credentials are excluded from the payload.
+- Snapshot consistency: exported PostgreSQL repeatable-read snapshot used by pg_dump; validation table counts came from that same source transaction, not a later live database.
+- First archive: `warp-db-20261102-050825.7z`, 12,178,973 bytes, SHA-256 `000c5a98d8f6b2c88500e7b2e369c64094cfee0792d887785d767a9bd9837f04`.
+- Validation: encrypted headers require a password; all payload files passed encryption/extraction round-trip hashes; actual Telegram document was downloaded and reassembled with an identical whole-archive SHA-256. A separate network-isolated PostgreSQL container restored the downloaded copy successfully, with all table counts matching the original snapshot.
+- Independent coordinator validation downloaded the delivered document from another computer and confirmed the same size and SHA-256.
+- Delivery: documents only, no caption, silent mode, owner-selected destination/topic. Recipient and delivery identifiers remain only in the private receipt and runtime configuration.
+- Files larger than 16 MiB are split into numbered documents, downloaded and reassembled with the original checksum. Small-threshold split/reassembly tests passed.
+- Retention: latest 72 fully verified delivered archive groups belonging to this installation. Unsent archives, foreign installation records, unrelated files and symlink receipts are preserved. Three focused retention/split/symlink tests passed.
+- Scheduling: hourly Europe/Moscow timer, up to 20 seconds jitter, persistent catch-up, cross-process flock. The first-run restore-test override was removed before enabling the timer. Next trigger at enable: 2026-11-02 06:00:09 MSK.
+- Security checks: private temporary/archive directories 0700, secret runtime configuration 0600, passwords supplied to the encryption helper only through stdin, safe error paths tested with sentinel secrets. No plaintext temporary payload remained after the first run.
+- Operational checks: simultaneous manual invocation was skipped by the lock; backup service completed with status 0; timer is enabled and active. Panel, database, web generator, bot and analyzer remained healthy without application container replacement.
+- Approval: owner explicitly authorized the new hourly panel backup job, encrypted offsite delivery to the selected Telegram topic, and protected credential storage. No new user-facing recovery text or Telegram caption was added.
