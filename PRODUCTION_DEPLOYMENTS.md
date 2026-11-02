@@ -55,3 +55,16 @@
 - Security checks: private temporary/archive directories 0700, secret runtime configuration 0600, passwords supplied to the encryption helper only through stdin, safe error paths tested with sentinel secrets. No plaintext temporary payload remained after the first run.
 - Operational checks: simultaneous manual invocation was skipped by the lock; backup service completed with status 0; timer is enabled and active. Panel, database, web generator, bot and analyzer remained healthy without application container replacement.
 - Approval: owner explicitly authorized the new hourly panel backup job, encrypted offsite delivery to the selected Telegram topic, and protected credential storage. No new user-facing recovery text or Telegram caption was added.
+
+## WRP-BACKUP-CAPTION-20261102-001
+
+- Completed: 2026-11-02 MSK.
+- Status: deployed and delivery verified.
+- Controller code commit: `4c4b4f54416ea261f190be8217f63cf178bb6073`, pushed and verified against the upstream.
+- Installed controller SHA-256: `519ab3dc79c474f884dff8a274f7c16f0f02e8f0adf8d823605224e5ece1a4f5`.
+- Scope: owner-supplied two-line document caption with Moscow archive time, full encrypted archive size in MiB displayed as MB, and clients from the exported PostgreSQL snapshot. The caption is verified in the Telegram upload response and retained in each delivery receipt.
+- Predeployment checks: Python compilation, all three existing retention/split/symlink tests, UTF-8 multipart caption, archive bytes, topic, silent delivery and rejected missing response caption. These checks made no network requests.
+- Deployment: controller replaced atomically while holding the existing backup lock; previous controller retained privately. Timer, encrypted payload, helper image, secrets and destination were retained.
+- Real verification archive: `warp-db-20261102-073102.7z`, 12,198,109 bytes, SHA-256 `fa9701bd7f2bff6a4664db40fa5f6233e6a9782d4f427e0ffada079e4a25a45d`. Caption reports `02.11.2026 07:31:02`, `11.6MB`, `11472` clients. Telegram returned the exact two-line caption; downloaded archive checksum and extracted payload checks passed.
+- Runtime: verification service exited with status 0; hourly timer remains active.
+- Approval: owner provided the exact caption format, then explicitly approved this code commit, production installation and one verification delivery in this chat: «Да, выложить и проверить доставку».
