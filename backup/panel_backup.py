@@ -154,10 +154,17 @@ def telegram_json(token, method, fields):
     return data['result']
 
 
-def send_document(config, archive):
+def backup_caption(created_at, archive_size, client_count):
+    return (
+        f'📦 #AUTOBACKUP | {created_at:%d.%m.%Y %H:%M:%S}\n'
+        f'📊 WARP Panel | Size: {archive_size / (1024 * 1024):.1f}MB | Clients: {client_count}'
+    )
+
+
+def send_document(config, archive, caption):
     boundary = 'backup' + uuid.uuid4().hex
     body = bytearray()
-    fields = {'chat_id': str(config['chat_id']), 'message_thread_id': str(config['message_thread_id']), 'disable_notification': 'true'}
+    fields = {'chat_id': str(config['chat_id']), 'message_thread_id': str(config['message_thread_id']), 'disable_notification': 'true', 'caption': caption}
     for key, value in fields.items():
         body.extend(('--' + boundary + '\r\nContent-Disposition: form-data; name="' + key + '"\r\n\r\n' + value + '\r\n').encode())
     body.extend(('--' + boundary + '\r\nContent-Disposition: form-data; name="document"; filename="' + archive.name + '"\r\nContent-Type: application/x-7z-compressed\r\n\r\n').encode())
@@ -182,7 +189,9 @@ def send_document(config, archive):
         raise BackupError('Telegram destination mismatch')
     if document.get('file_name') != archive.name or document.get('file_size') != archive.stat().st_size:
         raise BackupError('Telegram document metadata mismatch')
-    return {'message_id': message['message_id'], 'file_id': document['file_id'], 'file_unique_id': document.get('file_unique_id'), 'file_size': document['file_size']}
+    if message.get('caption') != caption:
+        raise BackupError('Telegram document caption mismatch')
+    return {'message_id': message['message_id'], 'file_id': document['file_id'], 'file_unique_id': document.get('file_unique_id'), 'file_size': document['file_size'], 'caption': caption}
 
 
 def download_document(config, file_id, target):
@@ -296,7 +305,8 @@ def perform(config, verify_restore):
     config['postgres_image'] = run(['docker', 'inspect', '--format', '{{.Image}}', config['database_container']]).decode().strip()
     directory = secure_directory(config['archive_directory'])
     temporary = secure_directory(config['temporary_directory'])
-    archive_name = 'warp-db-' + datetime.now(MSK).strftime('%Y%m%d-%H%M%S') + '.7z'
+    created_at = datetime.now(MSK)
+    archive_name = 'warp-db-' + created_at.strftime('%Y%m%d-%H%M%S') + '.7z'
     archive = directory / archive_name
     if archive.exists():
         raise BackupError('Archive name already exists')
@@ -330,13 +340,14 @@ def perform(config, verify_restore):
         if me['id'] != config['expected_bot_id']:
             raise BackupError('Telegram bot identity mismatch')
         digest = file_hash(archive)
+        caption = backup_caption(created_at, archive.stat().st_size, snapshot['counts']['clients'])
         receipt = {'archive': archive.name, 'installation_id': config['installation_id'], 'sha256': digest, 'archive_size': archive.stat().st_size, 'delivery_verified': False, 'parts': [], 'created_utc': metadata['created_utc'], 'database_counts': snapshot['counts']}
         receipt_path = archive.with_suffix('.receipt.json')
         receipt_path.write_text(json.dumps(receipt, indent=2))
         receipt_path.chmod(0o600)
         received_parts = []
         for part in parts:
-            delivered = send_document(config, part)
+            delivered = send_document(config, part, caption)
             delivered.update({'file_name': part.name, 'sha256': file_hash(part), 'download_verified': False})
             receipt['parts'].append(delivered)
             receipt_path.write_text(json.dumps(receipt, indent=2))
