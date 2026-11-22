@@ -1,5 +1,18 @@
 # Production deployments
 
+## WRP-BACKUP-20261122-001
+
+- Completed: 2026-11-22 11:21:43 MSK.
+- Code commit: `53a53c5bc777474e40796cd15a9b2d37afea944f`, pushed and verified on `origin/main`.
+- Storage Box container image: `sha256:b7675c7b4e93b4880702392ffacddcb169630c2fd953d6dfe305bf93a7d4bee0`.
+- Storage Box project directory: `/home/warp-relay-panel`. Hourly AES-256 archives are retained for the current Moscow date and the previous 29 calendar dates.
+- First Storage Box archive: `2026-11-22/11:00.7z`, 19,680,653 bytes, SHA-256 `4f66bc7cab2b7bcaf5bcff68bcdfd00f62947805c157f754617502bf2c97dae2`. Confirmed at 11:20:32 MSK. The downloaded archive was restored to a network-isolated PostgreSQL 17 cluster.
+- Telegram controller SHA-256: `3ff91a085420e7cd8c777b4c5f6c55b58caf3fcae682d85f009b5819c365ecb5`. The existing systemd timer is active with a daily 00:30 MSK schedule. The next scheduled run was 2026-11-23 00:30 MSK.
+- First Telegram archive: `warp-db-20261122-112045.7z`, 19,636,637 bytes, SHA-256 `a2a13aafe763f60952d70b064431271669fa631c8af7cf57d892ed353c52c803`. Delivery and downloaded document checksums were verified.
+- Validation: the Compose service reported healthy with `unless-stopped` and Docker enabled at boot. The PostgreSQL backup role could read client records and lacked INSERT, UPDATE and DELETE privileges on that table. Panel and database containers retained their pre-deployment start times and both reported healthy.
+- The archive recovery credential was stored off the VPS in the local DPAPI credential store and verified against the server copy.
+- Approval: [owner reply](codex://threads/01a20245-38d6-7f73-aa29-18dd7ce983f9), «заливай и сделай первые бекапы».
+
 ## WRP-20261027-001
 
 - Completed: 2026-10-27 09:56:30 Europe/Moscow.
