@@ -1,9 +1,8 @@
 [Unit]
-Description=Hourly encrypted WARP relay panel backup
+Description=Daily encrypted WARP relay panel backup to Telegram
 
 [Timer]
-OnCalendar=*-*-* *:00:00 Europe/Moscow
-RandomizedDelaySec=20
+OnCalendar=*-*-* 00:30:00 Europe/Moscow
 AccuracySec=1s
 Persistent=true
 Unit=warp-relay-panel-backup.service

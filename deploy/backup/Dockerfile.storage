@@ -1,0 +1,19 @@
+FROM postgres:17-bookworm
+
+ARG BACKUP_UID=1000
+ARG BACKUP_GID=1000
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3-venv \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -o -g "$BACKUP_GID" backup-runner \
+    && useradd -o -u "$BACKUP_UID" -g "$BACKUP_GID" -M backup-runner \
+    && python3 -m venv /opt/venv \
+    && touch /run/backup-ssh-key
+
+ENV PATH="/opt/venv/bin:${PATH}" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+COPY deploy/backup/requirements.txt deploy/backup/requirements-storage.txt /opt/backup/
+RUN pip install --no-cache-dir -r /opt/backup/requirements.txt -r /opt/backup/requirements-storage.txt
+COPY backup/backup_archive.py backup/hetzner_backup.py backup/storage_box.py /opt/backup/
+USER backup-runner
+ENTRYPOINT ["python3", "/opt/backup/hetzner_backup.py"]
+CMD ["schedule"]

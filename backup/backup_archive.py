@@ -28,9 +28,38 @@ def inspect_archive(path, password, output):
     with py7zr.SevenZipFile(path, 'r', password=password) as archive:
         archive.extractall(path=output)
     return {
-        str(item.relative_to(output)): file_hash(item)
+        item.relative_to(output).as_posix(): file_hash(item)
         for item in output.rglob('*') if item.is_file()
     }
+
+
+def create_archive(archive, source, password):
+    expected = {
+        item.relative_to(source).as_posix(): file_hash(item)
+        for item in source.rglob('*') if item.is_file()
+    }
+    filters = [
+        {'id': py7zr.FILTER_LZMA2, 'preset': 3},
+        {'id': py7zr.FILTER_CRYPTO_AES256_SHA256},
+    ]
+    with py7zr.SevenZipFile(
+        archive, 'w', password=password, header_encryption=True,
+        filters=filters,
+    ) as writer:
+        for name in sorted(expected):
+            writer.write(source / name, arcname=name)
+    try:
+        with py7zr.SevenZipFile(archive, 'r') as reader:
+            reader.getnames()
+    except PasswordRequired:
+        pass
+    else:
+        raise ValueError('Archive headers are not encrypted')
+    with tempfile.TemporaryDirectory() as directory:
+        actual = inspect_archive(archive, password, Path(directory))
+    if actual != expected:
+        raise ValueError('Archive round-trip mismatch')
+    return {'files': len(expected), 'round_trip': True, 'headers_encrypted': True, 'sha256': file_hash(archive)}
 
 
 def main():
@@ -38,33 +67,7 @@ def main():
     password = payload.pop('password')
     archive = Path(payload['archive'])
     if payload['operation'] == 'create':
-        source = Path(payload['source'])
-        expected = {
-            str(item.relative_to(source)): file_hash(item)
-            for item in source.rglob('*') if item.is_file()
-        }
-        filters = [
-            {'id': py7zr.FILTER_LZMA2, 'preset': 3},
-            {'id': py7zr.FILTER_CRYPTO_AES256_SHA256},
-        ]
-        with py7zr.SevenZipFile(
-            archive, 'w', password=password, header_encryption=True,
-            filters=filters,
-        ) as writer:
-            for name in sorted(expected):
-                writer.write(source / name, arcname=name)
-        try:
-            with py7zr.SevenZipFile(archive, 'r') as reader:
-                reader.getnames()
-        except PasswordRequired:
-            pass
-        else:
-            raise ValueError('Archive headers are not encrypted')
-        with tempfile.TemporaryDirectory() as directory:
-            actual = inspect_archive(archive, password, Path(directory))
-        if actual != expected:
-            raise ValueError('Archive round-trip mismatch')
-        result = {'files': len(expected), 'round_trip': True, 'headers_encrypted': True, 'sha256': file_hash(archive)}
+        result = create_archive(archive, Path(payload['source']), password)
     elif payload['operation'] == 'extract':
         output = Path(payload['output'])
         output.mkdir(parents=True, exist_ok=True)

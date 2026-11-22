@@ -1,0 +1,8 @@
+{
+  "server_id": "warp-relay-panel-vps2",
+  "host": "u000000-sub2.your-storagebox.de",
+  "user": "u000000-sub2",
+  "port": 23,
+  "retention_days": 30,
+  "max_archive_bytes": 268435456
+}

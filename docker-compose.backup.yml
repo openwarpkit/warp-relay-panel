@@ -1,0 +1,55 @@
+services:
+  backup:
+    profiles: [backup]
+    build:
+      context: .
+      dockerfile: deploy/backup/Dockerfile.storage
+      args:
+        BACKUP_UID: ${BACKUP_UID:-1000}
+        BACKUP_GID: ${BACKUP_GID:-1000}
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    cpus: 1
+    mem_limit: ${BACKUP_MEMORY:-2g}
+    pids_limit: 64
+    stop_grace_period: 25s
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGDATABASE: ${POSTGRES_DB:-warp}
+      PGUSER: ${BACKUP_POSTGRES_USER:-warp_backup}
+      PGPASSFILE: /run/backup/pgpass
+      PGCONNECT_TIMEOUT: "10"
+      PGAPPNAME: warp-relay-panel-backup
+      HOME: /tmp
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,mode=1777,size=${BACKUP_TMPFS_SIZE:-1g}
+      - /var/lib/postgresql/data:rw,nosuid,nodev,noexec,size=1m
+    volumes:
+      - type: bind
+        source: ${BACKUP_CONFIG_DIR:-/etc/warp-relay-hetzner-backup}
+        target: /run/backup
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${BACKUP_SSH_KEY:?set BACKUP_SSH_KEY to the Storage Box private key path}
+        target: /run/backup-ssh-key
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${BACKUP_STATE_DIR:-/var/lib/warp-relay-hetzner-backup}
+        target: /state
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: [CMD, python3, /opt/backup/hetzner_backup.py, status]
+      interval: 5m
+      timeout: 5s
+      retries: 2
+      start_period: 30m

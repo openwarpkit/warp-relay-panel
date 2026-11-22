@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import selectors
 import shutil
 import subprocess
 import sys
@@ -21,19 +22,18 @@ import uuid
 
 ARCHIVE_PATTERN = re.compile(r'^warp-db-\d{8}-\d{6}\.7z$')
 MSK = timezone(timedelta(hours=3))
-SNAPSHOT_SOURCE = '''import json,os,sys,psycopg
-from psycopg import sql
-connection=psycopg.connect(os.environ['DATABASE_URL'],autocommit=True)
-connection.execute('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
-try:
- snapshot=connection.execute('SELECT pg_export_snapshot()').fetchone()[0]
- tables=connection.execute("SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename").fetchall()
- counts={name:connection.execute(sql.SQL('SELECT count(*) FROM public.{}').format(sql.Identifier(name))).fetchone()[0] for (name,) in tables}
- print(json.dumps({'snapshot':snapshot,'counts':counts}),flush=True)
- sys.stdin.buffer.read(1)
-finally:
- connection.execute('ROLLBACK')
- connection.close()
+SNAPSHOT_SQL = b'''BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SELECT json_build_object(
+    'snapshot', pg_export_snapshot(),
+    'counts', (SELECT json_object_agg(tablename, table_count)
+               FROM pg_tables
+               CROSS JOIN LATERAL XMLTABLE(
+                   '/table/row' PASSING query_to_xml(
+                       format('SELECT count(*) FROM public.%I', tablename), false, false, ''
+                   ) COLUMNS table_count bigint PATH 'count'
+               ) AS counted
+               WHERE schemaname = 'public')
+);
 '''
 
 
@@ -102,20 +102,29 @@ def archive_worker(config, operation, archive, work, password, source=None, outp
 
 
 def export_database(config, output):
-    command = ['docker', 'exec', '-i', config['panel_container'], 'python', '-c', SNAPSHOT_SOURCE]
-    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    database = ['docker', 'exec', '-i', config['database_container']]
+    connection = ['-U', config['database_user'], '-d', config['database_name']]
+    run(database + ['pg_isready', '-q', '-t', '10'] + connection, timeout=20)
+    process = subprocess.Popen(
+        database + ['psql', '-X', '-w', '-qAt', '-v', 'ON_ERROR_STOP=1'] + connection,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
     try:
-        line = process.stdout.readline()
+        process.stdin.write(SNAPSHOT_SQL)
+        process.stdin.flush()
+        with selectors.DefaultSelector() as ready:
+            ready.register(process.stdout, selectors.EVENT_READ)
+            if not ready.select(timeout=60):
+                raise BackupError('Snapshot export timed out')
+            line = process.stdout.readline()
         if not line:
             raise BackupError('Snapshot export failed')
         metadata = json.loads(line)
         snapshot = metadata['snapshot']
         if not re.fullmatch(r'[0-9A-Fa-f-]+', snapshot):
             raise BackupError('Invalid snapshot identifier')
-        dump_command = [
-            'docker', 'exec', config['database_container'], 'pg_dump',
-            '-U', config['database_user'], '-d', config['database_name'],
-            '--no-owner', '--no-acl', '--snapshot', snapshot,
+        dump_command = database + ['pg_dump', '-w'] + connection + [
+            '--no-owner', '--no-acl', '--snapshot', snapshot, '--lock-wait-timeout=15s',
         ]
         with output.open('wb') as target:
             result = subprocess.run(dump_command, stdout=target, stderr=subprocess.PIPE, timeout=600)
@@ -125,7 +134,7 @@ def export_database(config, output):
     finally:
         if process.stdin:
             try:
-                process.stdin.write(b'1')
+                process.stdin.write(b'ROLLBACK;\n')
                 process.stdin.flush()
             except BrokenPipeError:
                 pass
@@ -301,7 +310,12 @@ def prune_delivered(directory, keep, installation_id):
 
 def perform(config, verify_restore):
     config = dict(config)
-    panel_reference = run(['docker', 'inspect', '--format', '{{.Config.Image}}', config['panel_container']]).decode().strip()
+    panel_reference = config.get('panel_image')
+    if panel_reference is None and config.get('panel_container'):
+        try:
+            panel_reference = run(['docker', 'inspect', '--format', '{{.Config.Image}}', config['panel_container']], timeout=10).decode().strip()
+        except (BackupError, subprocess.TimeoutExpired):
+            pass
     config['postgres_image'] = run(['docker', 'inspect', '--format', '{{.Image}}', config['database_container']]).decode().strip()
     directory = secure_directory(config['archive_directory'])
     temporary = secure_directory(config['temporary_directory'])
