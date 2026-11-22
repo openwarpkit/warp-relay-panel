@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, datetime
 import errno
 import hashlib
 import posixpath
@@ -11,8 +11,9 @@ import paramiko
 
 PROJECT = 'warp-relay-panel'
 MARKER = '.backup-owner'
-HOUR_FILE = re.compile(r'(?:[01][0-9]|2[0-3]):00\.7z')
+ARCHIVE_FILE = re.compile(r'(?:[01][0-9]|2[0-3])[-:][0-5][0-9]\.7z')
 DATE_DIRECTORY = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}')
+ARCHIVE_FORMAT = '%Y-%m-%d/%H-%M.7z'
 
 
 class StorageError(RuntimeError):
@@ -21,6 +22,26 @@ class StorageError(RuntimeError):
 
 class ExistingArchive(StorageError):
     pass
+
+
+def parse_archive(archive):
+    day, separator, name = archive.partition('/')
+    if not separator or not DATE_DIRECTORY.fullmatch(day) or not ARCHIVE_FILE.fullmatch(name):
+        raise StorageError('Expected YYYY-MM-DD/HH-MM.7z or YYYY-MM-DD/HH:MM.7z')
+    try:
+        return datetime.strptime(day + '/' + name.replace(':', '-'), ARCHIVE_FORMAT)
+    except ValueError:
+        raise StorageError('Invalid archive date') from None
+
+
+def archive_path(slot):
+    return slot.strftime(ARCHIVE_FORMAT)
+
+
+def alternate_path(archive):
+    day, name = archive.split('/')
+    alternate = name.replace(':', '-') if ':' in name else name.replace('-', ':')
+    return f'{day}/{alternate}'
 
 
 def lstat(sftp, path):
@@ -66,6 +87,14 @@ def read_archive(sftp, path, limit, target=None):
     if size != entry.st_size:
         raise StorageError('Storage Box download size mismatch')
     return size, digest
+
+
+def resolve_archive(sftp, root, archive):
+    day = posixpath.join(root, posixpath.dirname(archive))
+    directory(sftp, day)
+    if lstat(sftp, posixpath.join(root, archive)) is not None:
+        return archive
+    return alternate_path(archive)
 
 
 @contextmanager
@@ -116,10 +145,12 @@ def initialize(sftp, root, server_id):
 
 
 def publish(sftp, root, slot, archive):
-    day = posixpath.join(root, slot.strftime('%Y-%m-%d'))
+    relative = archive_path(slot)
+    day, name = posixpath.split(posixpath.join(root, relative))
     directory(sftp, day, create=True)
-    name = slot.strftime('%H:00.7z')
     final = posixpath.join(day, name)
+    if lstat(sftp, posixpath.join(root, alternate_path(relative))) is not None:
+        raise ExistingArchive('A legacy archive for this hour already exists')
     pending = posixpath.join(day, '.' + name + '.partial')
     with archive.open('rb') as source:
         expected = digest_stream(source)
@@ -157,8 +188,36 @@ def list_archives(sftp, root):
     for _, path in sorted(days(sftp, root), reverse=True):
         directory(sftp, path)
         for entry in sorted(sftp.listdir_attr(path), key=lambda item: item.filename, reverse=True):
-            if stat.S_ISREG(entry.st_mode) and HOUR_FILE.fullmatch(entry.filename):
+            if stat.S_ISREG(entry.st_mode) and ARCHIVE_FILE.fullmatch(entry.filename):
                 yield posixpath.relpath(posixpath.join(path, entry.filename), root), entry.st_size
+
+
+def migration_plan(sftp, root, recorded):
+    entries = {}
+    legacy = set()
+    for _, path in days(sftp, root):
+        directory(sftp, path)
+        for entry in sftp.listdir_attr(path):
+            relative = posixpath.relpath(posixpath.join(path, entry.filename), root)
+            entries.setdefault(relative.casefold(), []).append(relative)
+            if ':' in entry.filename and ARCHIVE_FILE.fullmatch(entry.filename):
+                legacy.add(relative)
+    conflicts = []
+    moves = []
+    for old in sorted(legacy | recorded.keys()):
+        new = archive_path(parse_archive(old))
+        if new == old:
+            raise StorageError(f'Invalid legacy path in migration journal: {old}')
+        occupants = entries.get(new.casefold(), [])
+        if old in legacy and occupants:
+            conflicts.extend(f'{old} -> {target}' for target in sorted(occupants))
+        elif old not in legacy and occupants != [new]:
+            conflicts.append(f'{old} -> {new} (found: {", ".join(occupants) or "neither path"})')
+        else:
+            moves.append((old, new, old in legacy))
+    if conflicts:
+        raise StorageError('Archive name conflicts:\n' + '\n'.join(conflicts))
+    return moves
 
 
 def prune(sftp, root, server_id, cutoff):
@@ -172,7 +231,7 @@ def prune(sftp, root, server_id, cutoff):
             name = entry.filename
             partial = name.startswith('.') and name.endswith('.partial')
             archive_name = name[1:-8] if partial else name
-            if stat.S_ISREG(entry.st_mode) and HOUR_FILE.fullmatch(archive_name):
+            if stat.S_ISREG(entry.st_mode) and ARCHIVE_FILE.fullmatch(archive_name):
                 sftp.remove(posixpath.join(path, name))
                 removed += 1
         if not sftp.listdir(path):

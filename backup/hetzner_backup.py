@@ -20,8 +20,6 @@ import storage_box
 
 
 MSK = ZoneInfo('Europe/Moscow')
-SLOT_FORMAT = '%Y-%m-%d/%H:00.7z'
-SLOT_PATTERN = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}/(?:[01][0-9]|2[0-3]):00\.7z')
 PENDING_PATTERN = re.compile(r'[0-9]{8}T(?:[01][0-9]|2[0-3])\.7z')
 STATE = Path('/state')
 CONFIG = Path('/run/backup/config.json')
@@ -91,20 +89,28 @@ def replace_state_file(staging, target):
         os.close(descriptor)
 
 
-def save_status(slot, size, digest):
-    staging = STATE / '.status.tmp'
-    result = {'archive': slot.strftime(SLOT_FORMAT), 'size': size, 'sha256': digest,
-              'verified_at': datetime.now(MSK).isoformat()}
+def write_state_json(name, result):
+    staging = STATE / ('.' + name + '.tmp')
     with staging.open('w') as target:
         json.dump(result, target)
         target.flush()
         os.fsync(target.fileno())
-    replace_state_file(staging, STATE / 'last-success.json')
+    replace_state_file(staging, STATE / name)
+
+
+def read_state_json(name):
+    path = STATE / name
+    return json.loads(path.read_text()) if path.is_file() else {}
+
+
+def save_status(archive, size, digest):
+    write_state_json('last-success.json', {
+        'archive': archive, 'size': size, 'sha256': digest, 'verified_at': datetime.now(MSK).isoformat(),
+    })
 
 
 def last_success():
-    path = STATE / 'last-success.json'
-    return json.loads(path.read_text()) if path.is_file() else {}
+    return read_state_json('last-success.json')
 
 
 def pending_archive(config, slot):
@@ -120,7 +126,7 @@ def pending_archive(config, slot):
         manifest = {
             'server_id': config['server_id'],
             'database': os.environ['PGDATABASE'],
-            'slot': slot.strftime(SLOT_FORMAT),
+            'slot': storage_box.archive_path(slot),
             'created_at': datetime.now(MSK).isoformat(),
             'dump_sha256': file_hash(dump),
         }
@@ -143,6 +149,7 @@ def pending_archive(config, slot):
 
 def deliver(config, slot, archive):
     started = time.monotonic()
+    relative = storage_box.archive_path(slot)
     try:
         with storage_box.connect(config, PRIVATE_KEY, KNOWN_HOSTS) as sftp:
             root = storage_box.project_root(sftp, config['directory'])
@@ -150,16 +157,17 @@ def deliver(config, slot, archive):
             size, digest = storage_box.publish(sftp, root, slot, archive)
         result = 'Published and verified'
     except storage_box.ExistingArchive:
-        size, digest = check_archive(config, slot.strftime(SLOT_FORMAT), restore=False)
+        relative, size, digest = check_archive(config, relative, restore=False)
         result = 'Recovered verified existing archive'
-    save_status(slot, size, digest)
+    save_status(relative, size, digest)
     archive.unlink()
-    log(f'{result} {slot.strftime(SLOT_FORMAT)} bytes={size} seconds={time.monotonic() - started:.1f}')
+    log(f'{result} {relative} bytes={size} seconds={time.monotonic() - started:.1f}')
 
 
 def run_backup(config):
     slot = datetime.now(MSK).replace(minute=0, second=0, microsecond=0)
-    log(f'Starting slot {slot.strftime(SLOT_FORMAT)}')
+    relative = storage_box.archive_path(slot)
+    log(f'Starting slot {relative}')
     (STATE / '.archive.tmp').unlink(missing_ok=True)
     pending = [path for path in STATE.iterdir() if PENDING_PATTERN.fullmatch(path.name)]
     if len(pending) > 1:
@@ -167,13 +175,14 @@ def run_backup(config):
     if pending:
         pending_slot = datetime.strptime(pending[0].name, '%Y%m%dT%H.7z').replace(tzinfo=MSK)
         deliver(config, pending_slot, pending[0])
-    if last_success().get('archive') != slot.strftime(SLOT_FORMAT):
+    previous = last_success().get('archive')
+    if not previous or storage_box.parse_archive(previous) != slot.replace(tzinfo=None):
         deliver(config, slot, pending_archive(config, slot))
     cutoff = slot.date() - timedelta(days=config['retention_days'] - 1)
     with storage_box.connect(config, PRIVATE_KEY, KNOWN_HOSTS) as sftp:
         root = storage_box.project_root(sftp, config['directory'])
         removed = storage_box.prune(sftp, root, config['server_id'], cutoff)
-    log(f'Finished {slot.strftime(SLOT_FORMAT)} oldest_date={cutoff} removed={removed}')
+    log(f'Finished {relative} oldest_date={cutoff} removed={removed}')
 
 
 def restore_test(dump, directory):
@@ -201,16 +210,14 @@ def restore_test(dump, directory):
 
 
 def check_archive(config, archive, restore):
-    if not SLOT_PATTERN.fullmatch(archive):
-        raise BackupError('Expected YYYY-MM-DD/HH:00.7z')
-    datetime.strptime(archive, SLOT_FORMAT)
+    slot = storage_box.parse_archive(archive)
     with tempfile.TemporaryDirectory(prefix='verify-') as temporary:
         work = Path(temporary)
         local = work / 'archive.7z'
         with storage_box.connect(config, PRIVATE_KEY, KNOWN_HOSTS) as sftp, local.open('wb') as target:
             root = storage_box.project_root(sftp, config['directory'])
             storage_box.verify_owner(sftp, root, config['server_id'])
-            storage_box.directory(sftp, posixpath.join(root, posixpath.dirname(archive)))
+            archive = storage_box.resolve_archive(sftp, root, archive)
             size, digest = storage_box.read_archive(
                 sftp, posixpath.join(root, archive), config['max_archive_bytes'], target,
             )
@@ -219,8 +226,9 @@ def check_archive(config, archive, restore):
         if set(hashes) != {DUMP, MANIFEST}:
             raise BackupError('Unexpected archive contents')
         manifest = json.loads((output / MANIFEST).read_text())
-        if (manifest['server_id'], manifest['slot'], manifest['database'], manifest['dump_sha256']) != (
-            config['server_id'], archive, os.environ['PGDATABASE'], hashes[DUMP],
+        if (manifest['server_id'], storage_box.parse_archive(manifest['slot']),
+            manifest['database'], manifest['dump_sha256']) != (
+            config['server_id'], slot, os.environ['PGDATABASE'], hashes[DUMP],
         ):
             raise BackupError('Archive manifest mismatch')
         command('pg_restore', '--list', str(output / DUMP))
@@ -228,7 +236,78 @@ def check_archive(config, archive, restore):
             restore_test(output / DUMP, work)
             log('Isolated PostgreSQL restore verified')
         log(f'Verified {archive} bytes={size} sha256={digest}')
-        return size, digest
+        return archive, size, digest
+
+
+def migrate_status(sftp, root, limit, records):
+    status = last_success()
+    if not status:
+        return
+    old = status['archive']
+    new = storage_box.archive_path(storage_box.parse_archive(old))
+    if new == old:
+        return
+    verified = records.get(old)
+    if verified is None:
+        target = posixpath.join(root, new)
+        storage_box.directory(sftp, posixpath.dirname(target))
+        verified = storage_box.read_archive(sftp, target, limit)
+    if tuple(verified) != (status['size'], status['sha256']):
+        raise BackupError(f'Last successful archive checksum mismatch: {new}')
+    status['archive'] = new
+    write_state_json('last-success.json', status)
+    log(f'Last successful archive path updated to {new}')
+
+
+def migrate_names(config, apply):
+    name = 'archive-name-migration.json'
+    with storage_box.connect(config, PRIVATE_KEY, KNOWN_HOSTS) as sftp:
+        root = storage_box.project_root(sftp, config['directory'])
+        storage_box.verify_owner(sftp, root, config['server_id'])
+        scope = [config['server_id'], config['user'], config['host'], config['port'], root]
+        journal = read_state_json(name)
+        resuming = bool(journal and not journal['complete'])
+        if resuming and journal['scope'] != scope:
+            raise BackupError('Archive migration journal belongs to a different Storage Box')
+        records = journal['archives'] if resuming else {}
+        moves = storage_box.migration_plan(sftp, root, records)
+        if resuming and {old for old, _, _ in moves} != records.keys():
+            extra = sorted(old for old, _, _ in moves if old not in records)
+            raise BackupError('Archives appeared after migration started:\n' + '\n'.join(extra))
+        if not apply:
+            for old, new, rename in moves:
+                log(f'{"Rename" if rename else "Verify"} {old} -> {new}')
+            log(f'Preflight checked {len(moves)} archive paths')
+            return
+
+        limit = config['max_archive_bytes']
+        for old, new, rename in moves:
+            path = old if rename else new
+            content = list(storage_box.read_archive(sftp, posixpath.join(root, path), limit))
+            if old in records and records[old] != content:
+                raise BackupError(f'Archive migration checksum mismatch: {path}')
+            records[old] = content
+        if storage_box.migration_plan(sftp, root, records) != moves:
+            raise BackupError('Archive paths changed during migration preflight')
+        if moves and not resuming:
+            write_state_json(name, {'scope': scope, 'archives': records, 'complete': False})
+        for old, new, rename in moves:
+            expected = tuple(records[old])
+            target = posixpath.join(root, new)
+            if rename:
+                try:
+                    sftp.rename(posixpath.join(root, old), target)
+                except OSError as error:
+                    if storage_box.lstat(sftp, target) is not None:
+                        raise BackupError(f'Archive rename was interrupted or conflicted: {old} -> {new}') from None
+                    raise BackupError(f'Archive rename failed: {old} -> {new}') from error
+                if storage_box.read_archive(sftp, target, limit) != expected:
+                    raise BackupError(f'Renamed archive checksum mismatch: {old} -> {new}')
+            log(f'Verified {old} -> {new} bytes={expected[0]} sha256={expected[1]}')
+        migrate_status(sftp, root, limit, records)
+        if moves:
+            write_state_json(name, {'scope': scope, 'archives': records, 'complete': True})
+        log(f'Migration complete, verified archives={len(moves)}')
 
 
 def stop_worker(process):
@@ -277,6 +356,7 @@ def main():
         subparsers.add_parser(action)
     for action in ('verify', 'restore-test'):
         subparsers.add_parser(action).add_argument('archive')
+    subparsers.add_parser('migrate-names').add_argument('--apply', action='store_true')
     args = parser.parse_args()
     os.umask(0o077)
     signal.signal(signal.SIGTERM, exit_on_signal)
@@ -290,13 +370,15 @@ def main():
         print(json.dumps(result))
         if not result:
             return 1
-        slot = datetime.strptime(result['archive'], SLOT_FORMAT).replace(tzinfo=MSK)
+        slot = storage_box.parse_archive(result['archive']).replace(tzinfo=MSK)
         return int(datetime.now(MSK) - slot > timedelta(hours=2))
     config = read_config()
-    if args.action in ('_run', 'verify', 'restore-test'):
+    if args.action in ('_run', 'verify', 'restore-test', 'migrate-names'):
         with lock():
             if args.action == '_run':
                 run_backup(config)
+            elif args.action == 'migrate-names':
+                migrate_names(config, args.apply)
             else:
                 check_archive(config, args.archive, args.action == 'restore-test')
         return 0
