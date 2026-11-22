@@ -1,5 +1,15 @@
 # Production deployments
 
+## WRP-BACKUP-NAMES-20261122-001
+
+- Completed: 2026-11-22 11:51:45 MSK.
+- Code commit: `3ef2922090bcefe31dd24ada35a8d49d0e0c2ae2`, pushed and verified on `origin/main`.
+- Storage Box container image: `sha256:003bf0ba4395cbd47285cbb4bd5cada47c5b81b14d367c7f910d83ad2eb0eed9`.
+- SFTP migration: one archive, `2026-11-22/11:00.7z` to `2026-11-22/11-00.7z`. The preflight found no destination conflicts. SHA-256 before and after: `4f66bc7cab2b7bcaf5bcff68bcdfd00f62947805c157f754617502bf2c97dae2`.
+- Validation: downloads using the old and new paths matched the archived checksum. A copy through the Windows SMB mapping matched that checksum. The downloaded archive was unpacked and restored in isolated PostgreSQL.
+- Runtime: the saved last-success path was updated with the original verification timestamp and checksum. The hourly backup container, panel and database reported healthy. The Telegram timer was active at 00:30 MSK.
+- Approval: [owner reply](codex://threads/01a20245-38d6-7f73-aa29-18dd7ce983f9), «да».
+
 ## WRP-BACKUP-20261122-001
 
 - Completed: 2026-11-22 11:21:43 MSK.
